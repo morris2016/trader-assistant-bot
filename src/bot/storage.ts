@@ -10,6 +10,7 @@ import {
   emptyAdaptiveShiftState,
   type AdaptiveShiftState,
 } from "../main/engine/adaptive-shift";
+import { emptyPaperState, type PaperState } from "./paper-engine";
 
 export type BotState = {
   /** Currently open contracts (still being tracked for settlement). */
@@ -20,6 +21,8 @@ export type BotState = {
   daily: { date: string; profit: number; tradesOpened: number; capHit: boolean };
   /** Adaptive shift state — survives bot restarts. */
   adaptiveShift: AdaptiveShiftState;
+  /** Paper trading sim — separate balance, trades, adaptive shift, equity curve. */
+  paper: PaperState;
 };
 
 const MAX_CLOSED_RETAINED = 500;
@@ -30,6 +33,7 @@ export function emptyBotState(): BotState {
     closed: [],
     daily: { date: "", profit: 0, tradesOpened: 0, capHit: false },
     adaptiveShift: emptyAdaptiveShiftState(),
+    paper: emptyPaperState(),
   };
 }
 
@@ -51,6 +55,7 @@ export class BotStorage {
         closed: (parsed.closed ?? []).slice(0, MAX_CLOSED_RETAINED),
         daily: parsed.daily ?? { date: "", profit: 0, tradesOpened: 0, capHit: false },
         adaptiveShift: parsed.adaptiveShift ?? emptyAdaptiveShiftState(),
+        paper: parsed.paper ?? emptyPaperState(),
       };
     } catch (e: any) {
       if (e?.code === "ENOENT") return emptyBotState();

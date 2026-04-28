@@ -9,6 +9,7 @@ import path from "node:path";
 import type { BotState } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
+import type { PaperState } from "./paper-engine";
 
 export type HealthSnapshot = {
   wsConnected: boolean;
@@ -23,6 +24,8 @@ export type ManualControls = {
   resetAdaptiveShift: () => void;
   /** Reset daily P&L tracking. */
   resetDaily: () => void;
+  /** Reset paper trading state to a fresh balance. */
+  resetPaper: (balance?: number) => void;
 };
 
 export type StrategyStats = {
@@ -87,6 +90,9 @@ export function startHttpServer(opts: {
   getConfig: () => Record<string, unknown>;
   /** List of subscribed (symbol, granularity) pairs. */
   getSubscriptions: () => { symbol: string; granularity: number; bars: number }[];
+  /** Paper trading state + stats. */
+  getPaperState: () => PaperState;
+  getPaperStats: () => Record<string, number>;
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -95,11 +101,15 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
           else if (path0 === "/api/control/reset-daily") opts.manualControls.resetDaily();
+          else if (path0 === "/api/control/reset-paper") {
+            const balance = url.searchParams.get("balance");
+            opts.manualControls.resetPaper(balance ? Number(balance) : undefined);
+          }
           opts.logger.info("manual control invoked", { route: path0 });
           json(res, 200, { ok: true });
           return;
@@ -168,6 +178,30 @@ export function startHttpServer(opts: {
           if (!sym) { json(res, 400, { error: "symbol required" }); return; }
           const candles = opts.getCandles(sym as SymbolCode, gr, limit);
           json(res, 200, { symbol: sym, granularity: gr, candles });
+          return;
+        }
+        if (path0 === "/api/paper") {
+          const ps = opts.getPaperState();
+          const stats = opts.getPaperStats();
+          json(res, 200, {
+            stats,
+            startingBalance: ps.startingBalance,
+            balance: ps.balance,
+            daily: ps.daily,
+            open: ps.open,
+            adaptiveShift: ps.adaptiveShift,
+          });
+          return;
+        }
+        if (path0 === "/api/paper/trades") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 1000);
+          const ps = opts.getPaperState();
+          json(res, 200, { trades: ps.closed.slice(0, limit) });
+          return;
+        }
+        if (path0 === "/api/paper/equity") {
+          const ps = opts.getPaperState();
+          json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
           return;
         }
         json(res, 404, { error: "not found" });

@@ -7,10 +7,11 @@ import { SignalsPanel } from "./panels/Signals";
 import { TradesPanel } from "./panels/Trades";
 import { AdaptivePanel } from "./panels/Adaptive";
 import { SettingsPanel } from "./panels/Settings";
+import { PaperPanel } from "./panels/Paper";
 
 const REFRESH_MS = 3000;
 
-type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "adaptive" | "settings";
+type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "paper" | "adaptive" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
@@ -18,6 +19,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "strategies", label: "Strategies", icon: "⚙" },
   { id: "signals",    label: "Signals",    icon: "⚡" },
   { id: "trades",     label: "Trades",     icon: "$" },
+  { id: "paper",      label: "Paper",      icon: "📝" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "settings",   label: "Settings",   icon: "⚙" },
 ];
@@ -79,6 +81,7 @@ export function App() {
             {tab === "strategies" && <StrategiesPanel strategies={strategies} />}
             {tab === "signals"    && <SignalsPanel />}
             {tab === "trades"     && <TradesPanel />}
+            {tab === "paper"      && <PaperPanel doAction={doAction} pending={actionPending} />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}
           </>

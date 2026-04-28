@@ -21,6 +21,8 @@ export type BotConfig = {
   logLevel: "trace" | "debug" | "info" | "warn" | "error";
   /** Set to "true" to actually place orders. "false" = signal-only dry-run. */
   liveTradingEnabled: boolean;
+  /** Paper trading enabled when liveTradingEnabled=false: simulates trades on a virtual balance. */
+  paperStartingBalance: number;
 };
 
 function getEnv(key: string, required = true): string {
@@ -76,6 +78,7 @@ export function loadConfig(): BotConfig {
     httpPort: getNum("PORT", 3000),
     logLevel: log,
     liveTradingEnabled: getBool("LIVE_TRADING", false),
+    paperStartingBalance: getNum("PAPER_BALANCE", 500),
   };
 }
 

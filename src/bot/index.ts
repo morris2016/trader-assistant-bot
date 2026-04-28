@@ -21,6 +21,7 @@ import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
 import { BotStorage } from "./storage";
 import { startHttpServer } from "./http-server";
+import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
 
 async function main() {
@@ -43,11 +44,13 @@ async function main() {
       getAccount: () => null,
       getRecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
       getSubscriptions: () => [],
+      getPaperState: () => emptyPaperState(),
+      getPaperStats: () => ({}),
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
     process.on("SIGINT", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -58,7 +61,14 @@ async function main() {
 
   const storage = new BotStorage(cfg.stateDir);
   const persisted = await storage.load();
-  log.info("state loaded", { closed: persisted.closed.length, open: persisted.open.length });
+  log.info("state loaded", { closed: persisted.closed.length, open: persisted.open.length, paperTrades: persisted.paper.closed.length, paperBalance: persisted.paper.balance });
+
+  // If paper state hasn't been initialized (or was reset), seed with config balance
+  if (persisted.paper.startingBalance !== cfg.paperStartingBalance && persisted.paper.closed.length === 0 && persisted.paper.open.length === 0) {
+    log.info("paper: seeding fresh state", { startingBalance: cfg.paperStartingBalance });
+    persisted.paper = emptyPaperState(cfg.paperStartingBalance);
+  }
+  const paper = new PaperEngine(persisted.paper);
 
   const deriv = new DerivClient({ appId: cfg.derivAppId });
   // One Engine instance per (symbol, granularity). Engine state (detector pools,
@@ -91,8 +101,10 @@ async function main() {
       closed: s.closed,
       daily: s.daily,
       adaptiveShift: real.getAdaptiveShift(),
+      paper: paper.getState(),
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
+  paper.onChange(() => persist());
 
   // Persist on every state change (settle, open, capHit, adaptive update)
   real.on("opened", (t) => { log.info("trade opened", { symbol: t.symbol, side: t.side, stake: t.stake, detector: t.detector, contractId: t.contractId }); persist(); });
@@ -119,6 +131,7 @@ async function main() {
       setPaused: (p: boolean) => { manualPaused = p; log.warn(`manual ${p ? "PAUSE" : "RESUME"} via API`); },
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
+      resetPaper: (balance?: number) => { paper.reset(balance ?? cfg.paperStartingBalance); log.warn(`paper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
     },
     getCandles: (sym, gr, limit) => (chartBuffers.get(engKey(sym, gr)) ?? []).slice(-limit),
     getStrategyStats: () => {
@@ -178,6 +191,8 @@ async function main() {
       const gr = Number(grStr);
       return { symbol: sym, granularity: gr, bars: (chartBuffers.get(k) ?? []).length };
     }),
+    getPaperState: () => paper.getState(),
+    getPaperStats: () => paper.stats() as unknown as Record<string, number>,
   });
 
   // Subscribe to all (symbol, granularity) pairs from STRATEGIES.
@@ -253,6 +268,12 @@ async function main() {
     } else if (buf) {
       buf.push(candle);
     }
+    // Settle any paper positions whose TP/SL was touched this candle
+    const settled = paper.onCandle(symbol, granularity, candle);
+    for (const c of settled) {
+      log.info(`paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${paper.getState().balance.toFixed(2)}`);
+    }
+
     // Run the matching engine (only one per key — silver_15m engine doesn't see 1h candles)
     const eng = engines.get(key);
     if (!eng) return;
@@ -261,25 +282,50 @@ async function main() {
       log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence, granularity });
       recentSignals.push(sig);
       if (recentSignals.length > SIGNAL_HISTORY) recentSignals.splice(0, recentSignals.length - SIGNAL_HISTORY);
-      executeSignal(sig, candle, key).catch((e) => log.error("execute failed", { err: (e as Error).message }));
+      executeSignal(sig, candle, key, granularity).catch((e) => log.error("execute failed", { err: (e as Error).message }));
     }
   });
 
-  async function executeSignal(sig: Signal, candle: Candle, key: string): Promise<void> {
+  async function executeSignal(sig: Signal, candle: Candle, key: string, granularity: number): Promise<void> {
     if (manualPaused) {
       log.info("manual pause skip", { symbol: sig.symbol, side: sig.action });
       return;
     }
-    if (!cfg.liveTradingEnabled) {
-      log.info("dry-run skip", { symbol: sig.symbol, side: sig.action });
-      return;
-    }
-    // Match signal to a registered strategy on this symbol — only those gate live trades.
+    // Match signal to a registered strategy on this symbol — only those gate trades.
     const matches = strategiesForSymbol(sig.symbol).filter((s) =>
       s.detectors.some((d) => d.id === sig.detector && d.enabled),
     );
     if (matches.length === 0) {
       log.debug("signal not matched to any registered strategy — ignored", { symbol: sig.symbol, detector: sig.detector });
+      return;
+    }
+    const eng = engines.get(key);
+    const atr = eng?.atrFor(sig.symbol) ?? 0;
+    const entryPriceHint = eng?.lastCloseFor(sig.symbol) ?? candle.close;
+
+    if (!cfg.liveTradingEnabled) {
+      // Paper trade: open a simulated position, settle later via candle stream.
+      const pos = paper.openPosition({
+        signalId: sig.id,
+        symbol: sig.symbol,
+        side: sig.action,
+        detector: sig.detector,
+        entryPrice: entryPriceHint,
+        atr,
+        atrTpMult: cfg.atrTpMult,
+        atrSlMult: cfg.atrSlMult,
+        multiplier: cfg.multiplier,
+        granularity,
+        candleEpoch: candle.epoch,
+        baseStake: cfg.stake,
+        minStake: 1,
+        nowMs: Date.now(),
+      });
+      if (pos) {
+        log.info(`paper opened ${pos.symbol} ${pos.side} stake=$${pos.stake.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)} shift=${pos.appliedShiftReasons}`);
+      } else {
+        log.warn(`paper open rejected ${sig.symbol} ${sig.action} (atr=${atr}, balance=$${paper.getState().balance.toFixed(2)})`);
+      }
       return;
     }
     const gate = real.canOpen();
@@ -299,8 +345,8 @@ async function main() {
         stopLossPct: cfg.stopLossPct,
         atrTpMult: cfg.atrTpMult,
         atrSlMult: cfg.atrSlMult,
-        atr: engines.get(key)?.atrFor(sig.symbol) ?? 0,
-        entryPriceHint: engines.get(key)?.lastCloseFor(sig.symbol) ?? candle.close,
+        atr,
+        entryPriceHint,
         detector: sig.detector,
       });
       log.info("placeTrade ok", { id: trade.id, contractId: trade.contractId, stake: trade.stake });

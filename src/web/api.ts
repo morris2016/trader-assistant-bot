@@ -103,6 +103,27 @@ async function post<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type PaperPosition = {
+  id: string; signalId: string; symbol: string; side: "BUY" | "SELL"; detector: string;
+  stake: number; multiplier: number; entryPrice: number; stopPrice: number; takeProfitPrice: number;
+  openedAt: number; openedAtCandleEpoch: number; granularity: number;
+  appliedShiftMultiplier: number; appliedShiftReasons: string;
+};
+export type ClosedPaperPosition = PaperPosition & {
+  closedAt: number; closedAtCandleEpoch: number; exitPrice: number;
+  result: "won" | "lost"; pnl: number; rMultiple: number;
+};
+export type PaperResp = {
+  stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;
+    trades: number; wins: number; losses: number; winRate: number; avgR: number;
+    peak: number; ddPct: number; open: number };
+  startingBalance: number; balance: number;
+  daily: Daily;
+  open: PaperPosition[];
+  adaptiveShift: AdaptiveShiftState;
+};
+export type EquityPoint = { ts: number; balance: number };
+
 export const api = {
   state: () => get<StateResp>("/api/state"),
   trades: (limit = 100) => get<{ trades: RealTrade[] }>(`/api/trades?limit=${limit}`),
@@ -114,10 +135,14 @@ export const api = {
     get<{ symbol: string; granularity: number; candles: Candle[] }>(
       `/api/candles?symbol=${encodeURIComponent(symbol)}&granularity=${granularity}&limit=${limit}`,
     ),
+  paper: () => get<PaperResp>("/api/paper"),
+  paperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/paper/trades?limit=${limit}`),
+  paperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/paper/equity"),
   pause: () => post<{ ok: boolean }>("/api/control/pause"),
   resume: () => post<{ ok: boolean }>("/api/control/resume"),
   resetAdaptive: () => post<{ ok: boolean }>("/api/control/reset-adaptive"),
   resetDaily: () => post<{ ok: boolean }>("/api/control/reset-daily"),
+  resetPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-paper${balance ? `?balance=${balance}` : ""}`),
 };
 
 export function fmtTime(ms: number | null): string {
