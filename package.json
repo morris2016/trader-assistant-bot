@@ -13,7 +13,9 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "bot:build": "esbuild src/bot/index.ts --bundle --platform=node --format=cjs --target=node20 --alias:@shared=./src/shared --external:electron --external:electron-store --outfile=dist/bot.js",
     "bot:start": "node dist/bot.js",
-    "bot:dev": "node --enable-source-maps dist/bot.js"
+    "bot:dev": "node --enable-source-maps dist/bot.js",
+    "web:build": "vite build --config vite.web.config.ts",
+    "web:dev": "vite --config vite.web.config.ts"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
