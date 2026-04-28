@@ -404,7 +404,10 @@ export class DerivClient extends EventEmitter {
           const lastEpoch = this.lastCandleEpoch.get(key);
           const isNew = lastEpoch !== candle.epoch;
           this.lastCandleEpoch.set(key, candle.epoch);
-          this.emit("candle", o.symbol as SymbolCode, candle, isNew);
+          // Emit granularity as 4th arg so multi-granularity consumers can route candles
+          // to the correct (symbol, granularity) state. Pre-existing listeners with
+          // (symbol, candle, isNew) signature ignore the extra arg.
+          this.emit("candle", o.symbol as SymbolCode, candle, isNew, o.granularity as number);
         }
         break;
       }

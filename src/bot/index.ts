@@ -61,7 +61,13 @@ async function main() {
   log.info("state loaded", { closed: persisted.closed.length, open: persisted.open.length });
 
   const deriv = new DerivClient({ appId: cfg.derivAppId });
-  const engine = new Engine(defaultDetectorConfigs(), { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
+  // One Engine instance per (symbol, granularity). Engine state (detector pools,
+  // ATR/ADX windows, recent signals) is symbol-keyed internally — running two
+  // granularities of the same symbol on the SAME engine collides them. Separate
+  // engines preserve correct per-strategy detector state.
+  const engines = new Map<string, Engine>();
+  const chartBuffers = new Map<string, Candle[]>();
+  const engKey = (sym: string, gr: number) => `${sym}|${gr}`;
   const real = new RealEngine(deriv);
   real.load(persisted);
   real.loadAdaptiveShift(persisted.adaptiveShift);
@@ -114,7 +120,7 @@ async function main() {
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
     },
-    getCandles: (sym, _gr, limit) => engine.candlesFor(sym).slice(-limit),
+    getCandles: (sym, gr, limit) => (chartBuffers.get(engKey(sym, gr)) ?? []).slice(-limit),
     getStrategyStats: () => {
       const closed = real.state().closed;
       const sigs = recentSignals;
@@ -170,7 +176,7 @@ async function main() {
     getSubscriptions: () => Array.from(subscribedKeys).map((k) => {
       const [sym, grStr] = k.split("|");
       const gr = Number(grStr);
-      return { symbol: sym, granularity: gr, bars: engine.candlesFor(sym as SymbolCode).length };
+      return { symbol: sym, granularity: gr, bars: (chartBuffers.get(k) ?? []).length };
     }),
   });
 
@@ -189,7 +195,12 @@ async function main() {
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
-          engine.seed(sym as SymbolCode, history);
+          // Per-(symbol, granularity) Engine — fresh detector state, no collision
+          // with another granularity of the same symbol.
+          const eng = new Engine(defaultDetectorConfigs(), { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
+          eng.seed(sym as SymbolCode, history);
+          engines.set(key, eng);
+          chartBuffers.set(key, [...history]);
           if (!tickedSymbols.has(sym)) {
             await deriv.subscribeTicks(sym as SymbolCode);
             tickedSymbols.add(sym);
@@ -210,18 +221,35 @@ async function main() {
     }
   }
 
-  // Candle handler — runs detectors and routes signals to placeTrade
-  deriv.on("candle", (symbol, candle, isNew) => {
-    const r = engine.onCandle(symbol, candle, isNew);
+  // Candle handler — routes the candle to the (symbol, granularity)-specific
+  // Engine and chart buffer. The granularity arg is the 4th positional emit
+  // parameter from the deriv client (added so multi-granularity can route).
+  deriv.on("candle", (symbol, candle, isNew, granularity?: number) => {
+    if (granularity == null) return; // pre-emit-update legacy event — ignore
+    const key = engKey(symbol, granularity);
+    // Update chart buffer (always, even if no engine for this key yet)
+    const buf = chartBuffers.get(key);
+    if (buf) {
+      if (isNew) {
+        buf.push(candle);
+        if (buf.length > 1500) buf.splice(0, buf.length - 1500);
+      } else if (buf.length > 0) {
+        buf[buf.length - 1] = candle;
+      }
+    }
+    // Run the matching engine (only one per key — silver_15m engine doesn't see 1h candles)
+    const eng = engines.get(key);
+    if (!eng) return;
+    const r = eng.onCandle(symbol, candle, isNew);
     for (const sig of r.signals) {
-      log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence });
+      log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence, granularity });
       recentSignals.push(sig);
       if (recentSignals.length > SIGNAL_HISTORY) recentSignals.splice(0, recentSignals.length - SIGNAL_HISTORY);
-      executeSignal(sig, candle).catch((e) => log.error("execute failed", { err: (e as Error).message }));
+      executeSignal(sig, candle, key).catch((e) => log.error("execute failed", { err: (e as Error).message }));
     }
   });
 
-  async function executeSignal(sig: Signal, candle: Candle): Promise<void> {
+  async function executeSignal(sig: Signal, candle: Candle, key: string): Promise<void> {
     if (manualPaused) {
       log.info("manual pause skip", { symbol: sig.symbol, side: sig.action });
       return;
@@ -255,8 +283,8 @@ async function main() {
         stopLossPct: cfg.stopLossPct,
         atrTpMult: cfg.atrTpMult,
         atrSlMult: cfg.atrSlMult,
-        atr: engine.atrFor(sig.symbol),
-        entryPriceHint: engine.lastCloseFor(sig.symbol) ?? candle.close,
+        atr: engines.get(key)?.atrFor(sig.symbol) ?? 0,
+        entryPriceHint: engines.get(key)?.lastCloseFor(sig.symbol) ?? candle.close,
         detector: sig.detector,
       });
       log.info("placeTrade ok", { id: trade.id, contractId: trade.contractId, stake: trade.stake });
