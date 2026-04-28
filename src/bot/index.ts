@@ -227,15 +227,31 @@ async function main() {
   deriv.on("candle", (symbol, candle, isNew, granularity?: number) => {
     if (granularity == null) return; // pre-emit-update legacy event — ignore
     const key = engKey(symbol, granularity);
-    // Update chart buffer (always, even if no engine for this key yet)
+    // Update chart buffer using epoch-aware merge. Deriv's WS may emit ohlc
+    // updates that alternate between the just-closed bar and the in-progress
+    // bar within the same tick — trusting `isNew` causes duplicate pushes
+    // that evict seeded history. Compare epochs against the buffer tail:
+    //   - greater than last → append
+    //   - equal to last     → update in place
+    //   - equal to N-th-last → update that slot (handles bar revisions)
+    //   - older / unknown   → ignore (out-of-order or stale)
     const buf = chartBuffers.get(key);
-    if (buf) {
-      if (isNew) {
+    if (buf && buf.length > 0) {
+      const lastIdx = buf.length - 1;
+      const lastEpoch = buf[lastIdx].epoch;
+      if (candle.epoch > lastEpoch) {
         buf.push(candle);
         if (buf.length > 1500) buf.splice(0, buf.length - 1500);
-      } else if (buf.length > 0) {
-        buf[buf.length - 1] = candle;
+      } else if (candle.epoch === lastEpoch) {
+        buf[lastIdx] = candle;
+      } else {
+        // Search backward up to 5 bars for a matching epoch (revision of a recent bar)
+        for (let i = lastIdx - 1; i >= Math.max(0, lastIdx - 5); i--) {
+          if (buf[i].epoch === candle.epoch) { buf[i] = candle; break; }
+        }
       }
+    } else if (buf) {
+      buf.push(candle);
     }
     // Run the matching engine (only one per key — silver_15m engine doesn't see 1h candles)
     const eng = engines.get(key);
