@@ -22,34 +22,13 @@ FROM node:20-slim
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Persisted state directory (Railway volume should mount here)
+# Persisted state directory (Railway volume mounts here)
 RUN mkdir -p /app/state
 
-# ───── Default env vars (override any of these in Railway dashboard) ─────
-# Only DERIV_TOKEN must be set in Railway. All others have sensible defaults
-# baked here so the dashboard stays clean — set only what you want to override.
-
-# Lifecycle / infra
+# Only NON-CONFIGURABLE infra paths baked in. Everything else (stake, R:R,
+# multiplier, etc.) is set in Railway dashboard via .env.railway paste —
+# keeps every value visible and editable in the Railway UI.
 ENV STATE_DIR=/app/state
-ENV LOG_LEVEL=info
-ENV DERIV_APP_ID=1089
-
-# Safety (flip to true after dry-run verification)
-ENV LIVE_TRADING=false
-
-# Risk caps (USD)
-ENV STAKE=40
-ENV DAILY_MAX_LOSS=50
-
-# Contract config (matches validated strategies)
-ENV CONTRACT_FAMILY=MULTIPLIER
-ENV MULTIPLIER=30
-ENV TP_SL_MODE=atr
-ENV ATR_TP_MULT=2
-ENV ATR_SL_MULT=1
-ENV DURATION_TICKS=10
-ENV TP_PCT=20
-ENV SL_PCT=10
 
 COPY --from=build /app/dist/bot.js /app/bot.js
 
