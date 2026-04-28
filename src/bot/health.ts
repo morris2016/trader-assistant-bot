@@ -34,10 +34,22 @@ export function startHealthServer(opts: {
       return;
     }
     if (url.pathname === "/health") {
+      // Liveness: container is alive and the HTTP server is responsive.
+      // WS connection / auth are reported via /state and don't gate liveness —
+      // the bot may be in reconnect backoff during transient network issues
+      // and we don't want Railway to kill it for that.
       const h = opts.getHealth();
-      const healthy = h.wsConnected && h.authorized;
-      res.statusCode = healthy ? 200 : 503;
-      res.end(JSON.stringify({ healthy, ...h }));
+      res.statusCode = 200;
+      res.end(JSON.stringify({ healthy: true, ...h }));
+      return;
+    }
+    if (url.pathname === "/ready") {
+      // Readiness: container is fully connected to Deriv and authorized.
+      // Use this for a more strict downstream check (not required by Railway).
+      const h = opts.getHealth();
+      const ready = h.wsConnected && h.authorized;
+      res.statusCode = ready ? 200 : 503;
+      res.end(JSON.stringify({ ready, ...h }));
       return;
     }
     if (url.pathname === "/state") {
@@ -62,8 +74,9 @@ export function startHealthServer(opts: {
     res.statusCode = 404;
     res.end(JSON.stringify({ error: "not found" }));
   });
-  server.listen(opts.port, () => {
-    opts.logger.info("health server listening", { port: opts.port });
+  // Bind to 0.0.0.0 so Railway can reach us from outside the container.
+  server.listen(opts.port, "0.0.0.0", () => {
+    opts.logger.info("health server listening", { port: opts.port, host: "0.0.0.0" });
   });
   server.on("error", (err) => {
     opts.logger.error("health server error", { err: (err as Error).message });

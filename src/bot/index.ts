@@ -22,7 +22,27 @@ import { BotStorage } from "./storage";
 import { startHealthServer } from "./health";
 
 async function main() {
-  const cfg = loadConfig();
+  // Start a minimal logger BEFORE config so any config error gets logged.
+  const bootLog = new Logger((process.env.LOG_LEVEL as any) ?? "info");
+  let cfg;
+  try {
+    cfg = loadConfig();
+  } catch (e) {
+    // Config invalid — keep container alive so Railway healthcheck passes,
+    // surface the error via /state. Operator fixes env vars and Railway redeploys.
+    bootLog.error("config load failed — bot will idle, fix env vars and redeploy", { err: (e as Error).message });
+    const port = Number(process.env.PORT ?? 3000);
+    const idleHealth = startHealthServer({
+      port,
+      logger: bootLog,
+      getHealth: () => ({ wsConnected: false, authorized: false, uptimeSec: 0 }),
+      getState: () => ({ open: [], closed: [], daily: { date: "", profit: 0, tradesOpened: 0, capHit: false }, adaptiveShift: { consecLosses: 0, buyHistory: [], sellHistory: [], metalsLossEpochs: [], metalsThrottleUntil: 0 } }),
+      getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
+    });
+    process.on("SIGTERM", () => { idleHealth.close().finally(() => process.exit(0)); });
+    process.on("SIGINT", () => { idleHealth.close().finally(() => process.exit(0)); });
+    return; // idle forever; do not throw (would trigger restart loop)
+  }
   const log = new Logger(cfg.logLevel);
   log.info("bot starting", { config: describeConfig(cfg), strategies: STRATEGIES.map((s) => s.id) });
 
