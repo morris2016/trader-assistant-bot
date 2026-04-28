@@ -109,16 +109,17 @@ async function main() {
           engine.seed(sym as SymbolCode, history);
           await deriv.subscribeTicks(sym as SymbolCode);
           subscribedKeys.add(key);
-          log.info("subscribed", { symbol: sym, granularity: gr, seeded: history.length, attempt: attempt + 1 });
+          log.info(`subscribed ${sym}@${gr}s (seeded=${history.length}, attempt=${attempt + 1})`);
           lastErr = null;
           break;
         } catch (e) {
           lastErr = e as Error;
+          log.warn(`subscribe attempt ${attempt + 1}/3 failed ${sym}@${gr}s: ${lastErr.message}`);
           if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
         }
       }
       if (lastErr) {
-        log.error("subscribe failed after retries", { symbol: sym, granularity: gr, err: lastErr.message });
+        log.error(`subscribe failed after 3 retries ${sym}@${gr}s: ${lastErr.message}`);
       }
     }
   }
