@@ -8,7 +8,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { BotState } from "./storage";
 import type { Logger } from "./logger";
-import type { Signal, RealTrade, AccountInfo } from "@shared/types";
+import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 
 export type HealthSnapshot = {
   wsConnected: boolean;
@@ -23,6 +23,31 @@ export type ManualControls = {
   resetAdaptiveShift: () => void;
   /** Reset daily P&L tracking. */
   resetDaily: () => void;
+};
+
+export type StrategyStats = {
+  id: string;
+  name: string;
+  description: string;
+  symbols: string[];
+  granularity: number;
+  validation: {
+    expectancyR?: number;
+    winRate?: number;
+    pnlUsd?: number;
+    trades?: number;
+  };
+  live: {
+    signals: number;
+    trades: number;
+    wins: number;
+    losses: number;
+    pnlUsd: number;
+    winRate: number;
+    expectancyR: number;
+    lastSignalAt: number | null;
+    lastTradeAt: number | null;
+  };
 };
 
 export type HttpServerHandle = {
@@ -54,6 +79,14 @@ export function startHttpServer(opts: {
   getRecentSignals: () => Signal[];
   getAdaptiveShiftDescription: () => string;
   manualControls: ManualControls;
+  /** Per-(symbol,granularity) candle history for chart rendering. */
+  getCandles: (symbol: SymbolCode, granularity: number, limit: number) => Candle[];
+  /** Enriched per-strategy stats (live signals + trades + WR). */
+  getStrategyStats: () => StrategyStats[];
+  /** Read-only view of effective bot config (no secrets). */
+  getConfig: () => Record<string, unknown>;
+  /** List of subscribed (symbol, granularity) pairs. */
+  getSubscriptions: () => { symbol: string; granularity: number; bars: number }[];
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -114,6 +147,27 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/account") {
           json(res, 200, { account: opts.getAccount() });
+          return;
+        }
+        if (path0 === "/api/strategies") {
+          json(res, 200, { strategies: opts.getStrategyStats() });
+          return;
+        }
+        if (path0 === "/api/config") {
+          json(res, 200, { config: opts.getConfig() });
+          return;
+        }
+        if (path0 === "/api/subscriptions") {
+          json(res, 200, { subscriptions: opts.getSubscriptions() });
+          return;
+        }
+        if (path0 === "/api/candles") {
+          const sym = url.searchParams.get("symbol") ?? "";
+          const gr = Number(url.searchParams.get("granularity") ?? 3600);
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 500), 50, 2000);
+          if (!sym) { json(res, 400, { error: "symbol required" }); return; }
+          const candles = opts.getCandles(sym as SymbolCode, gr, limit);
+          json(res, 200, { symbol: sym, granularity: gr, candles });
           return;
         }
         json(res, 404, { error: "not found" });

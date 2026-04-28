@@ -44,6 +44,10 @@ async function main() {
       getRecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
       manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {} },
+      getCandles: () => [],
+      getStrategyStats: () => [],
+      getConfig: () => ({ error: (e as Error).message }),
+      getSubscriptions: () => [],
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
     process.on("SIGINT", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -110,6 +114,64 @@ async function main() {
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
     },
+    getCandles: (sym, _gr, limit) => engine.candlesFor(sym).slice(-limit),
+    getStrategyStats: () => {
+      const closed = real.state().closed;
+      const sigs = recentSignals;
+      return STRATEGIES.map((s) => {
+        const detIds = s.detectors.filter((d) => d.enabled).map((d) => d.id);
+        const sSyms = new Set(s.symbols);
+        const sigsForStrat = sigs.filter((sg) => sSyms.has(sg.symbol) && detIds.includes(sg.detector));
+        const tradesForStrat = closed.filter((t) => sSyms.has(t.symbol) && detIds.includes(t.detector));
+        const wins = tradesForStrat.filter((t) => (t.profit ?? 0) > 0).length;
+        const pnl = tradesForStrat.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+        return {
+          id: s.id,
+          name: s.name,
+          description: s.description,
+          symbols: s.symbols,
+          granularity: s.granularity,
+          validation: {
+            expectancyR: s.validation?.expectancyR,
+            winRate: s.validation?.winRate,
+            pnlUsd: s.validation?.pnlUsd,
+            trades: s.validation?.trades,
+          },
+          live: {
+            signals: sigsForStrat.length,
+            trades: tradesForStrat.length,
+            wins,
+            losses: tradesForStrat.length - wins,
+            pnlUsd: pnl,
+            winRate: tradesForStrat.length ? wins / tradesForStrat.length : 0,
+            expectancyR: 0, // computed only when we have stop/entry per trade — defer
+            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.emittedAt)) : null,
+            lastTradeAt: tradesForStrat.length ? Math.max(...tradesForStrat.map((t) => t.closedAt ?? 0)) : null,
+          },
+        };
+      });
+    },
+    getConfig: () => ({
+      stake: cfg.stake,
+      dailyMaxLoss: cfg.dailyMaxLoss,
+      contractFamily: cfg.contractFamily,
+      multiplier: cfg.multiplier,
+      durationTicks: cfg.durationTicks,
+      tpSlMode: cfg.tpSlMode,
+      atrTpMult: cfg.atrTpMult,
+      atrSlMult: cfg.atrSlMult,
+      takeProfitPct: cfg.takeProfitPct,
+      stopLossPct: cfg.stopLossPct,
+      liveTradingEnabled: cfg.liveTradingEnabled,
+      derivAppId: cfg.derivAppId,
+      logLevel: cfg.logLevel,
+      stateDir: cfg.stateDir,
+    }),
+    getSubscriptions: () => Array.from(subscribedKeys).map((k) => {
+      const [sym, grStr] = k.split("|");
+      const gr = Number(grStr);
+      return { symbol: sym, granularity: gr, bars: engine.candlesFor(sym as SymbolCode).length };
+    }),
   });
 
   // Subscribe to all (symbol, granularity) pairs from STRATEGIES.

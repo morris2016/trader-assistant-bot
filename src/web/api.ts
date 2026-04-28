@@ -1,5 +1,4 @@
-// Tiny API client for the bot dashboard.
-// Same-origin requests — no CORS, no base URL config.
+// API client for the bot dashboard. Same-origin, no CORS, no base URL.
 
 export type AdaptiveShiftState = {
   consecLosses: number;
@@ -9,12 +8,7 @@ export type AdaptiveShiftState = {
   metalsThrottleUntil: number;
 };
 
-export type Daily = {
-  date: string;
-  profit: number;
-  tradesOpened: number;
-  capHit: boolean;
-};
+export type Daily = { date: string; profit: number; tradesOpened: number; capHit: boolean };
 
 export type Account = {
   loginid: string;
@@ -73,6 +67,30 @@ export type Signal = {
   emittedAt: number;
 };
 
+export type StrategyStats = {
+  id: string;
+  name: string;
+  description: string;
+  symbols: string[];
+  granularity: number;
+  validation: { expectancyR?: number; winRate?: number; pnlUsd?: number; trades?: number };
+  live: {
+    signals: number;
+    trades: number;
+    wins: number;
+    losses: number;
+    pnlUsd: number;
+    winRate: number;
+    expectancyR: number;
+    lastSignalAt: number | null;
+    lastTradeAt: number | null;
+  };
+};
+
+export type Subscription = { symbol: string; granularity: number; bars: number };
+
+export type Candle = { epoch: number; open: number; high: number; low: number; close: number };
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`${res.status} ${path}`);
@@ -89,8 +107,48 @@ export const api = {
   state: () => get<StateResp>("/api/state"),
   trades: (limit = 100) => get<{ trades: RealTrade[] }>(`/api/trades?limit=${limit}`),
   signals: (limit = 100) => get<{ signals: Signal[] }>(`/api/signals?limit=${limit}`),
+  strategies: () => get<{ strategies: StrategyStats[] }>("/api/strategies"),
+  subscriptions: () => get<{ subscriptions: Subscription[] }>("/api/subscriptions"),
+  config: () => get<{ config: Record<string, unknown> }>("/api/config"),
+  candles: (symbol: string, granularity: number, limit = 500) =>
+    get<{ symbol: string; granularity: number; candles: Candle[] }>(
+      `/api/candles?symbol=${encodeURIComponent(symbol)}&granularity=${granularity}&limit=${limit}`,
+    ),
   pause: () => post<{ ok: boolean }>("/api/control/pause"),
   resume: () => post<{ ok: boolean }>("/api/control/resume"),
   resetAdaptive: () => post<{ ok: boolean }>("/api/control/reset-adaptive"),
   resetDaily: () => post<{ ok: boolean }>("/api/control/reset-daily"),
 };
+
+export function fmtTime(ms: number | null): string {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+export function fmtUptime(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+  return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
+}
+
+export function fmtAgo(ms: number | null): string {
+  if (!ms) return "never";
+  const sec = Math.floor((Date.now() - ms) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
+export function fmtGranularity(gr: number): string {
+  if (gr === 60) return "1m";
+  if (gr === 300) return "5m";
+  if (gr === 900) return "15m";
+  if (gr === 1800) return "30m";
+  if (gr === 3600) return "1h";
+  if (gr === 14400) return "4h";
+  if (gr === 86400) return "1d";
+  return `${gr}s`;
+}
