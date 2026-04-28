@@ -6,8 +6,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev=false
 
-# Source
-COPY tsconfig.json tsconfig.node.json vite.web.config.ts ./
+# Source — include all tsconfigs (root references web/node)
+COPY tsconfig.json tsconfig.node.json tsconfig.web.json vite.web.config.ts ./
 COPY src/ ./src/
 
 # Bundle bot (Node) — single CJS file
