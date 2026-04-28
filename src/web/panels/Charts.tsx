@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { createChart, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
+import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
 import { api, fmtGranularity, type Candle, type Subscription } from "../api";
 
 export function ChartsPanel({ subs }: { subs: Subscription[] }) {
@@ -68,7 +68,8 @@ function ChartCanvas({ symbolKey }: { symbolKey: string }) {
       rightPriceScale: { borderColor: "#2a3343" },
       crosshair: { mode: 0 },
     });
-    const series = chart.addCandlestickSeries({
+    // lightweight-charts v5 API: addSeries(SeriesType, options)
+    const series = chart.addSeries(CandlestickSeries, {
       upColor: "#3fb950",
       downColor: "#f85149",
       borderUpColor: "#3fb950",
