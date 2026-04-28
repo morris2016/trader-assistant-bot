@@ -1,0 +1,40 @@
+{
+  "name": "trader-assistant-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop trader assistant for Deriv — live WS feed, SMC detectors, backtest, paper + real trading",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "node scripts/run.mjs dev",
+    "build": "node scripts/run.mjs build",
+    "start": "node scripts/run.mjs preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "bot:build": "esbuild src/bot/index.ts --bundle --platform=node --format=cjs --target=node20 --alias:@shared=./src/shared --external:electron --external:electron-store --outfile=dist/bot.js",
+    "bot:start": "node dist/bot.js",
+    "bot:dev": "node --enable-source-maps dist/bot.js"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "lightweight-charts": "^5.0.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.18.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^10.1.0",
+    "electron": "^33.2.1",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

@@ -1,0 +1,18 @@
+node_modules/
+out/
+dist/
+release/
+.vite/
+.DS_Store
+*.log
+.env
+.env.local
+
+# bot local state (live trades, adaptive shift) — never commit
+state/
+.tmp/
+*-state.json
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,143 @@
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #0b0f1a;
+  color: #e0e5f5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+}
+
+button {
+  font-family: inherit;
+}
+
+a { color: inherit; text-decoration: none; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #1e2842; border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100vh;
+}
+
+.nav {
+  background: #12182a;
+  border-right: 1px solid #1e2842;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 12px;
+  gap: 4px;
+}
+.nav-title {
+  color: #5fd4a4;
+  font-weight: 700;
+  font-size: 16px;
+  padding: 8px 12px 20px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.nav-link {
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #8a95b8;
+  font-weight: 500;
+}
+.nav-link:hover { background: #1a2240; color: #e0e5f5; }
+.nav-link.active { background: #1e4a38; color: #5fd4a4; }
+
+.nav-footer { margin-top: auto; display: flex; gap: 8px; flex-direction: column; }
+.status-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #d4a35f;
+}
+.status-dot.ok { background: #5fd4a4; }
+.status-dot.off { background: #6b7390; }
+.status-row {
+  display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px;
+  background: #0e1528; font-size: 11px; color: #8a95b8;
+}
+
+.main { overflow: auto; }
+
+.page { padding: 24px; }
+
+.section { margin-bottom: 24px; }
+.section-title {
+  color: #5fd4a4; font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.6px; margin: 0 0 10px;
+}
+
+.card {
+  background: #12182a; border: 1px solid #1e2842; border-radius: 10px; padding: 16px;
+}
+
+.toolbar {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 12px 24px; background: #0e1528; border-bottom: 1px solid #1e2842;
+}
+.toolbar select, .toolbar input {
+  background: #12182a; color: #e0e5f5; border: 1px solid #1e2842;
+  padding: 6px 10px; border-radius: 6px; font-size: 13px;
+}
+
+.btn {
+  padding: 8px 14px; border-radius: 8px; border: 1px solid #1e2842;
+  background: #12182a; color: #e0e5f5; cursor: pointer; font-weight: 600; font-size: 13px;
+}
+.btn:hover { background: #1a2240; }
+.btn-primary {
+  background: #5fd4a4; color: #0b0f1a; border-color: #5fd4a4;
+}
+.btn-primary:hover { background: #7be2b7; }
+.btn-danger {
+  background: transparent; color: #e05f8a; border-color: #e05f8a;
+}
+
+.stats-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+}
+.stat {
+  background: #12182a; padding: 12px; border-radius: 8px; border: 1px solid #1e2842;
+}
+.stat-label { color: #8a95b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+.stat-value.ok { color: #5fd4a4; }
+.stat-value.bad { color: #e05f8a; }
+.stat-value.neutral { color: #e0e5f5; }
+
+.signal-row, .pos-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+  background: #12182a; border-radius: 8px; margin-bottom: 6px; border: 1px solid #1e2842;
+}
+.pill { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.pill-buy { background: #1e4a38; color: #5fd4a4; }
+.pill-sell { background: #4a1e2e; color: #e05f8a; }
+
+.chart-wrap { position: relative; background: #12182a; border: 1px solid #1e2842; border-radius: 10px; overflow: hidden; }
+.chart-price-tag {
+  position: absolute; top: 10px; left: 14px;
+  font-size: 18px; font-weight: 700;
+  color: #e0e5f5; pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+}
+.chart-price-tag .sym { color: #8a95b8; font-size: 12px; font-weight: 600; margin-right: 6px; letter-spacing: 0.6px; }
+
+.empty-state { color: #6b7390; font-style: italic; padding: 24px; text-align: center; }
+
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.field label { color: #8a95b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.field input, .field select, .field textarea {
+  background: #0e1528; color: #e0e5f5; border: 1px solid #1e2842;
+  padding: 10px 12px; border-radius: 6px; font-size: 13px; font-family: inherit;
+}
+
+.toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.toggle input { width: 18px; height: 18px; }
