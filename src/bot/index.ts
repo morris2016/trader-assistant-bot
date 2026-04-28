@@ -94,10 +94,12 @@ async function main() {
   });
 
   // Subscribe to all (symbol, granularity) pairs from STRATEGIES.
-  // Per pair: up to 3 retries with backoff for transient WS hiccups.
+  // Tick subscriptions are deduped by symbol — Deriv allows multiple candle
+  // granularities per symbol but only ONE tick stream per symbol.
   async function subscribeAll() {
     const pairs = new Set<string>();
     for (const s of STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
+    const tickedSymbols = new Set<string>();
     for (const key of pairs) {
       if (subscribedKeys.has(key)) continue;
       const [sym, grStr] = key.split("|");
@@ -107,7 +109,10 @@ async function main() {
         try {
           const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
           engine.seed(sym as SymbolCode, history);
-          await deriv.subscribeTicks(sym as SymbolCode);
+          if (!tickedSymbols.has(sym)) {
+            await deriv.subscribeTicks(sym as SymbolCode);
+            tickedSymbols.add(sym);
+          }
           subscribedKeys.add(key);
           log.info(`subscribed ${sym}@${gr}s (seeded=${history.length}, attempt=${attempt + 1})`);
           lastErr = null;
