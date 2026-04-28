@@ -59,6 +59,7 @@ async function main() {
 
   let wsConnected = false;
   let authorized = false;
+  let isFirstConnection = true;
   const startTs = Date.now();
   let shuttingDown = false;
   const subscribedKeys = new Set<string>();
@@ -92,7 +93,8 @@ async function main() {
     getAdaptiveShiftDescription: () => real.describeAdaptiveShift(),
   });
 
-  // Subscribe to all (symbol, granularity) pairs from STRATEGIES
+  // Subscribe to all (symbol, granularity) pairs from STRATEGIES.
+  // Per pair: up to 3 retries with backoff for transient WS hiccups.
   async function subscribeAll() {
     const pairs = new Set<string>();
     for (const s of STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
@@ -100,14 +102,23 @@ async function main() {
       if (subscribedKeys.has(key)) continue;
       const [sym, grStr] = key.split("|");
       const gr = Number(grStr);
-      try {
-        const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
-        engine.seed(sym as SymbolCode, history);
-        await deriv.subscribeTicks(sym as SymbolCode);
-        subscribedKeys.add(key);
-        log.info("subscribed", { symbol: sym, granularity: gr, seeded: history.length });
-      } catch (e) {
-        log.error("subscribe failed", { symbol: sym, granularity: gr, err: (e as Error).message });
+      let lastErr: Error | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
+          engine.seed(sym as SymbolCode, history);
+          await deriv.subscribeTicks(sym as SymbolCode);
+          subscribedKeys.add(key);
+          log.info("subscribed", { symbol: sym, granularity: gr, seeded: history.length, attempt: attempt + 1 });
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e as Error;
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        }
+      }
+      if (lastErr) {
+        log.error("subscribe failed after retries", { symbol: sym, granularity: gr, err: lastErr.message });
       }
     }
   }
@@ -161,10 +172,13 @@ async function main() {
     }
   }
 
-  // WS lifecycle. DerivClient has its own auto-reconnect — we just react to events.
+  // WS lifecycle. DerivClient has its own auto-reconnect AND auto-resubscribe.
+  // We do FULL subscribe flow only on first connection. On reconnects, the
+  // client itself replays subscriptions — we just re-authorize.
   deriv.on("open", async () => {
     wsConnected = true;
-    log.info("ws connected");
+    const reconnect = !isFirstConnection;
+    log.info("ws connected", { reconnect });
     try {
       const info = await deriv.authorize(cfg.derivToken);
       real.setAccount({
@@ -178,9 +192,15 @@ async function main() {
       authorized = true;
       log.info("authorized", { loginid: info.loginid, currency: info.currency, virtual: info.is_virtual === 1, balance: info.balance });
       await deriv.subscribeBalance().catch((e) => log.warn("subscribeBalance failed", { err: (e as Error).message }));
-      subscribedKeys.clear();
-      await subscribeAll();
-      log.info("bot ready", { liveTrading: cfg.liveTradingEnabled, strategies: STRATEGIES.length, subs: subscribedKeys.size });
+
+      if (reconnect) {
+        // DerivClient's resubscribeAll() already handled it. Don't double-subscribe.
+        log.info("reconnect — relying on client auto-resubscribe", { previouslySubscribed: subscribedKeys.size });
+      } else {
+        await subscribeAll();
+        isFirstConnection = false;
+        log.info("bot ready", { liveTrading: cfg.liveTradingEnabled, strategies: STRATEGIES.length, subs: subscribedKeys.size });
+      }
     } catch (e) {
       log.error("authorize/subscribe failed", { err: (e as Error).message });
       authorized = false;
@@ -190,8 +210,10 @@ async function main() {
   deriv.on("close", () => {
     wsConnected = false;
     authorized = false;
-    subscribedKeys.clear();
     log.warn("ws closed (client will auto-reconnect)");
+    // Note: keep subscribedKeys populated. The deriv client maintains its
+    // own subscription registry and resubscribes on reconnect. Clearing
+    // ours would mistakenly re-trigger subscribeAll on the next "open".
   });
   deriv.on("error", (err) => log.error("deriv error", { err: err.message ?? String(err) }));
   deriv.on("balance", (b) => log.debug("balance", { balance: b.balance, currency: b.currency }));
