@@ -9,10 +9,11 @@ import { AdaptivePanel } from "./panels/Adaptive";
 import { SettingsPanel } from "./panels/Settings";
 import { PaperPanel } from "./panels/Paper";
 import { SynthPaperPanel } from "./panels/SynthPaper";
+import { ControlPanel } from "./panels/Control";
 
 const REFRESH_MS = 3000;
 
-type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "paper" | "synth" | "adaptive" | "settings";
+type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "paper" | "synth" | "control" | "adaptive" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
@@ -22,6 +23,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "trades",     label: "Trades",     icon: "$" },
   { id: "paper",      label: "Paper",      icon: "📝" },
   { id: "synth",      label: "Synth",      icon: "🧪" },
+  { id: "control",    label: "Control",    icon: "🎯" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "settings",   label: "Settings",   icon: "⚙" },
 ];
@@ -85,6 +87,7 @@ export function App() {
             {tab === "trades"     && <TradesPanel />}
             {tab === "paper"      && <PaperPanel doAction={doAction} pending={actionPending} />}
             {tab === "synth"      && <SynthPaperPanel doAction={doAction} pending={actionPending} />}
+            {tab === "control"    && <ControlPanel />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}
           </>
