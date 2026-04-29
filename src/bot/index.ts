@@ -16,6 +16,7 @@ import { RealEngine } from "../main/engine/real";
 import { STRATEGIES } from "../main/engine/strategies";
 import { strategiesForSymbol } from "../main/engine/strategies";
 import { SYNTH_STRATEGIES, isSynthSymbol, synthStrategiesForSymbol } from "../main/engine/synth-strategies";
+import { CONTROL_ASSETS, isControlSymbol, controlAssetForKey } from "../main/engine/control-assets";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
@@ -56,6 +57,8 @@ async function main() {
       getSynthPaperStats: () => ({}),
       getSynthStrategyStats: () => [],
       getDiagnostics: () => [],
+      isControlSymbol: () => false,
+      getControlAssets: () => [],
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
     process.on("SIGINT", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -245,6 +248,8 @@ async function main() {
     getPaperStats: () => paper.stats() as unknown as Record<string, number>,
     getSynthPaperState: () => synthPaper.getState(),
     getSynthPaperStats: () => synthPaper.stats() as unknown as Record<string, number>,
+    isControlSymbol: (sym: string) => isControlSymbol(sym),
+    getControlAssets: () => CONTROL_ASSETS.map((c) => ({ symbol: c.symbol, granularity: c.granularity, label: c.label })),
     getDiagnostics: () => Array.from(engines.entries()).map(([key, eng]) => {
       const [sym, grStr] = key.split("|");
       const gr = Number(grStr);
@@ -289,6 +294,9 @@ async function main() {
     // Also subscribe to synth-strategy pairs — they share the same engine map and
     // candle pipeline; synth signals get routed to synthPaper in executeSignal.
     for (const s of SYNTH_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
+    // Control-experiment assets — generate signals (visible in UI) but do NOT open
+    // any position. Lets us verify the signal pipeline independently of trading.
+    for (const c of CONTROL_ASSETS) pairs.add(`${c.symbol}|${c.granularity}`);
     const tickedSymbols = new Set<string>();
     for (const key of pairs) {
       if (subscribedKeys.has(key)) continue;
@@ -303,7 +311,10 @@ async function main() {
           // detector configs with their validated params (e.g. JD100 Sweep needs
           // stopBufferAtrMul=0.25, not the default 0.1).
           const synthMatch = SYNTH_STRATEGIES.find((s) => s.symbols.includes(sym) && s.granularity === gr);
-          const detectorConfigs = synthMatch ? synthMatch.detectors : defaultDetectorConfigs();
+          const controlMatch = controlAssetForKey(sym, gr);
+          const detectorConfigs = synthMatch ? synthMatch.detectors
+            : controlMatch ? controlMatch.detectors
+            : defaultDetectorConfigs();
           const eng = new Engine(detectorConfigs, { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
           eng.seed(sym as SymbolCode, history);
           engines.set(key, eng);
@@ -393,6 +404,12 @@ async function main() {
   async function executeSignal(sig: Signal, candle: Candle, key: string, granularity: number): Promise<void> {
     if (manualPaused) {
       log.info("manual pause skip", { symbol: sig.symbol, side: sig.action });
+      return;
+    }
+    // Control-experiment assets: signal is logged + recorded for UI/diagnostics
+    // but never opens a paper or real position. Pure pipeline observability.
+    if (isControlSymbol(sig.symbol)) {
+      log.info(`control signal observed (no trade) ${sig.symbol} ${sig.action} ${sig.detector}`);
       return;
     }
     const eng = engines.get(key);

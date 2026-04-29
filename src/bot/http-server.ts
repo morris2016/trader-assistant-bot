@@ -108,6 +108,10 @@ export function startHttpServer(opts: {
   getSynthStrategyStats: () => StrategyStats[];
   /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
   getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
+  /** Whether a symbol belongs to the control-experiment universe. */
+  isControlSymbol: (symbol: string) => boolean;
+  /** Control asset metadata (symbol, granularity, label). */
+  getControlAssets: () => Array<{ symbol: string; granularity: number; label: string }>;
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -263,6 +267,12 @@ export function startHttpServer(opts: {
           const synthSyms = new Set(opts.getSynthStrategyStats().flatMap((s) => s.symbols));
           const sigs = opts.getRecentSignals().filter((s) => synthSyms.has(s.symbol)).slice(-limit).reverse();
           json(res, 200, { signals: sigs });
+          return;
+        }
+        if (path0 === "/api/control-signals") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
+          const sigs = opts.getRecentSignals().filter((s) => opts.isControlSymbol(s.symbol)).slice(-limit).reverse();
+          json(res, 200, { signals: sigs, controlAssets: opts.getControlAssets() });
           return;
         }
         if (path0 === "/api/diag") {
