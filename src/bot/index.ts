@@ -280,6 +280,35 @@ async function main() {
     },
   });
 
+  // Build the per-(sym, gr) engine detector config by merging every strategy
+  // (real + synth) that runs on this key. Each detector starts disabled with
+  // default params; for each matching strategy, any detector that strategy
+  // enables is copied in with that strategy's validated params and flipped on.
+  // Handles the gold_ob + gold_fvg case where two strategies share
+  // (frxXAUUSD, 3600) but enable different detectors. Collisions on the same
+  // detector across strategies log a warning — currently impossible by
+  // construction (each strategy enables exactly one distinct detector per key).
+  function buildEngineDetectorConfigs(sym: string, gr: number) {
+    const merged = defaultDetectorConfigs().map((d) => ({ ...d, enabled: false }));
+    const matches = [
+      ...STRATEGIES.filter((s) => s.symbols.includes(sym as SymbolCode) && s.granularity === gr),
+      ...SYNTH_STRATEGIES.filter((s) => s.symbols.includes(sym) && s.granularity === gr),
+    ];
+    for (const strat of matches) {
+      for (const sd of strat.detectors) {
+        if (!sd.enabled) continue;
+        const slot = merged.find((m) => m.id === sd.id);
+        if (!slot) continue;
+        if (slot.enabled) {
+          log.warn(`detector ${sd.id} on ${sym}@${gr}s enabled by multiple strategies — using ${strat.id}'s params (last write wins)`);
+        }
+        slot.enabled = true;
+        slot.params = { ...sd.params };
+      }
+    }
+    return merged;
+  }
+
   // Subscribe to all (symbol, granularity) pairs from STRATEGIES.
   // Tick subscriptions are deduped by symbol — Deriv allows multiple candle
   // granularities per symbol but only ONE tick stream per symbol.
@@ -299,11 +328,11 @@ async function main() {
         try {
           const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
           // Per-(symbol, granularity) Engine — fresh detector state, no collision
-          // with another granularity of the same symbol. Synth pairs override
-          // detector configs with their validated params (e.g. JD100 Sweep needs
-          // stopBufferAtrMul=0.25, not the default 0.1).
-          const synthMatch = SYNTH_STRATEGIES.find((s) => s.symbols.includes(sym) && s.granularity === gr);
-          const detectorConfigs = synthMatch ? synthMatch.detectors : defaultDetectorConfigs();
+          // with another granularity of the same symbol. Detector configs are
+          // merged from every strategy (real + synth) that runs on this key so
+          // each strategy's validated params are applied, and any detector not
+          // claimed by some strategy stays disabled.
+          const detectorConfigs = buildEngineDetectorConfigs(sym, gr);
           const eng = new Engine(detectorConfigs, { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
           eng.seed(sym as SymbolCode, history);
           engines.set(key, eng);
