@@ -124,6 +124,13 @@ export type PaperResp = {
 };
 export type EquityPoint = { ts: number; balance: number };
 
+export type LogEntry = {
+  ts: string;
+  level: "trace" | "debug" | "info" | "warn" | "error";
+  msg: string;
+  [key: string]: unknown;
+};
+
 export const api = {
   state: () => get<StateResp>("/api/state"),
   trades: (limit = 100) => get<{ trades: RealTrade[] }>(`/api/trades?limit=${limit}`),
@@ -144,6 +151,14 @@ export const api = {
   synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
   synthStrategies: () => get<{ strategies: StrategyStats[] }>("/api/synth-strategies"),
   synthSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/synth-signals?limit=${limit}`),
+  logs: (opts: { limit?: number; level?: string; q?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (opts.limit) p.set("limit", String(opts.limit));
+    if (opts.level) p.set("level", opts.level);
+    if (opts.q) p.set("q", opts.q);
+    const qs = p.toString();
+    return get<{ logs: LogEntry[]; totalBuffered: number }>(`/api/logs${qs ? `?${qs}` : ""}`);
+  },
   diag: () => get<{ diagnostics: Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: { bars: number; lastEpoch: number | null; barIndex: number; atr: number; detectors: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }> } }> }>("/api/diag"),
   pause: () => post<{ ok: boolean }>("/api/control/pause"),
   resume: () => post<{ ok: boolean }>("/api/control/resume"),

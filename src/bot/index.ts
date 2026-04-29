@@ -56,6 +56,7 @@ async function main() {
       getSynthPaperStats: () => ({}),
       getSynthStrategyStats: () => [],
       getDiagnostics: () => [],
+      getRecentLogs: (limit: number) => bootLog.tail(limit),
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
     process.on("SIGINT", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -278,6 +279,7 @@ async function main() {
         };
       });
     },
+    getRecentLogs: (limit: number) => log.tail(limit),
   });
 
   // Build the per-(sym, gr) engine detector config by merging every strategy

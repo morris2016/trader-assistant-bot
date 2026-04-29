@@ -108,6 +108,8 @@ export function startHttpServer(opts: {
   getSynthStrategyStats: () => StrategyStats[];
   /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
   getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
+  /** Recent in-memory log entries for the web UI's Logs panel. */
+  getRecentLogs: (limit: number) => Array<import("./logger").LogEntry>;
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -263,6 +265,27 @@ export function startHttpServer(opts: {
           const synthSyms = new Set(opts.getSynthStrategyStats().flatMap((s) => s.symbols));
           const sigs = opts.getRecentSignals().filter((s) => synthSyms.has(s.symbol)).slice(-limit).reverse();
           json(res, 200, { signals: sigs });
+          return;
+        }
+        if (path0 === "/api/logs") {
+          // Returns the most recent log entries in chronological order (oldest
+          // first). Optional filters: level (min level to include), q (substring
+          // match against the JSON-stringified entry), limit (cap on returned
+          // count). The buffer is capped at 2000 entries server-side.
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 500), 1, 2000);
+          const minLevel = url.searchParams.get("level") ?? "";
+          const q = (url.searchParams.get("q") ?? "").toLowerCase();
+          const order: Record<string, number> = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
+          let entries = opts.getRecentLogs(2000);
+          if (minLevel && order[minLevel] != null) {
+            const min = order[minLevel];
+            entries = entries.filter((e) => (order[e.level] ?? 0) >= min);
+          }
+          if (q) {
+            entries = entries.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
+          }
+          if (entries.length > limit) entries = entries.slice(-limit);
+          json(res, 200, { logs: entries, totalBuffered: opts.getRecentLogs(2000).length });
           return;
         }
         if (path0 === "/api/diag") {
