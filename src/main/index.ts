@@ -235,7 +235,7 @@ async function startBotSubscriptions() {
     const [sym, grStr] = key.split("|");
     const gr = Number(grStr);
     try {
-      const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
+      const history = await deriv.subscribeCandles(sym as SymbolCode, gr as any, 1000);
       engine.seed(sym as SymbolCode, history);
       await deriv.subscribeTicks(sym as SymbolCode);
       botSubs.add(key);

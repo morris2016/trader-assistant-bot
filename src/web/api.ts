@@ -138,11 +138,17 @@ export const api = {
   paper: () => get<PaperResp>("/api/paper"),
   paperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/paper/trades?limit=${limit}`),
   paperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/paper/equity"),
+  // Synth sandbox — completely isolated paper-trading for the 3 synth strategies
+  synthPaper: () => get<PaperResp>("/api/synth-paper"),
+  synthPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/synth-paper/trades?limit=${limit}`),
+  synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
+  synthStrategies: () => get<{ strategies: StrategyStats[] }>("/api/synth-strategies"),
   pause: () => post<{ ok: boolean }>("/api/control/pause"),
   resume: () => post<{ ok: boolean }>("/api/control/resume"),
   resetAdaptive: () => post<{ ok: boolean }>("/api/control/reset-adaptive"),
   resetDaily: () => post<{ ok: boolean }>("/api/control/reset-daily"),
   resetPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-paper${balance ? `?balance=${balance}` : ""}`),
+  resetSynthPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-synth-paper${balance ? `?balance=${balance}` : ""}`),
 };
 
 export function fmtTime(ms: number | null): string {

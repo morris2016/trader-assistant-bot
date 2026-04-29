@@ -30,6 +30,8 @@ export type ManualControls = {
   resetDaily: () => void;
   /** Reset paper trading state to a fresh balance. */
   resetPaper: (balance?: number) => void;
+  /** Reset SYNTH paper trading state (separate sandbox). */
+  resetSynthPaper: (balance?: number) => void;
   /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
   forceResubscribe: () => Promise<void>;
 };
@@ -99,6 +101,11 @@ export function startHttpServer(opts: {
   /** Paper trading state + stats. */
   getPaperState: () => PaperState;
   getPaperStats: () => Record<string, number>;
+  /** Synth paper trading state + stats (separate sandbox). */
+  getSynthPaperState: () => PaperState;
+  getSynthPaperStats: () => Record<string, number>;
+  /** Per-strategy live stats for synth strategies. */
+  getSynthStrategyStats: () => StrategyStats[];
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -107,7 +114,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/resubscribe")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/resubscribe")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -115,6 +122,10 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetPaper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/reset-synth-paper") {
+            const balance = url.searchParams.get("balance");
+            opts.manualControls.resetSynthPaper(balance ? Number(balance) : undefined);
           }
           else if (path0 === "/api/control/resubscribe") {
             opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));
@@ -214,6 +225,35 @@ export function startHttpServer(opts: {
         if (path0 === "/api/paper/equity") {
           const ps = opts.getPaperState();
           json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
+          return;
+        }
+        // ── Synth paper sandbox endpoints (RDBULL / JD100 / BOOM300N) ────
+        if (path0 === "/api/synth-paper") {
+          const ps = opts.getSynthPaperState();
+          const stats = opts.getSynthPaperStats();
+          json(res, 200, {
+            stats,
+            startingBalance: ps.startingBalance,
+            balance: ps.balance,
+            daily: ps.daily,
+            open: ps.open,
+            adaptiveShift: ps.adaptiveShift,
+          });
+          return;
+        }
+        if (path0 === "/api/synth-paper/trades") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 1000);
+          const ps = opts.getSynthPaperState();
+          json(res, 200, { trades: ps.closed.slice(0, limit) });
+          return;
+        }
+        if (path0 === "/api/synth-paper/equity") {
+          const ps = opts.getSynthPaperState();
+          json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
+          return;
+        }
+        if (path0 === "/api/synth-strategies") {
+          json(res, 200, { strategies: opts.getSynthStrategyStats() });
           return;
         }
         json(res, 404, { error: "not found" });

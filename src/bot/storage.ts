@@ -23,6 +23,8 @@ export type BotState = {
   adaptiveShift: AdaptiveShiftState;
   /** Paper trading sim — separate balance, trades, adaptive shift, equity curve. */
   paper: PaperState;
+  /** Synth-strategies paper sandbox — completely isolated from real-asset paper. */
+  synthPaper: PaperState;
 };
 
 const MAX_CLOSED_RETAINED = 500;
@@ -34,6 +36,7 @@ export function emptyBotState(): BotState {
     daily: { date: "", profit: 0, tradesOpened: 0, capHit: false },
     adaptiveShift: emptyAdaptiveShiftState(),
     paper: emptyPaperState(),
+    synthPaper: emptyPaperState(),
   };
 }
 
@@ -56,6 +59,7 @@ export class BotStorage {
         daily: parsed.daily ?? { date: "", profit: 0, tradesOpened: 0, capHit: false },
         adaptiveShift: parsed.adaptiveShift ?? emptyAdaptiveShiftState(),
         paper: parsed.paper ?? emptyPaperState(),
+        synthPaper: parsed.synthPaper ?? emptyPaperState(),
       };
     } catch (e: any) {
       if (e?.code === "ENOENT") return emptyBotState();

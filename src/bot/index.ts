@@ -15,6 +15,7 @@ import { Engine, defaultDetectorConfigs } from "../main/engine/runner";
 import { RealEngine } from "../main/engine/real";
 import { STRATEGIES } from "../main/engine/strategies";
 import { strategiesForSymbol } from "../main/engine/strategies";
+import { SYNTH_STRATEGIES, isSynthSymbol, synthStrategiesForSymbol } from "../main/engine/synth-strategies";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
@@ -44,13 +45,16 @@ async function main() {
       getAccount: () => null,
       getRecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, forceResubscribe: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, forceResubscribe: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
       getSubscriptions: () => [],
       getPaperState: () => emptyPaperState(),
       getPaperStats: () => ({}),
+      getSynthPaperState: () => emptyPaperState(),
+      getSynthPaperStats: () => ({}),
+      getSynthStrategyStats: () => [],
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
     process.on("SIGINT", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -69,6 +73,15 @@ async function main() {
     persisted.paper = emptyPaperState(cfg.paperStartingBalance);
   }
   const paper = new PaperEngine(persisted.paper);
+
+  // Synth-strategies sandbox — completely isolated from real-asset paper. Same
+  // PaperEngine class, distinct PaperState. Lets us live-paper RDBULL/JD100/BOOM300N
+  // before deciding whether to wire them into RealEngine.
+  if (persisted.synthPaper.startingBalance !== cfg.paperStartingBalance && persisted.synthPaper.closed.length === 0 && persisted.synthPaper.open.length === 0) {
+    log.info("synthPaper: seeding fresh state", { startingBalance: cfg.paperStartingBalance });
+    persisted.synthPaper = emptyPaperState(cfg.paperStartingBalance);
+  }
+  const synthPaper = new PaperEngine(persisted.synthPaper);
 
   const deriv = new DerivClient({ appId: cfg.derivAppId });
   // One Engine instance per (symbol, granularity). Engine state (detector pools,
@@ -120,9 +133,11 @@ async function main() {
       daily: s.daily,
       adaptiveShift: real.getAdaptiveShift(),
       paper: paper.getState(),
+      synthPaper: synthPaper.getState(),
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
   paper.onChange(() => persist());
+  synthPaper.onChange(() => persist());
 
   // Persist on every state change (settle, open, capHit, adaptive update)
   real.on("opened", (t) => { log.info("trade opened", { symbol: t.symbol, side: t.side, stake: t.stake, detector: t.detector, contractId: t.contractId }); persist(); });
@@ -155,6 +170,7 @@ async function main() {
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
       resetPaper: (balance?: number) => { paper.reset(balance ?? cfg.paperStartingBalance); log.warn(`paper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
+      resetSynthPaper: (balance?: number) => { synthPaper.reset(balance ?? cfg.paperStartingBalance); log.warn(`synthPaper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
       forceResubscribe: async () => {
         log.warn("force-resubscribe initiated via API");
         await deriv.forgetAll("candles").catch(() => undefined);
@@ -226,6 +242,30 @@ async function main() {
     }),
     getPaperState: () => paper.getState(),
     getPaperStats: () => paper.stats() as unknown as Record<string, number>,
+    getSynthPaperState: () => synthPaper.getState(),
+    getSynthPaperStats: () => synthPaper.stats() as unknown as Record<string, number>,
+    getSynthStrategyStats: () => {
+      const sigs = recentSignals;
+      return SYNTH_STRATEGIES.map((s) => {
+        const detIds = s.detectors.filter((d) => d.enabled).map((d) => d.id);
+        const sSyms = new Set(s.symbols);
+        const sigsForStrat = sigs.filter((sg) => sSyms.has(sg.symbol) && detIds.includes(sg.detector));
+        const closed = synthPaper.getState().closed;
+        const tradesForStrat = closed.filter((t) => sSyms.has(t.symbol) && detIds.includes(t.detector));
+        const wins = tradesForStrat.filter((t) => t.pnl > 0).length;
+        const pnl = tradesForStrat.reduce((acc, t) => acc + t.pnl, 0);
+        return {
+          id: s.id, name: s.name, description: s.description, symbols: s.symbols, granularity: s.granularity,
+          validation: { expectancyR: s.validation?.expectancyR, winRate: s.validation?.winRate, pnlUsd: s.validation?.pnlUsd, trades: s.validation?.trades },
+          live: {
+            signals: sigsForStrat.length, trades: tradesForStrat.length, wins, losses: tradesForStrat.length - wins,
+            pnlUsd: pnl, winRate: tradesForStrat.length ? wins / tradesForStrat.length : 0, expectancyR: 0,
+            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.emittedAt)) : null,
+            lastTradeAt: tradesForStrat.length ? Math.max(...tradesForStrat.map((t) => t.closedAt ?? 0)) : null,
+          },
+        };
+      });
+    },
   });
 
   // Subscribe to all (symbol, granularity) pairs from STRATEGIES.
@@ -234,6 +274,9 @@ async function main() {
   async function subscribeAll() {
     const pairs = new Set<string>();
     for (const s of STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
+    // Also subscribe to synth-strategy pairs — they share the same engine map and
+    // candle pipeline; synth signals get routed to synthPaper in executeSignal.
+    for (const s of SYNTH_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
     const tickedSymbols = new Set<string>();
     for (const key of pairs) {
       if (subscribedKeys.has(key)) continue;
@@ -244,8 +287,12 @@ async function main() {
         try {
           const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
           // Per-(symbol, granularity) Engine — fresh detector state, no collision
-          // with another granularity of the same symbol.
-          const eng = new Engine(defaultDetectorConfigs(), { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
+          // with another granularity of the same symbol. Synth pairs override
+          // detector configs with their validated params (e.g. JD100 Sweep needs
+          // stopBufferAtrMul=0.25, not the default 0.1).
+          const synthMatch = SYNTH_STRATEGIES.find((s) => s.symbols.includes(sym) && s.granularity === gr);
+          const detectorConfigs = synthMatch ? synthMatch.detectors : defaultDetectorConfigs();
+          const eng = new Engine(detectorConfigs, { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
           eng.seed(sym as SymbolCode, history);
           engines.set(key, eng);
           chartBuffers.set(key, [...history]);
@@ -307,6 +354,11 @@ async function main() {
     for (const c of settled) {
       log.info(`paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${paper.getState().balance.toFixed(2)}`);
     }
+    // Settle synth paper positions (separate sandbox).
+    const settledSynth = synthPaper.onCandle(symbol, granularity, candle);
+    for (const c of settledSynth) {
+      log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)}`);
+    }
 
     // Run the matching engine (only one per key — silver_15m engine doesn't see 1h candles)
     const eng = engines.get(key);
@@ -325,6 +377,38 @@ async function main() {
       log.info("manual pause skip", { symbol: sig.symbol, side: sig.action });
       return;
     }
+    const eng = engines.get(key);
+    const atr = eng?.atrFor(sig.symbol) ?? 0;
+    const entryPriceHint = eng?.lastCloseFor(sig.symbol) ?? candle.close;
+
+    // Synth signals always paper-trade via synthPaper (never live, never via real bot).
+    if (isSynthSymbol(sig.symbol)) {
+      const synthMatches = synthStrategiesForSymbol(sig.symbol).filter((s) =>
+        s.detectors.some((d) => d.id === sig.detector && d.enabled),
+      );
+      if (synthMatches.length === 0) return;
+      const pos = synthPaper.openPosition({
+        signalId: sig.id,
+        symbol: sig.symbol,
+        side: sig.action,
+        detector: sig.detector,
+        entryPrice: entryPriceHint,
+        atr,
+        atrTpMult: synthMatches[0].atrTpMult,
+        atrSlMult: synthMatches[0].atrSlMult,
+        multiplier: cfg.multiplier,
+        granularity,
+        candleEpoch: candle.epoch,
+        baseStake: cfg.stake,
+        minStake: 1,
+        nowMs: Date.now(),
+      });
+      if (pos) {
+        log.info(`synthPaper opened ${pos.symbol} ${pos.side} stake=$${pos.stake.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
+      }
+      return;
+    }
+
     // Match signal to a registered strategy on this symbol — only those gate trades.
     const matches = strategiesForSymbol(sig.symbol).filter((s) =>
       s.detectors.some((d) => d.id === sig.detector && d.enabled),
@@ -333,9 +417,6 @@ async function main() {
       log.debug("signal not matched to any registered strategy — ignored", { symbol: sig.symbol, detector: sig.detector });
       return;
     }
-    const eng = engines.get(key);
-    const atr = eng?.atrFor(sig.symbol) ?? 0;
-    const entryPriceHint = eng?.lastCloseFor(sig.symbol) ?? candle.close;
 
     if (!cfg.liveTradingEnabled) {
       // Paper trade: open a simulated position, settle later via candle stream.

@@ -32,24 +32,42 @@ const FETCH = 4000;
 const MIN_TRADES_PER_DAY = 1;
 const MIN_BARS_PER_DAY = 18;        // synthetic indices trade 24/7 → expect 24 1h bars; allow 18+
 const MIN_BARS_REQUIRED = 1500;
-// TEST WINDOW: only count trades that open in the last N days. Earlier candles
-// serve as warmup for detectors (engine state warms up over the full fetch).
-const TEST_DAYS = 3;
-const TEST_WINDOW_SEC = TEST_DAYS * 24 * 3600;
+// TEST WINDOW: TODAY only — last 24h. Earlier candles are warmup for detectors.
+const TODAY_WINDOW_SEC = 24 * 3600;
 
 class C {
-  ws: WebSocket; reqId = 1;
+  ws!: WebSocket; reqId = 1;
   pending = new Map<number, any>();
-  ready: Promise<void>;
-  constructor() { this.ws = new WebSocket(URL);
+  ready!: Promise<void>;
+  closed = false;
+  constructor() { this.connect(); }
+  private connect() {
+    this.ws = new WebSocket(URL);
     this.ready = new Promise((res) => this.ws.on("open", () => res()));
     this.ws.on("message", (raw) => { try { const m = JSON.parse(String(raw)); const id = m.req_id;
       if (id != null && this.pending.has(id)) { const { resolve, reject } = this.pending.get(id)!; this.pending.delete(id);
-        if (m.error) reject(new Error(m.error.message)); else resolve(m); } } catch {} }); }
+        if (m.error) reject(new Error(m.error.message)); else resolve(m); } } catch {} });
+    this.ws.on("close", () => { /* reject all pending so caller can reconnect */
+      for (const { reject } of this.pending.values()) reject(new Error("ws closed"));
+      this.pending.clear();
+    });
+    this.ws.on("error", () => { /* swallow — close handler will fire */ });
+  }
+  /** Tear down the current socket and open a fresh one. Used when a fetch fails. */
+  async reconnect(): Promise<void> {
+    try { this.ws.close(); } catch {}
+    for (const { reject } of this.pending.values()) reject(new Error("ws reconnecting"));
+    this.pending.clear();
+    await new Promise((r) => setTimeout(r, 1500));
+    this.connect();
+    await this.ready;
+  }
   send(p: any): Promise<any> { const id = this.reqId++;
     return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ ...p, req_id: id })); setTimeout(() => { if (this.pending.delete(id)) reject(new Error("timeout")); }, 30_000); }); }
-  close() { this.ws.close(); } }
+      try { this.ws.send(JSON.stringify({ ...p, req_id: id })); }
+      catch (e) { this.pending.delete(id); reject(e as Error); return; }
+      setTimeout(() => { if (this.pending.delete(id)) reject(new Error("timeout")); }, 30_000); }); }
+  close() { this.closed = true; try { this.ws.close(); } catch {} } }
 
 async function fetchPaged(c: C, sym: string, gr: number, cnt: number): Promise<Candle[]> {
   let cursor: any = "latest"; let collected: Candle[] = [];
@@ -151,7 +169,7 @@ function scoreVariant(trades: { epoch: number; pnlUsd: number }[], fullDays: str
 
 async function main() {
   const c = new C(); await c.ready;
-  console.log(`Deriv SYNTHETIC screener — last ${TEST_DAYS}d × OB/FVG/Sweep · 1h (warmup ~${Math.round(FETCH/24)-TEST_DAYS}d)\n`);
+  console.log(`Deriv SYNTHETIC screener — TODAY (last 24h) × OB/FVG/Sweep · 1h (warmup ~${Math.round(FETCH/24)-1}d)\n`);
   process.stdout.write("");
 
   const sr = await c.send({ active_symbols: "brief" });
@@ -168,7 +186,10 @@ async function main() {
   console.log(`Submarkets: ${Array.from(submarkets.entries()).map(([k,v])=>`${k}(${v})`).join(", ")}\n`);
   process.stdout.write("");
 
-  type Result = { sym: string; name: string; submarket: string; det: string; variant: string; win: number; lose: number; flat: number; total: number; score: number };
+  type Result = {
+    sym: string; name: string; submarket: string; det: string; variant: string;
+    trades: number; wins: number; losses: number; total: number; score: number;
+  };
   const all_results: Result[] = [];
 
   let i = 0;
@@ -179,35 +200,31 @@ async function main() {
     const sub = s.submarket as string;
     process.stdout.write(`[${String(i).padStart(3)}/${synths.length}] ${sym.padEnd(14)} ${name.padEnd(34)}`);
 
-    let candles: Candle[];
-    try { candles = await fetchPaged(c, sym, GR, FETCH); }
-    catch (e) { console.log(`  fetch fail`); continue; }
+    // Fetch with reconnect-on-fail. Up to 3 attempts; reconnect WS between attempts.
+    let candles: Candle[] | null = null;
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { candles = await fetchPaged(c, sym, GR, FETCH); break; }
+      catch (e) { lastErr = e as Error; try { await c.reconnect(); } catch {} }
+    }
+    if (!candles) { console.log(`  fetch fail (${lastErr?.message ?? "unknown"})`); continue; }
     if (candles.length < MIN_BARS_REQUIRED) { console.log(`  only ${candles.length} bars — skip`); continue; }
 
-    // Test window: last TEST_DAYS days. Earlier candles are warmup for detectors.
     const lastEpoch = candles[candles.length - 1].epoch;
-    const testStartEpoch = lastEpoch - TEST_WINDOW_SEC;
-    const dayBars = new Map<string, number>();
-    for (const cn of candles) {
-      if (cn.epoch < testStartEpoch) continue;
-      const k = dayKey(cn.epoch);
-      dayBars.set(k, (dayBars.get(k) ?? 0) + 1);
-    }
-    const fullDays = Array.from(dayBars.keys()).filter((k) => (dayBars.get(k) ?? 0) >= MIN_BARS_PER_DAY).sort();
-    if (fullDays.length < 1) { console.log(`  no full days in test window — skip`); continue; }
+    const todayStartEpoch = lastEpoch - TODAY_WINDOW_SEC;
 
     const bestPerDet: { [d: string]: Result } = {};
     for (const v of screeningPack) {
       try {
         const allTrades = await runVariant(sym, v, candles);
-        // Only count trades that opened in the test window (post-warmup)
-        const trades = allTrades.filter((t) => t.epoch >= testStartEpoch);
-        const { win, lose, flat, total } = scoreVariant(trades, fullDays);
-        // Score: weight win-loss differential heavily ($10 per net day) + total $
-        const score = (win - lose) * 10 + total;
+        const todayTrades = allTrades.filter((t) => t.epoch >= todayStartEpoch);
+        let wins = 0, losses = 0, total = 0;
+        for (const t of todayTrades) { total += t.pnlUsd; if (t.pnlUsd > 0) wins++; else if (t.pnlUsd < 0) losses++; }
+        // Score: net trade differential (heavy) + dollar total (light tie-break).
+        const score = (wins - losses) * 100 + total;
         const cur = bestPerDet[v.det];
         if (!cur || score > cur.score) {
-          bestPerDet[v.det] = { sym, name, submarket: sub, det: v.det, variant: v.name, win, lose, flat, total, score };
+          bestPerDet[v.det] = { sym, name, submarket: sub, det: v.det, variant: v.name, trades: todayTrades.length, wins, losses, total, score };
         }
       } catch {}
     }
@@ -216,47 +233,56 @@ async function main() {
     const summary = ["orderBlock","fvg","liquiditySweep"].map((d) => {
       const r = bestPerDet[d];
       if (!r) return `${d.slice(0,2)}-`;
-      return `${d.slice(0,2)}:${r.win}/${r.lose}/${r.flat} ${r.total>=0?"+":""}$${r.total.toFixed(0)}`;
+      return `${d.slice(0,2)}:${r.trades}t ${r.wins}W/${r.losses}L ${r.total>=0?"+":""}$${r.total.toFixed(0)}`;
     }).join(" | ");
     console.log(`  ${summary}`);
     process.stdout.write("");
+    await new Promise((r) => setTimeout(r, 200));
   }
   c.close();
 
   console.log(`\n══════════════════════════════════════════════════════════════════════════════`);
-  console.log(`TOP 25 CANDIDATES (sorted by net-winning-days × 10 + total $)`);
+  console.log(`TOP 25 TODAY (sorted by net wins × 100 + total $)`);
   console.log(`══════════════════════════════════════════════════════════════════════════════`);
   all_results.sort((a, b) => b.score - a.score);
-  console.log(`  rank  asset (submarket)                       det           variant                            W/L/F   net    total`);
+  console.log(`  rank  asset (submarket)                  det        variant                      trades  W/L     total`);
   for (let k = 0; k < Math.min(25, all_results.length); k++) {
     const r = all_results[k];
-    const tag = `${r.sym} ${r.name}`.slice(0, 38);
-    const net = r.win - r.lose;
-    const totalDays = r.win + r.lose + r.flat;
-    const wrPct = (r.win + r.lose) > 0 ? Math.round((r.win / (r.win + r.lose)) * 100) : 0;
-    console.log(`  [${String(k+1).padStart(2)}]  ${tag.padEnd(38)} ${r.det.padEnd(13)} ${r.variant.padEnd(36)} ${String(r.win).padStart(3)}/${String(r.lose).padStart(3)}/${String(r.flat).padStart(3)} (${wrPct}%WR) net=${net>=0?"+":""}${net}d ${r.total>=0?"+":""}$${r.total.toFixed(0)}`);
+    const tag = `${r.sym} ${r.name}`.slice(0, 32);
+    console.log(`  [${String(k+1).padStart(2)}]  ${tag.padEnd(32)} ${r.det.slice(0,10).padEnd(10)} ${r.variant.padEnd(28)} ${String(r.trades).padStart(3)}t   ${String(r.wins).padStart(2)}W/${String(r.losses).padStart(2)}L  ${r.total>=0?"+":""}$${r.total.toFixed(0)}`);
   }
 
-  // Strong-edge candidates over the 3-day test window:
-  //   ≥2 winning days, 0 losing days, positive total $
   console.log(`\n══════════════════════════════════════════════════════════════════════════════`);
-  console.log(`STRONG-EDGE 3-DAY (≥2 win days · 0 loss days · positive total)`);
+  console.log(`TODAY WINNERS (≥1 trade · 0 losses · +$)`);
   console.log(`══════════════════════════════════════════════════════════════════════════════`);
-  const strict = all_results.filter((r) => r.win >= 2 && r.lose === 0 && r.total > 0);
-  if (strict.length === 0) {
-    console.log(`  ❌ None met the bar — relaxing to ≥1 win day, 0 loss, +$.`);
-    const relaxed = all_results.filter((r) => r.win >= 1 && r.lose === 0 && r.total > 0).sort((a, b) => b.total - a.total);
+  const winners = all_results.filter((r) => r.trades >= 1 && r.losses === 0 && r.total > 0).sort((a, b) => b.total - a.total);
+  if (winners.length === 0) {
+    console.log(`  ❌ Nothing clean today — relaxing to ≥1 win, more wins than losses, +$.`);
+    const relaxed = all_results.filter((r) => r.wins >= 1 && r.wins > r.losses && r.total > 0).sort((a, b) => b.total - a.total);
     for (const r of relaxed.slice(0, 20)) {
-      console.log(`  ~ ${r.sym} (${r.submarket}) · ${r.det} · ${r.variant} · ${r.win}W/${r.lose}L/${r.flat}F +$${r.total.toFixed(0)}`);
+      console.log(`  ~ ${r.sym.padEnd(14)} (${r.submarket.padEnd(14)}) · ${r.det.padEnd(13)} · ${r.variant.padEnd(36)} · ${r.trades}t ${r.wins}W/${r.losses}L +$${r.total.toFixed(0)}`);
     }
   } else {
-    for (const r of strict.slice(0, 20)) {
-      console.log(`  ✓ ${r.sym} (${r.submarket}) · ${r.det} · ${r.variant} · ${r.win}W/${r.lose}L/${r.flat}F +$${r.total.toFixed(0)}`);
+    for (const r of winners.slice(0, 20)) {
+      console.log(`  ✓ ${r.sym.padEnd(14)} (${r.submarket.padEnd(14)}) · ${r.det.padEnd(13)} · ${r.variant.padEnd(36)} · ${r.trades}t ${r.wins}W/${r.losses}L +$${r.total.toFixed(0)}`);
     }
   }
 
-  console.log(`\nNext step: pick top 3 from strict-only-winners (or top 3 ranked) and drill down with`);
-  console.log(`per-asset iter-1 scripts anchored on raw defaults (per the no-copy-strategies rule).`);
+  // High-frequency winners — what fired multiple times today AND won
+  console.log(`\n══════════════════════════════════════════════════════════════════════════════`);
+  console.log(`HIGH-FREQ TODAY (≥3 trades · more W than L · +$) — best for continuous trading`);
+  console.log(`══════════════════════════════════════════════════════════════════════════════`);
+  const hifreq = all_results.filter((r) => r.trades >= 3 && r.wins > r.losses && r.total > 0).sort((a, b) => b.trades - a.trades);
+  if (hifreq.length === 0) {
+    console.log(`  ❌ No detector fired ≥3× today with positive edge.`);
+  } else {
+    for (const r of hifreq.slice(0, 15)) {
+      console.log(`  ★ ${r.sym} (${r.submarket}) · ${r.det} · ${r.variant} · ${r.trades}t ${r.wins}W/${r.losses}L +$${r.total.toFixed(0)}`);
+    }
+  }
+
+  console.log(`\nNext step: pick from HIGH-FREQ first (continuous-trade fit), else TODAY WINNERS.`);
+  console.log(`Drill down with per-asset iter-1 scripts anchored on raw defaults (no-copy rule).`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
