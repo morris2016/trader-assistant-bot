@@ -44,7 +44,7 @@ async function main() {
       getAccount: () => null,
       getRecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, forceResubscribe: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -132,6 +132,16 @@ async function main() {
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
       resetPaper: (balance?: number) => { paper.reset(balance ?? cfg.paperStartingBalance); log.warn(`paper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
+      forceResubscribe: async () => {
+        log.warn("force-resubscribe initiated via API");
+        await deriv.forgetAll("candles").catch(() => undefined);
+        await deriv.forgetAll("ticks").catch(() => undefined);
+        engines.clear();
+        chartBuffers.clear();
+        subscribedKeys.clear();
+        await subscribeAll();
+        log.info(`force-resubscribe complete: ${subscribedKeys.size} pairs subscribed`);
+      },
     },
     getCandles: (sym, gr, limit) => (chartBuffers.get(engKey(sym, gr)) ?? []).slice(-limit),
     getStrategyStats: () => {
@@ -390,6 +400,27 @@ async function main() {
       authorized = false;
     }
   });
+
+  // Self-heal: if 30s after authorize we have no subscriptions, force a fresh resub.
+  // Catches the case where subscribeAll fails silently on boot due to transient WS issues.
+  setInterval(() => {
+    if (!shuttingDown && wsConnected && authorized && subscribedKeys.size === 0) {
+      log.warn("self-heal: subscribedKeys is empty, forcing resubscribe");
+      (async () => {
+        try {
+          await deriv.forgetAll("candles").catch(() => undefined);
+          await deriv.forgetAll("ticks").catch(() => undefined);
+          engines.clear();
+          chartBuffers.clear();
+          subscribedKeys.clear();
+          await subscribeAll();
+          log.info(`self-heal complete: ${subscribedKeys.size} pairs subscribed`);
+        } catch (e) {
+          log.error("self-heal failed", { err: (e as Error).message });
+        }
+      })();
+    }
+  }, 30_000);
 
   deriv.on("close", () => {
     wsConnected = false;

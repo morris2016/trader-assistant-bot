@@ -26,6 +26,8 @@ export type ManualControls = {
   resetDaily: () => void;
   /** Reset paper trading state to a fresh balance. */
   resetPaper: (balance?: number) => void;
+  /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
+  forceResubscribe: () => Promise<void>;
 };
 
 export type StrategyStats = {
@@ -101,7 +103,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/resubscribe")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -109,6 +111,9 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetPaper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/resubscribe") {
+            opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));
           }
           opts.logger.info("manual control invoked", { route: path0 });
           json(res, 200, { ok: true });
