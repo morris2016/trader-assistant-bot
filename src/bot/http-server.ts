@@ -256,6 +256,13 @@ export function startHttpServer(opts: {
           json(res, 200, { strategies: opts.getSynthStrategyStats() });
           return;
         }
+        if (path0 === "/api/synth-signals") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
+          const synthSyms = new Set(opts.getSynthStrategyStats().flatMap((s) => s.symbols));
+          const sigs = opts.getRecentSignals().filter((s) => synthSyms.has(s.symbol)).slice(-limit).reverse();
+          json(res, 200, { signals: sigs });
+          return;
+        }
         json(res, 404, { error: "not found" });
         return;
       }

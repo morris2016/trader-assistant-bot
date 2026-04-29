@@ -386,13 +386,29 @@ async function main() {
     const eng = engines.get(key);
     const atr = eng?.atrFor(sig.symbol) ?? 0;
     const entryPriceHint = eng?.lastCloseFor(sig.symbol) ?? candle.close;
+    // Strategy descriptor filters (buyOnly/sellOnly/minAdx/maxAdx) were used during
+    // validation but were NOT applied at signal-time — meaning live trades fired in
+    // both directions and on weak-ADX regimes for filter-gated strategies. Apply
+    // them here so live behavior matches the validated config.
+    const regime = eng?.regimeFor(sig.symbol);
+    const adx = regime?.adx ?? 0;
+    function passesStrategyFilters(s: { buyOnly?: boolean; sellOnly?: boolean; minAdx?: number; maxAdx?: number }): boolean {
+      if (s.buyOnly && sig.action !== "BUY") return false;
+      if (s.sellOnly && sig.action !== "SELL") return false;
+      if (s.minAdx != null && adx < s.minAdx) return false;
+      if (s.maxAdx != null && adx > s.maxAdx) return false;
+      return true;
+    }
 
     // Synth signals always paper-trade via synthPaper (never live, never via real bot).
     if (isSynthSymbol(sig.symbol)) {
-      const synthMatches = synthStrategiesForSymbol(sig.symbol).filter((s) =>
-        s.detectors.some((d) => d.id === sig.detector && d.enabled),
-      );
-      if (synthMatches.length === 0) return;
+      const synthMatches = synthStrategiesForSymbol(sig.symbol)
+        .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled))
+        .filter(passesStrategyFilters);
+      if (synthMatches.length === 0) {
+        log.debug("synth signal filtered by strategy gates", { symbol: sig.symbol, side: sig.action, adx });
+        return;
+      }
       const pos = synthPaper.openPosition({
         signalId: sig.id,
         symbol: sig.symbol,
@@ -416,11 +432,12 @@ async function main() {
     }
 
     // Match signal to a registered strategy on this symbol — only those gate trades.
-    const matches = strategiesForSymbol(sig.symbol).filter((s) =>
-      s.detectors.some((d) => d.id === sig.detector && d.enabled),
-    );
+    // Apply strategy descriptor filters too (buyOnly/sellOnly/minAdx/maxAdx).
+    const matches = strategiesForSymbol(sig.symbol)
+      .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled))
+      .filter(passesStrategyFilters);
     if (matches.length === 0) {
-      log.debug("signal not matched to any registered strategy — ignored", { symbol: sig.symbol, detector: sig.detector });
+      log.debug("signal filtered (no matching strategy or strategy gates rejected)", { symbol: sig.symbol, detector: sig.detector, side: sig.action, adx });
       return;
     }
 

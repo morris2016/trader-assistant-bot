@@ -143,6 +143,7 @@ export const api = {
   synthPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/synth-paper/trades?limit=${limit}`),
   synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
   synthStrategies: () => get<{ strategies: StrategyStats[] }>("/api/synth-strategies"),
+  synthSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/synth-signals?limit=${limit}`),
   pause: () => post<{ ok: boolean }>("/api/control/pause"),
   resume: () => post<{ ok: boolean }>("/api/control/resume"),
   resetAdaptive: () => post<{ ok: boolean }>("/api/control/reset-adaptive"),

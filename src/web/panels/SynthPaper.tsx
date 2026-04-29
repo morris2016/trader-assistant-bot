@@ -3,7 +3,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
-import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type PaperPosition, type PaperResp, type StrategyStats } from "../api";
+import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type PaperPosition, type PaperResp, type Signal, type StrategyStats } from "../api";
 
 export function SynthPaperPanel({ doAction, pending }: {
   doAction: (label: string, fn: () => Promise<unknown>) => void;
@@ -13,6 +13,7 @@ export function SynthPaperPanel({ doAction, pending }: {
   const [trades, setTrades] = useState<ClosedPaperPosition[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
+  const [signals, setSignals] = useState<Signal[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filterSym, setFilterSym] = useState<string>("ALL");
   const [filterRes, setFilterRes] = useState<"ALL" | "won" | "lost">("ALL");
@@ -21,10 +22,10 @@ export function SynthPaperPanel({ doAction, pending }: {
   useEffect(() => {
     const load = async () => {
       try {
-        const [p, t, e, s] = await Promise.all([
-          api.synthPaper(), api.synthPaperTrades(500), api.synthPaperEquity(), api.synthStrategies(),
+        const [p, t, e, s, sig] = await Promise.all([
+          api.synthPaper(), api.synthPaperTrades(500), api.synthPaperEquity(), api.synthStrategies(), api.synthSignals(100),
         ]);
-        setPaper(p); setTrades(t.trades); setEquity(e.equity); setStrategies(s.strategies); setError(null);
+        setPaper(p); setTrades(t.trades); setEquity(e.equity); setStrategies(s.strategies); setSignals(sig.signals); setError(null);
       } catch (err) { setError((err as Error).message); }
     };
     load();
@@ -110,6 +111,35 @@ export function SynthPaperPanel({ doAction, pending }: {
         </div>
         <div className="card" style={{ padding: 0 }}>
           <EquityChart equity={equity} startingBalance={stats.startingBalance} />
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">Synth Signals ({signals.length})</div>
+          <div className="section-sub">Most recent first · all detector emissions on RDBULL/JD100/BOOM300N</div>
+        </div>
+        <div className="card table-card">
+          {signals.length === 0 ? (
+            <div className="empty"><span className="empty-emoji">⚡</span>No synth signals yet — bot may still be warming up. RDBULL fires ~2.7/day on 1h.</div>
+          ) : (
+            <table>
+              <thead>
+                <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Detector</th><th>Confidence</th></tr>
+              </thead>
+              <tbody>
+                {signals.slice(0, 50).map((s) => (
+                  <tr key={s.id}>
+                    <td className="mono faint">{fmtTime(s.emittedAt)}</td>
+                    <td className="mono">{s.symbol}</td>
+                    <td><span className={`pill ${s.action === "BUY" ? "pill-green" : "pill-red"}`}>{s.action}</span></td>
+                    <td><span className="strat-chip">{s.detector}</span></td>
+                    <td className="mono">{(s.confidence * 100).toFixed(0)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
 
