@@ -15,6 +15,10 @@ export type HealthSnapshot = {
   wsConnected: boolean;
   authorized: boolean;
   uptimeSec: number;
+  /** Seconds since last heartbeat tick. > 180s + uptime > 120s indicates a hung event loop. */
+  heartbeatAgeSec?: number;
+  /** True if the watchdog has determined the bot is hung (used for /health 503). */
+  hung?: boolean;
 };
 
 export type ManualControls = {
@@ -122,9 +126,12 @@ export function startHttpServer(opts: {
         if (req.method !== "GET") { json(res, 405, { error: "method not allowed" }); return; }
 
         if (path0 === "/health" || path0 === "/api/health") {
-          // Liveness — always 200 if the process is up. WS state surfaces in payload but doesn't gate Railway healthcheck.
+          // Liveness check used by Railway. 200 unless the bot is HUNG —
+          // hung means: been alive >2min AND heartbeat stale >3min, indicating
+          // the event loop is blocked. In that case 503 → Railway restarts.
           const h = opts.getHealth();
-          json(res, 200, { healthy: true, ...h, paused: opts.manualControls.isPaused() });
+          res.statusCode = h.hung ? 503 : 200;
+          res.end(JSON.stringify({ healthy: !h.hung, ...h, paused: opts.manualControls.isPaused() }));
           return;
         }
         if (path0 === "/ready" || path0 === "/api/ready") {

@@ -93,6 +93,24 @@ async function main() {
   const subscribedKeys = new Set<string>();
   const recentSignals: Signal[] = [];
   const SIGNAL_HISTORY = 200;
+  // Heartbeat state — used for hang detection in /health
+  let lastHeartbeatMs = Date.now();
+  const lastCandleAtByKey = new Map<string, number>(); // sym|gr -> Date.now() ms
+
+  // Wrap an interval body so it never escapes — a thrown error in setInterval
+  // would otherwise kill the timer silently. We log + continue.
+  const safeInterval = (label: string, body: () => void | Promise<void>, ms: number) => {
+    return setInterval(() => {
+      try {
+        const r = body();
+        if (r && typeof (r as any).catch === "function") {
+          (r as Promise<void>).catch((e) => log.error(`${label} async error`, { err: (e as Error).message }));
+        }
+      } catch (e) {
+        log.error(`${label} sync error`, { err: (e as Error).message });
+      }
+    }, ms);
+  };
 
   const persist = () => {
     const s = real.state();
@@ -118,7 +136,12 @@ async function main() {
     port: cfg.httpPort,
     logger: log,
     webDir: path.resolve(process.env.WEB_DIR ?? "/app/web"),
-    getHealth: () => ({ wsConnected, authorized, uptimeSec: Math.floor((Date.now() - startTs) / 1000) }),
+    getHealth: () => {
+      const upSec = Math.floor((Date.now() - startTs) / 1000);
+      const hbAgeSec = Math.floor((Date.now() - lastHeartbeatMs) / 1000);
+      const hung = upSec > 120 && hbAgeSec > 180;
+      return { wsConnected, authorized, uptimeSec: upSec, heartbeatAgeSec: hbAgeSec, hung };
+    },
     getState: () => {
       const s = real.state();
       return { open: s.open, closed: s.closed, daily: s.daily, adaptiveShift: real.getAdaptiveShift() };
@@ -252,6 +275,7 @@ async function main() {
   deriv.on("candle", (symbol, candle, isNew, granularity?: number) => {
     if (granularity == null) return; // pre-emit-update legacy event — ignore
     const key = engKey(symbol, granularity);
+    lastCandleAtByKey.set(key, Date.now());
     // Update chart buffer using epoch-aware merge. Deriv's WS may emit ohlc
     // updates that alternate between the just-closed bar and the in-progress
     // bar within the same tick — trusting `isNew` causes duplicate pushes
@@ -401,24 +425,68 @@ async function main() {
     }
   });
 
-  // Self-heal: if 30s after authorize we have no subscriptions, force a fresh resub.
-  // Catches the case where subscribeAll fails silently on boot due to transient WS issues.
-  setInterval(() => {
-    if (!shuttingDown && wsConnected && authorized && subscribedKeys.size === 0) {
-      log.warn("self-heal: subscribedKeys is empty, forcing resubscribe");
-      (async () => {
-        try {
-          await deriv.forgetAll("candles").catch(() => undefined);
-          await deriv.forgetAll("ticks").catch(() => undefined);
-          engines.clear();
-          chartBuffers.clear();
-          subscribedKeys.clear();
-          await subscribeAll();
-          log.info(`self-heal complete: ${subscribedKeys.size} pairs subscribed`);
-        } catch (e) {
-          log.error("self-heal failed", { err: (e as Error).message });
-        }
-      })();
+  // ──────── Resilience layer (heartbeat + self-heal + watchdog) ────────
+  // Self-heal: if 30s after authorize we have no subscriptions, force fresh resub.
+  safeInterval("self-heal-subs", async () => {
+    if (shuttingDown || !wsConnected || !authorized) return;
+    if (subscribedKeys.size > 0) return;
+    log.warn("self-heal: subscribedKeys is empty, forcing resubscribe");
+    await deriv.forgetAll("candles").catch(() => undefined);
+    await deriv.forgetAll("ticks").catch(() => undefined);
+    engines.clear();
+    chartBuffers.clear();
+    subscribedKeys.clear();
+    await subscribeAll();
+    log.info(`self-heal complete: ${subscribedKeys.size} pairs subscribed`);
+  }, 30_000);
+
+  // Heartbeat: structured ops snapshot every 60s. Updates lastHeartbeatMs which
+  // /health uses to detect hangs (Railway restarts on 503).
+  safeInterval("heartbeat", () => {
+    lastHeartbeatMs = Date.now();
+    const realState = real.state();
+    const paperState = paper.getState();
+    const realBalance = account?.balance ?? 0;
+    log.info("heartbeat", {
+      uptimeSec: Math.floor((Date.now() - startTs) / 1000),
+      wsConnected,
+      authorized,
+      paused: manualPaused,
+      subs: subscribedKeys.size,
+      realBalance,
+      realOpenTrades: realState.open.length,
+      realClosedTrades: realState.closed.length,
+      paperBalance: paperState.balance,
+      paperOpenTrades: paperState.open.length,
+      paperClosedTrades: paperState.closed.length,
+      consecLosses: real.getAdaptiveShift().consecLosses,
+      paperConsecLosses: paperState.adaptiveShift.consecLosses,
+      signalsToday: recentSignals.length,
+    });
+    // Subscription staleness — warn if a stream hasn't received a candle in 2×granularity
+    const nowMs = Date.now();
+    for (const key of subscribedKeys) {
+      const [, grStr] = key.split("|");
+      const gr = Number(grStr);
+      const lastMs = lastCandleAtByKey.get(key);
+      if (!lastMs) continue; // not seen yet — fine
+      const stalenessSec = Math.floor((nowMs - lastMs) / 1000);
+      if (stalenessSec > 2 * gr) {
+        log.warn(`stale subscription ${key}: no candle for ${stalenessSec}s (granularity ${gr}s)`);
+      }
+    }
+  }, 60_000);
+
+  // Watchdog: detect a hung event loop. If no heartbeat in 3min after the bot
+  // has been alive >2min, exit so Railway restarts the container cleanly.
+  // /health also surfaces this state for external monitoring.
+  safeInterval("watchdog", () => {
+    const upSec = Math.floor((Date.now() - startTs) / 1000);
+    const hbAgeSec = Math.floor((Date.now() - lastHeartbeatMs) / 1000);
+    if (upSec > 120 && hbAgeSec > 180) {
+      log.error(`watchdog: heartbeat stale ${hbAgeSec}s — exiting for Railway restart`);
+      // Brief async flush window for the log line, then exit
+      setTimeout(() => process.exit(1), 500);
     }
   }, 30_000);
 
