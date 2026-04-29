@@ -331,6 +331,10 @@ async function main() {
     //   - equal to last     → update in place
     //   - equal to N-th-last → update that slot (handles bar revisions)
     //   - older / unknown   → ignore (out-of-order or stale)
+    // Compute isNewBar ourselves (Deriv's isNew flag is unreliable — alternates
+     // between just-closed and in-progress bars). The engine uses isNew to gate
+     // signal emission, so we MUST pass the epoch-derived value, not the WS flag.
+    let isNewBar = false;
     const buf = chartBuffers.get(key);
     if (buf && buf.length > 0) {
       const lastIdx = buf.length - 1;
@@ -338,6 +342,7 @@ async function main() {
       if (candle.epoch > lastEpoch) {
         buf.push(candle);
         if (buf.length > 1500) buf.splice(0, buf.length - 1500);
+        isNewBar = true;
       } else if (candle.epoch === lastEpoch) {
         buf[lastIdx] = candle;
       } else {
@@ -348,6 +353,7 @@ async function main() {
       }
     } else if (buf) {
       buf.push(candle);
+      isNewBar = true;
     }
     // Settle any paper positions whose TP/SL was touched this candle
     const settled = paper.onCandle(symbol, granularity, candle);
@@ -363,7 +369,7 @@ async function main() {
     // Run the matching engine (only one per key — silver_15m engine doesn't see 1h candles)
     const eng = engines.get(key);
     if (!eng) return;
-    const r = eng.onCandle(symbol, candle, isNew);
+    const r = eng.onCandle(symbol, candle, isNewBar);
     for (const sig of r.signals) {
       log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence, granularity });
       recentSignals.push(sig);
