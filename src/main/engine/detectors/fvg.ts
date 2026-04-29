@@ -45,6 +45,7 @@ export const fairValueGap: Detector = {
     entryDepth: 0,        // 0 = edge (first touch), 1 = ce (50%), 2 = far (full fill)
     stopBufferAtrMul: 0.1, // buffer past gap-bottom (BULL) / gap-top (BEAR)
     requireRejection: 0,  // 0 = touch, 1 = require close outside zone in FVG direction
+    requireCameFromOutside: 1, // 0 = fire on any touch, 1 = require prior bar fully outside zone (default ICT-correct)
   },
 
   onClose(ctx: DetectorContext): DetectorOutput {
@@ -113,6 +114,7 @@ export const fairValueGap: Detector = {
     const entryDepth = Math.max(0, Math.min(2, Math.round(ctx.params.entryDepth ?? 0)));
     const stopBuffer = atr * (ctx.params.stopBufferAtrMul ?? 0.1);
     const requireRejection = (ctx.params.requireRejection ?? 0) >= 1;
+    const requireCameFromOutside = (ctx.params.requireCameFromOutside ?? 1) >= 1;
 
     for (const block of s.active.values()) {
       if (block.mitigated) continue;
@@ -134,7 +136,7 @@ export const fairValueGap: Detector = {
       const reachedTrigger =
         block.side === "BULL" ? curr.low <= triggerLevel : curr.high >= triggerLevel;
 
-      const cameFromOutside =
+      const cameFromOutside = !requireCameFromOutside ||
         (block.side === "BULL" && prev.low > block.top) ||
         (block.side === "BEAR" && prev.high < block.bottom);
 

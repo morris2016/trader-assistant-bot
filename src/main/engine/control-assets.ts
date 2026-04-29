@@ -29,10 +29,11 @@ function looseDetectorConfigs(): DetectorConfig[] {
         ...d,
         params: {
           ...d.params,
-          minGapAtrMul: 0.03,    // tiny gaps qualify (default 0.15)
+          minGapAtrMul: 0.03,             // tiny gaps qualify (default 0.15)
           targetRMult: 2.0,
-          maxActive: 30,         // keep more FVGs active for retests
+          maxActive: 30,                  // keep more FVGs active for retests
           stopBufferAtrMul: 0.05,
+          requireCameFromOutside: 0,      // fire on any touch — bypass strict ICT gate
         },
       };
     }
@@ -46,6 +47,7 @@ function looseDetectorConfigs(): DetectorConfig[] {
           obSearchMaxBack: 6,
           rejectionBodyAtrMul: 0.1,
           targetRMult: 2.0,
+          retestConfirmationBars: 1,         // emit on 1st confirming bar instead of 2 (default 2)
         },
       };
     }
