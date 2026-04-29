@@ -144,7 +144,6 @@ export const api = {
   synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
   synthStrategies: () => get<{ strategies: StrategyStats[] }>("/api/synth-strategies"),
   synthSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/synth-signals?limit=${limit}`),
-  controlSignals: (limit = 200) => get<{ signals: Signal[]; controlAssets: Array<{ symbol: string; granularity: number; label: string }> }>(`/api/control-signals?limit=${limit}`),
   diag: () => get<{ diagnostics: Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: { bars: number; lastEpoch: number | null; barIndex: number; atr: number; detectors: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }> } }> }>("/api/diag"),
   pause: () => post<{ ok: boolean }>("/api/control/pause"),
   resume: () => post<{ ok: boolean }>("/api/control/resume"),
