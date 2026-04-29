@@ -106,6 +106,8 @@ export function startHttpServer(opts: {
   getSynthPaperStats: () => Record<string, number>;
   /** Per-strategy live stats for synth strategies. */
   getSynthStrategyStats: () => StrategyStats[];
+  /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
+  getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -261,6 +263,10 @@ export function startHttpServer(opts: {
           const synthSyms = new Set(opts.getSynthStrategyStats().flatMap((s) => s.symbols));
           const sigs = opts.getRecentSignals().filter((s) => synthSyms.has(s.symbol)).slice(-limit).reverse();
           json(res, 200, { signals: sigs });
+          return;
+        }
+        if (path0 === "/api/diag") {
+          json(res, 200, { diagnostics: opts.getDiagnostics() });
           return;
         }
         json(res, 404, { error: "not found" });

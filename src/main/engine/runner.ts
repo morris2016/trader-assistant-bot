@@ -197,6 +197,39 @@ export class Engine extends EventEmitter {
     const buf = this.buffers.get(symbol);
     return buf?.all ?? [];
   }
+
+  /** Diagnostic snapshot for a symbol — used to debug "why aren't signals firing". */
+  diagnose(symbol: SymbolCode): {
+    bars: number;
+    lastEpoch: number | null;
+    barIndex: number;
+    atr: number;
+    detectors: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }>;
+  } {
+    const buf = this.buffers.get(symbol);
+    const stateBag = this.state.get(symbol) ?? {};
+    const dets: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }> = {};
+    for (const det of ALL_DETECTORS) {
+      const cfg = this.detectorConfig.get(det.id);
+      const detState = (stateBag as Record<string, unknown>)[det.id] as { active?: Map<string, { mitigated: boolean }> } | undefined;
+      const active = detState?.active;
+      let activeCount = 0, unmitigatedCount = 0;
+      if (active) {
+        for (const blk of active.values()) {
+          activeCount++;
+          if (!blk.mitigated) unmitigatedCount++;
+        }
+      }
+      dets[det.id] = { enabled: cfg?.enabled ?? false, activeCount, unmitigatedCount };
+    }
+    return {
+      bars: buf?.length() ?? 0,
+      lastEpoch: buf?.last()?.epoch ?? null,
+      barIndex: this.barIndex.get(symbol) ?? -1,
+      atr: this.atrFor(symbol),
+      detectors: dets,
+    };
+  }
 }
 
 export function defaultDetectorConfigs(): DetectorConfig[] {

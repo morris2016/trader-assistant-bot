@@ -55,6 +55,7 @@ async function main() {
       getSynthPaperState: () => emptyPaperState(),
       getSynthPaperStats: () => ({}),
       getSynthStrategyStats: () => [],
+      getDiagnostics: () => [],
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
     process.on("SIGINT", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -244,6 +245,17 @@ async function main() {
     getPaperStats: () => paper.stats() as unknown as Record<string, number>,
     getSynthPaperState: () => synthPaper.getState(),
     getSynthPaperStats: () => synthPaper.stats() as unknown as Record<string, number>,
+    getDiagnostics: () => Array.from(engines.entries()).map(([key, eng]) => {
+      const [sym, grStr] = key.split("|");
+      const gr = Number(grStr);
+      return {
+        key,
+        symbol: sym,
+        granularity: gr,
+        lastCandleAtMs: lastCandleAtByKey.get(key) ?? null,
+        engine: eng.diagnose(sym as SymbolCode),
+      };
+    }),
     getSynthStrategyStats: () => {
       const sigs = recentSignals;
       return SYNTH_STRATEGIES.map((s) => {
