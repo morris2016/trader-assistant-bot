@@ -131,6 +131,11 @@ export class RealEngine extends EventEmitter {
     atrSlMult?: number;      // SL at N * ATR price move
     atr?: number;            // current ATR — required when tpSlMode === "atr"
     entryPriceHint?: number; // most recent close — required when tpSlMode === "atr"
+    /** Structural SL price emitted by the detector. Overrides ATR-based SL
+     *  when present and on the correct side of entry. */
+    signalStopPrice?: number;
+    /** Structural TP price emitted by the detector. Overrides ATR-based TP. */
+    signalTargetPrice?: number;
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
@@ -186,10 +191,26 @@ export class RealEngine extends EventEmitter {
       const useAtr = params.tpSlMode === "atr" && params.atr && params.atr > 0 && params.entryPriceHint && params.entryPriceHint > 0;
 
       if (useAtr) {
-        // For a MULTUP/DOWN, profit for a price move of d = (d / entry) * stake * multiplier.
-        const atrPnL = (mult: number) => +(((mult * params.atr!) / params.entryPriceHint!) * stake * multiplier).toFixed(2);
-        if (params.atrTpMult && params.atrTpMult > 0) tp = atrPnL(params.atrTpMult);
-        if (params.atrSlMult && params.atrSlMult > 0) sl = atrPnL(params.atrSlMult);
+        const entry = params.entryPriceHint!;
+        // Convert any price distance to USD P&L for a MULTUP/DOWN:
+        //   profit(d) = (d / entry) * stake * multiplier
+        const priceDistToPnl = (d: number) => +((d / entry) * stake * multiplier).toFixed(2);
+        // Prefer structural SL/TP emitted by the detector when on the correct
+        // side of entry (matches the backtest path so live mirrors validation).
+        const sigSL = params.signalStopPrice;
+        const sigTP = params.signalTargetPrice;
+        const slOk = sigSL != null && isFinite(sigSL) && (params.side === "BUY" ? sigSL < entry : sigSL > entry);
+        const tpOk = sigTP != null && isFinite(sigTP) && (params.side === "BUY" ? sigTP > entry : sigTP < entry);
+        if (slOk) {
+          sl = priceDistToPnl(Math.abs(entry - sigSL!));
+        } else if (params.atrSlMult && params.atrSlMult > 0) {
+          sl = priceDistToPnl(params.atrSlMult * params.atr!);
+        }
+        if (tpOk) {
+          tp = priceDistToPnl(Math.abs(sigTP! - entry));
+        } else if (params.atrTpMult && params.atrTpMult > 0) {
+          tp = priceDistToPnl(params.atrTpMult * params.atr!);
+        }
       } else {
         if (params.takeProfitPct && params.takeProfitPct > 0) {
           tp = +(stake * (params.takeProfitPct / 100)).toFixed(2);

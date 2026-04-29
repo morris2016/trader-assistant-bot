@@ -120,6 +120,11 @@ export class PaperEngine {
     baseStake: number;
     minStake: number;
     nowMs: number;
+    /** Structural SL emitted by the detector (e.g. OB wick + buffer). Used in
+     *  preference to ATR-derived SL when present, matching the backtest path. */
+    signalStopPrice?: number;
+    /** Structural TP emitted by the detector. Used in preference to ATR TP. */
+    signalTargetPrice?: number;
   }): PaperPosition | null {
     if (!isFinite(opts.atr) || opts.atr <= 0) return null;
     if (!isFinite(opts.entryPrice) || opts.entryPrice <= 0) return null;
@@ -132,8 +137,17 @@ export class PaperEngine {
 
     const slDelta = opts.atr * opts.atrSlMult;
     const tpDelta = opts.atr * opts.atrTpMult;
-    const stopPrice = opts.side === "BUY" ? opts.entryPrice - slDelta : opts.entryPrice + slDelta;
-    const tpPrice   = opts.side === "BUY" ? opts.entryPrice + tpDelta : opts.entryPrice - tpDelta;
+    const atrStopPrice = opts.side === "BUY" ? opts.entryPrice - slDelta : opts.entryPrice + slDelta;
+    const atrTpPrice   = opts.side === "BUY" ? opts.entryPrice + tpDelta : opts.entryPrice - tpDelta;
+    // Prefer structural stops/targets emitted by the detector when present and
+    // on the correct side of entry. Matches the backtest path so live and
+    // validation use the same SL/TP.
+    const sigSL = opts.signalStopPrice;
+    const sigTP = opts.signalTargetPrice;
+    const slOnRightSide = sigSL != null && isFinite(sigSL) && (opts.side === "BUY" ? sigSL < opts.entryPrice : sigSL > opts.entryPrice);
+    const tpOnRightSide = sigTP != null && isFinite(sigTP) && (opts.side === "BUY" ? sigTP > opts.entryPrice : sigTP < opts.entryPrice);
+    const stopPrice = slOnRightSide ? sigSL! : atrStopPrice;
+    const tpPrice   = tpOnRightSide ? sigTP! : atrTpPrice;
 
     const pos: PaperPosition = {
       id: randomUUID(),

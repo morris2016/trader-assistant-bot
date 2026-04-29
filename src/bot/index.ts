@@ -443,11 +443,13 @@ async function main() {
 
     // Synth signals always paper-trade via synthPaper (never live, never via real bot).
     if (isSynthSymbol(sig.symbol)) {
-      const synthMatches = synthStrategiesForSymbol(sig.symbol)
-        .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled))
-        .filter(passesStrategyFilters);
+      const synthCandidates = synthStrategiesForSymbol(sig.symbol)
+        .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled));
+      const synthMatches = synthCandidates.filter(passesStrategyFilters);
       if (synthMatches.length === 0) {
-        log.debug("synth signal filtered by strategy gates", { symbol: sig.symbol, side: sig.action, adx });
+        // Promote to info so operators can see why a synth signal didn't trade
+        // without enabling debug logging.
+        log.info("synth signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, detector: sig.detector, adx, candidates: synthCandidates.map((s) => s.id) });
         return;
       }
       // Don't pile on: validation used one-position-at-a-time. The FVG detector
@@ -456,9 +458,10 @@ async function main() {
       // exposure 3-10x vs the validated config.
       const synthAlreadyOpen = synthPaper.getState().open.some((p) => p.symbol === sig.symbol && p.side === sig.action);
       if (synthAlreadyOpen) {
-        log.debug("synth signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action });
+        log.info("synth signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action });
         return;
       }
+      const synthMatch = synthMatches[0];
       const pos = synthPaper.openPosition({
         signalId: sig.id,
         symbol: sig.symbol,
@@ -466,14 +469,16 @@ async function main() {
         detector: sig.detector,
         entryPrice: entryPriceHint,
         atr,
-        atrTpMult: synthMatches[0].atrTpMult,
-        atrSlMult: synthMatches[0].atrSlMult,
+        atrTpMult: synthMatch.atrTpMult,
+        atrSlMult: synthMatch.atrSlMult,
         multiplier: cfg.multiplier,
         granularity,
         candleEpoch: candle.epoch,
         baseStake: cfg.stake,
         minStake: 1,
         nowMs: Date.now(),
+        signalStopPrice: sig.stopPrice,
+        signalTargetPrice: sig.targetPrice,
       });
       if (pos) {
         log.info(`synthPaper opened ${pos.symbol} ${pos.side} stake=$${pos.stake.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
@@ -483,19 +488,27 @@ async function main() {
 
     // Match signal to a registered strategy on this symbol — only those gate trades.
     // Apply strategy descriptor filters too (buyOnly/sellOnly/minAdx/maxAdx).
-    const matches = strategiesForSymbol(sig.symbol)
-      .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled))
-      .filter(passesStrategyFilters);
+    const candidates = strategiesForSymbol(sig.symbol)
+      .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled));
+    const matches = candidates.filter(passesStrategyFilters);
     if (matches.length === 0) {
-      log.debug("signal filtered (no matching strategy or strategy gates rejected)", { symbol: sig.symbol, detector: sig.detector, side: sig.action, adx });
+      // Promote to info so operators can see WHY a signal didn't trade without
+      // enabling debug logging. Distinguish "no matching strategy" from
+      // "strategy gates rejected" so the operator knows where to look.
+      if (candidates.length === 0) {
+        log.info("signal blocked — no strategy enables this detector on this symbol", { symbol: sig.symbol, detector: sig.detector, side: sig.action });
+      } else {
+        log.info("signal blocked by strategy filters (buyOnly/sellOnly/minAdx/maxAdx)", { symbol: sig.symbol, detector: sig.detector, side: sig.action, adx, candidates: candidates.map((s) => s.id) });
+      }
       return;
     }
+    const match = matches[0];
     // Don't pile on same-side positions (validation used one-at-a-time).
     const realState = real.state();
     const liveOpenSameSide = (realState.open ?? []).some((t) => t.symbol === sig.symbol && t.side === sig.action);
     const paperOpenSameSide = paper.getState().open.some((p) => p.symbol === sig.symbol && p.side === sig.action);
     if ((cfg.liveTradingEnabled && liveOpenSameSide) || (!cfg.liveTradingEnabled && paperOpenSameSide)) {
-      log.debug("signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action, mode: cfg.liveTradingEnabled ? "live" : "paper" });
+      log.info("signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action, mode: cfg.liveTradingEnabled ? "live" : "paper" });
       return;
     }
 
@@ -508,17 +521,19 @@ async function main() {
         detector: sig.detector,
         entryPrice: entryPriceHint,
         atr,
-        atrTpMult: cfg.atrTpMult,
-        atrSlMult: cfg.atrSlMult,
+        atrTpMult: match.atrTpMult,
+        atrSlMult: match.atrSlMult,
         multiplier: cfg.multiplier,
         granularity,
         candleEpoch: candle.epoch,
         baseStake: cfg.stake,
         minStake: 1,
         nowMs: Date.now(),
+        signalStopPrice: sig.stopPrice,
+        signalTargetPrice: sig.targetPrice,
       });
       if (pos) {
-        log.info(`paper opened ${pos.symbol} ${pos.side} stake=$${pos.stake.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)} shift=${pos.appliedShiftReasons}`);
+        log.info(`paper opened ${pos.symbol} ${pos.side} strategy=${match.id} stake=$${pos.stake.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)} shift=${pos.appliedShiftReasons}`);
       } else {
         log.warn(`paper open rejected ${sig.symbol} ${sig.action} (atr=${atr}, balance=$${paper.getState().balance.toFixed(2)})`);
       }
@@ -526,7 +541,7 @@ async function main() {
     }
     const gate = real.canOpen();
     if (!gate.ok) {
-      log.info("trade gated", { reason: gate.reason });
+      log.info("trade gated", { reason: gate.reason, symbol: sig.symbol, side: sig.action });
       return;
     }
     try {
@@ -539,13 +554,15 @@ async function main() {
         tpSlMode: cfg.tpSlMode,
         takeProfitPct: cfg.takeProfitPct,
         stopLossPct: cfg.stopLossPct,
-        atrTpMult: cfg.atrTpMult,
-        atrSlMult: cfg.atrSlMult,
+        atrTpMult: match.atrTpMult,
+        atrSlMult: match.atrSlMult,
         atr,
         entryPriceHint,
         detector: sig.detector,
+        signalStopPrice: sig.stopPrice,
+        signalTargetPrice: sig.targetPrice,
       });
-      log.info("placeTrade ok", { id: trade.id, contractId: trade.contractId, stake: trade.stake });
+      log.info("placeTrade ok", { id: trade.id, contractId: trade.contractId, stake: trade.stake, strategy: match.id });
     } catch (e) {
       log.error("placeTrade failed", { err: (e as Error).message, symbol: sig.symbol, side: sig.action });
     }
