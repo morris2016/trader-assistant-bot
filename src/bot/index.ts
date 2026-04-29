@@ -409,6 +409,15 @@ async function main() {
         log.debug("synth signal filtered by strategy gates", { symbol: sig.symbol, side: sig.action, adx });
         return;
       }
+      // Don't pile on: validation used one-position-at-a-time. The FVG detector
+      // can emit multiple signals on the same bar (stacked FVGs) and new bars
+      // can fire while a prior position is still open — both would multiply
+      // exposure 3-10x vs the validated config.
+      const synthAlreadyOpen = synthPaper.getState().open.some((p) => p.symbol === sig.symbol && p.side === sig.action);
+      if (synthAlreadyOpen) {
+        log.debug("synth signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action });
+        return;
+      }
       const pos = synthPaper.openPosition({
         signalId: sig.id,
         symbol: sig.symbol,
@@ -438,6 +447,14 @@ async function main() {
       .filter(passesStrategyFilters);
     if (matches.length === 0) {
       log.debug("signal filtered (no matching strategy or strategy gates rejected)", { symbol: sig.symbol, detector: sig.detector, side: sig.action, adx });
+      return;
+    }
+    // Don't pile on same-side positions (validation used one-at-a-time).
+    const realState = real.state();
+    const liveOpenSameSide = (realState.open ?? []).some((t) => t.symbol === sig.symbol && t.side === sig.action);
+    const paperOpenSameSide = paper.getState().open.some((p) => p.symbol === sig.symbol && p.side === sig.action);
+    if ((cfg.liveTradingEnabled && liveOpenSameSide) || (!cfg.liveTradingEnabled && paperOpenSameSide)) {
+      log.debug("signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action, mode: cfg.liveTradingEnabled ? "live" : "paper" });
       return;
     }
 
