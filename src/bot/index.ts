@@ -210,6 +210,15 @@ async function main() {
         const tradesForStrat = closed.filter((t) => sSyms.has(t.symbol) && detIds.includes(t.detector));
         const wins = tradesForStrat.filter((t) => (t.profit ?? 0) > 0).length;
         const pnl = tradesForStrat.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+        // Bars-seen accounting — sum the per-key new-bar counters for every
+        // (sym, gr) this strategy runs on. Tells the operator "this strategy's
+        // detector has been called N times since startup" — distinguishes
+        // "no signals because no bar ever closed" from "no signals because
+        // the detector ran but didn't qualify a setup".
+        let barsSeen = 0;
+        for (const sym of s.symbols) {
+          barsSeen += totalNewBarsByKey.get(`${sym}|${s.granularity}`) ?? 0;
+        }
         return {
           id: s.id,
           name: s.name,
@@ -230,8 +239,10 @@ async function main() {
             pnlUsd: pnl,
             winRate: tradesForStrat.length ? wins / tradesForStrat.length : 0,
             expectancyR: 0, // computed only when we have stop/entry per trade — defer
-            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.emittedAt)) : null,
+            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.ts)) : null,
             lastTradeAt: tradesForStrat.length ? Math.max(...tradesForStrat.map((t) => t.closedAt ?? 0)) : null,
+            barsSeen,
+            lastBarSeenAt: strategyLastBarSeenAt.get(s.id) ?? null,
           },
         };
       });
@@ -282,14 +293,20 @@ async function main() {
         const tradesForStrat = closed.filter((t) => sSyms.has(t.symbol) && detIds.includes(t.detector));
         const wins = tradesForStrat.filter((t) => t.pnl > 0).length;
         const pnl = tradesForStrat.reduce((acc, t) => acc + t.pnl, 0);
+        let barsSeen = 0;
+        for (const sym of s.symbols) {
+          barsSeen += totalNewBarsByKey.get(`${sym}|${s.granularity}`) ?? 0;
+        }
         return {
           id: s.id, name: s.name, description: s.description, symbols: s.symbols, granularity: s.granularity,
           validation: { expectancyR: s.validation?.expectancyR, winRate: s.validation?.winRate, pnlUsd: s.validation?.pnlUsd, trades: s.validation?.trades },
           live: {
             signals: sigsForStrat.length, trades: tradesForStrat.length, wins, losses: tradesForStrat.length - wins,
             pnlUsd: pnl, winRate: tradesForStrat.length ? wins / tradesForStrat.length : 0, expectancyR: 0,
-            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.emittedAt)) : null,
+            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.ts)) : null,
             lastTradeAt: tradesForStrat.length ? Math.max(...tradesForStrat.map((t) => t.closedAt ?? 0)) : null,
+            barsSeen,
+            lastBarSeenAt: strategyLastBarSeenAt.get(s.id) ?? null,
           },
         };
       });

@@ -84,6 +84,8 @@ export type StrategyStats = {
     expectancyR: number;
     lastSignalAt: number | null;
     lastTradeAt: number | null;
+    barsSeen: number;
+    lastBarSeenAt: number | null;
   };
 };
 

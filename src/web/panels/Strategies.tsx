@@ -11,6 +11,8 @@ export function StrategiesPanel({ strategies }: { strategies: StrategyStats[] })
             <th>Symbol(s)</th>
             <th>TF</th>
             <th>Validated</th>
+            <th>Bars seen</th>
+            <th>Last bar</th>
             <th>Live signals</th>
             <th>Live trades</th>
             <th>Live WR</th>
@@ -33,6 +35,8 @@ export function StrategiesPanel({ strategies }: { strategies: StrategyStats[] })
                 {s.validation.winRate != null && <>{(s.validation.winRate * 100).toFixed(0)}% · </>}
                 {s.validation.pnlUsd != null && <>${s.validation.pnlUsd.toFixed(0)}</>}
               </td>
+              <td className={`mono ${s.live.barsSeen === 0 ? "neg" : ""}`}>{s.live.barsSeen}</td>
+              <td className="faint">{fmtAgo(s.live.lastBarSeenAt)}</td>
               <td className="mono">{s.live.signals}</td>
               <td className="mono">{s.live.trades}</td>
               <td className="mono">{s.live.trades > 0 ? `${(s.live.winRate * 100).toFixed(0)}%` : "—"}</td>
