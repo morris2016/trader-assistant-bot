@@ -211,13 +211,24 @@ export class Engine extends EventEmitter {
     const dets: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }> = {};
     for (const det of ALL_DETECTORS) {
       const cfg = this.detectorConfig.get(det.id);
-      const detState = (stateBag as Record<string, unknown>)[det.id] as { active?: Map<string, { mitigated: boolean }> } | undefined;
-      const active = detState?.active;
-      let activeCount = 0, unmitigatedCount = 0;
-      if (active) {
-        for (const blk of active.values()) {
+      // OrderBlock + FVG store zones in `active` map with `mitigated` flag.
+      // LiquiditySweep stores zones in `pools` map with `sweptEpoch` (null = unswept).
+      // Need to handle both shapes so the snapshot is meaningful for all detectors.
+      const detState = (stateBag as Record<string, unknown>)[det.id] as
+        | { active?: Map<string, { mitigated: boolean }>; pools?: Map<string, { sweptEpoch: number | null }> }
+        | undefined;
+      let activeCount = 0;
+      let unmitigatedCount = 0;
+      if (detState?.active) {
+        for (const blk of detState.active.values()) {
           activeCount++;
           if (!blk.mitigated) unmitigatedCount++;
+        }
+      }
+      if (detState?.pools) {
+        for (const pool of detState.pools.values()) {
+          activeCount++;
+          if (pool.sweptEpoch == null) unmitigatedCount++;
         }
       }
       dets[det.id] = { enabled: cfg?.enabled ?? false, activeCount, unmitigatedCount };

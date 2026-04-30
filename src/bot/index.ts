@@ -708,6 +708,23 @@ async function main() {
     for (const [k, v] of newBarsSinceHeartbeat) newBarsByKey[k] = v;
     candlesSinceHeartbeat.clear();
     newBarsSinceHeartbeat.clear();
+    // Per-engine zone counts: `active/unmitigated` per enabled detector. Tells
+    // the operator whether the seeded history actually built any OB/FVG/sweep
+    // zones. If a key shows `0/0` across all detectors, the engine is starving
+    // for setups and no signal can fire regardless of how many bars close.
+    // If unmitigated > 0 but no signals, the bottleneck is the retest gate.
+    const zonesByKey: Record<string, Record<string, string>> = {};
+    for (const [key, eng] of engines) {
+      const [sym] = key.split("|");
+      const diag = eng.diagnose(sym as SymbolCode);
+      const compact: Record<string, string> = {};
+      for (const [det, info] of Object.entries(diag.detectors)) {
+        if (!info.enabled) continue;
+        const short = det === "orderBlock" ? "ob" : det === "fairValueGap" || det === "fvg" ? "fvg" : det === "liquiditySweep" ? "sw" : det;
+        compact[short] = `${info.activeCount}/${info.unmitigatedCount}`;
+      }
+      if (Object.keys(compact).length > 0) zonesByKey[key] = compact;
+    }
     log.info("heartbeat", {
       uptimeSec: Math.floor((Date.now() - startTs) / 1000),
       wsConnected,
@@ -728,6 +745,7 @@ async function main() {
       signalsBuffered: recentSignals.length,
       candlesByKey,
       newBarsByKey,
+      zonesByKey,
     });
     // Subscription staleness — warn if a stream hasn't received a candle in
     // 1.5× granularity. Old threshold was 2×, which hid 90-min outages on 1h
