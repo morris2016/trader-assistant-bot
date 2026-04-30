@@ -214,6 +214,7 @@ export const api = {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
       if (typeof v === "boolean") p.set(k, String(v));
+      else if (typeof v === "string") p.set(k, v);
       else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-synth-config?${p.toString()}`);
@@ -231,6 +232,7 @@ export const api = {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
       if (typeof v === "boolean") p.set(k, String(v));
+      else if (typeof v === "string") p.set(k, v);
       else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-fast1-config?${p.toString()}`);
@@ -249,6 +251,7 @@ export const api = {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
       if (typeof v === "boolean") p.set(k, String(v));
+      else if (typeof v === "string") p.set(k, v);
       else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
