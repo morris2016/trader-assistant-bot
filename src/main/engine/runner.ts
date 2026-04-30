@@ -206,11 +206,11 @@ export class Engine extends EventEmitter {
     lastEpoch: number | null;
     barIndex: number;
     atr: number;
-    detectors: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }>;
+    detectors: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number; hasZoneState: boolean }>;
   } {
     const buf = this.buffers.get(symbol);
     const stateBag = this.state.get(symbol) ?? {};
-    const dets: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number }> = {};
+    const dets: Record<string, { enabled: boolean; activeCount: number; unmitigatedCount: number; hasZoneState: boolean }> = {};
     for (const det of ALL_DETECTORS) {
       const cfg = this.detectorConfig.get(det.id);
       // OrderBlock + FVG store zones in `active` map with `mitigated` flag.
@@ -221,19 +221,25 @@ export class Engine extends EventEmitter {
         | undefined;
       let activeCount = 0;
       let unmitigatedCount = 0;
+      let hasZoneState = false;
       if (detState?.active) {
+        hasZoneState = true;
         for (const blk of detState.active.values()) {
           activeCount++;
           if (!blk.mitigated) unmitigatedCount++;
         }
       }
       if (detState?.pools) {
+        hasZoneState = true;
         for (const pool of detState.pools.values()) {
           activeCount++;
           if (pool.sweptEpoch == null) unmitigatedCount++;
         }
       }
-      dets[det.id] = { enabled: cfg?.enabled ?? false, activeCount, unmitigatedCount };
+      // Stateless rule-based detectors (e.g. trendContinuation) have no zone
+      // map. Marking them with hasZoneState=false lets the heartbeat emitter
+      // omit the misleading "0/0" entry for them.
+      dets[det.id] = { enabled: cfg?.enabled ?? false, activeCount, unmitigatedCount, hasZoneState };
     }
     return {
       bars: buf?.length() ?? 0,

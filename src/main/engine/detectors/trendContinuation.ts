@@ -45,11 +45,19 @@ export const trendContinuation: Detector = {
     const atr = latestAtr(candles, atrPeriod);
     if (atr <= 0) return { signals: [] };
 
-    // Check the last `lookback` bars all closed in the same direction.
-    // For BUY: each bar close > open. For SELL: each bar close < open.
-    const tail = candles.slice(-lookback);
-    const allUp = tail.every((c) => c.close > c.open);
-    const allDown = tail.every((c) => c.close < c.open);
+    // Check the last `lookback` bars all moved in the same direction by
+    // comparing close-vs-previous-close (drift direction across bars), NOT
+    // close-vs-open (which on smooth synthetics is often close-to-flat even
+    // mid-drift). Need lookback+1 bars to compute lookback comparisons.
+    const tailLen = lookback + 1;
+    if (candles.length < tailLen) return { signals: [] };
+    const tail = candles.slice(-tailLen);
+    let allUp = true;
+    let allDown = true;
+    for (let i = 1; i < tail.length; i++) {
+      if (!(tail[i].close > tail[i - 1].close)) allUp = false;
+      if (!(tail[i].close < tail[i - 1].close)) allDown = false;
+    }
 
     let action: "BUY" | "SELL" | null = null;
     if (allUp && (direction === 0 || direction === 1)) action = "BUY";

@@ -31,13 +31,20 @@ export const crash500nDrift: StrategyDescriptor = {
     "Buy every 1m green bar on Crash 500 Index. Drift is up except for rare " +
     "down-spikes; tight TP harvests drift, wide SL absorbs one spike per " +
     "cycle. Martingale recovers spike losses across the next several wins.",
-  symbols: ["CRASH500N"],
+  // Deriv ticker is "CRASH500" (no N suffix on the 500 variant — only 300 and
+  // 1000 series use the N-nightly suffix). First deploy used "CRASH500N" and
+  // got InvalidSymbol from Deriv WS.
+  symbols: ["CRASH500"],
   granularity: 60,
   detectors: defaultDetectorConfigs().map((d) => ({
     ...d,
     enabled: d.id === "trendContinuation",
+    // lookback 1 with close-vs-open was too strict — many bars closed flat or
+    // slightly green-on-red-drift on Boom/Crash, producing zero signals. Bump
+    // to 2 with close-vs-prev-close semantics so we trigger on any string of
+    // 2 consecutive bars whose closes moved in the drift direction.
     params: d.id === "trendContinuation"
-      ? { direction: 1, lookback: 1, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
+      ? { direction: 1, lookback: 2, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
       : d.params,
   })),
   atrSlMult: 2.0,
@@ -56,7 +63,7 @@ export const crash500nDrift: StrategyDescriptor = {
     notes: [
       "PAPER-ONLY initial deploy. Target ≥60% WR over 7-day paper before live.",
       "Negative pre-martingale expectancy by design — martingale recovers losses.",
-      "Edge: Crash 500N spec drift is up-direction; spikes are rare and bounded.",
+      "Edge: Crash 500 spec drift is up-direction; spikes are rare and bounded.",
     ],
   },
 };
@@ -77,7 +84,7 @@ export const boom300nDrift: StrategyDescriptor = {
     ...d,
     enabled: d.id === "trendContinuation",
     params: d.id === "trendContinuation"
-      ? { direction: -1, lookback: 1, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
+      ? { direction: -1, lookback: 2, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
       : d.params,
   })),
   atrSlMult: 2.0,

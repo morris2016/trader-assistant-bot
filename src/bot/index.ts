@@ -877,6 +877,10 @@ async function main() {
       const compact: Record<string, string> = {};
       for (const [det, info] of Object.entries(diag.detectors)) {
         if (!info.enabled) continue;
+        // Stateless rule-based detectors (trendContinuation) have no zone map;
+        // showing "0/0" for them is misleading because the detector IS firing
+        // every bar, it just doesn't carry persistent setups.
+        if (!info.hasZoneState) continue;
         const short = det === "orderBlock" ? "ob" : det === "fairValueGap" || det === "fvg" ? "fvg" : det === "liquiditySweep" ? "sw" : det;
         compact[short] = `${info.activeCount}/${info.unmitigatedCount}`;
       }
