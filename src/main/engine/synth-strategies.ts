@@ -1,146 +1,136 @@
 // Deriv synthetic-index strategies. SEPARATE from STRATEGIES (real-asset registry).
 // These run in their own paper-trading sandbox so we can validate live performance
-// before promoting to real trading. Validated 2026-04-29 via 3-window CV (W0/TRAIN/TEST).
+// before promoting to real trading.
+//
+// Reworked 2026-05-01: replaced the original 1h SMC stack (rdbull_fvg,
+// jd100_sweep, boom300n_ob) with 5m high-frequency configs found via 28-day
+// in-sample sweep + 3-window 7-day OOS validation. Old stack averaged ~3
+// trades/day; new stack delivers ~52 trades/day combined at 57-63% WR. JD100
+// dropped — no qualifying config across all detectors tested.
+//
+// Validation method: scripts/synth-rework-sweep.ts (in-sample, 28d Mar 30 →
+// Apr 27) + scripts/synth-rework-oos.ts (3 OOS windows: Feb 1-8, Feb 22-Mar 1,
+// Mar 15-22). Pass criteria: WR ≥ 55%, expR > 0, half-stable, ≥30 trades.
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
 
 /**
- * RDBULL FVG — Bull Market Index gap-fill on 1h.
+ * BOOM 300N drift-pullback (5m, down-drift, k=2, kAtr=0.7).
  *
- * Validation (3-window CV, 2026-04-29):
- *   W0  (Oct-Dec 2025):  +$3,161
- *   TRAIN (Jan-Mar 2026): +$2,026
- *   TEST  (Apr 1-29 OOS): +$82
- *   558 trades / 210d / SUM +$5,270 / ~2.7 trades/day
+ * Pattern: BOOM 300N has structural down-drift (slow grind down) punctuated
+ * by rare large up-spikes. After 2 consecutive up-closes (against drift), the
+ * pullback is exhausted and price reverts toward the dominant down direction.
+ * Equidistant SL/TP at 0.7×ATR — tight geometry trades smaller wins for
+ * higher hit rate.
  *
- * Bull Market Index has constant up-drift; FVG fills consistently catch buyable
- * pullbacks. Raw defaults — no minGap/ADX filtering needed.
+ * Validation:
+ *   In-sample (28d, Mar 30 → Apr 27): 1105 trades / 61% WR / +$56 / 39.5/day
+ *   OOS aggregate (3×7d windows):     877 trades / 57% WR / +$30 / 41/day
+ *   OOS breakdown:
+ *     • W1 Feb 01-08:    283t / 61% WR / +$14.69 ✅
+ *     • W2 Feb 22-Mar 01: 292t / 55% WR / +$6.83 ⚠ (borderline pass)
+ *     • W3 Mar 15-22:    302t / 57% WR / +$8.34 ✅
  */
-export const rdbullFvg: StrategyDescriptor = {
-  id: "rdbull_fvg",
-  name: "RDBULL FVG — bull-drift gap fill",
-  description: "FVG retests on Bull Market Index (RDBULL) at 1h. Raw defaults, no filters. Up-drift means most fills are buy-side wins.",
-  symbols: ["RDBULL"],
-  granularity: 3600,
+export const boom300nDrift: StrategyDescriptor = {
+  id: "boom300n_drift",
+  name: "BOOM 300N drift-pullback (5m, down-drift)",
+  description:
+    "5m drift-pullback on BOOM 300N. After 2 consecutive against-drift (up) closes, " +
+    "SELL back into down-drift with equidistant SL/TP at 0.7×ATR (tight geometry, " +
+    "high WR). ~40 trades/day at 57-61% WR.",
+  symbols: ["BOOM300N"],
+  granularity: 300,
   detectors: defaultDetectorConfigs().map((d) => ({
     ...d,
-    enabled: d.id === "fvg",
-    params: d.id === "fvg"
-      ? { atrPeriod: 14, minGapAtrMul: 0.15, maxActive: 12, targetRMult: 3.0, entryDepth: 0, stopBufferAtrMul: 0.1, requireRejection: 0 }
+    enabled: d.id === "driftPullback",
+    params: d.id === "driftPullback"
+      ? { driftDirection: -1, consec: 2, atrPeriod: 14, kAtr: 0.7 }
       : d.params,
   })),
   atrSlMult: 1.0,
-  atrTpMult: 3.0,
+  atrTpMult: 1.0,
   costBps: 5.0,
   validation: {
-    validatedAt: "2026-04-29",
-    sampleDays: 210,
-    trades: 558,
-    winRate: 0.50,
-    expectancyR: 0.30,
-    pnlUsd: 5270,
-    stake: 50,
-    multiplier: 30,
+    validatedAt: "2026-05-01",
+    sampleDays: 28,
+    trades: 1105,
+    winRate: 0.61,
+    expectancyR: 0.051,
+    pnlUsd: 56,
+    stake: 1,
+    multiplier: 100,
     notes: [
-      "✓ 3-window CV PASS: W0 +$3161, TRAIN +$2026, TEST +$82.",
-      "Highest-frequency synth winner: ~2.7 trades/day on 1h (9.5/day on 15m).",
-      "Asset-native variant pack: raw·3:1 won. BUY-only and minGap variants also passed but had lower SUM.",
+      "✓ 28-day in-sample TRAIN: 61% WR / +$56 / 40 trades/day / both halves +$25/+$31.",
+      "✓ 3-window OOS (Feb-Mar 2026): 57% aggregate WR / +$29.85 / 41 trades/day. W1 and W3 PASS, W2 borderline at exactly 55% WR.",
+      "Replaces 1h boom300n_ob (0.57/day). 70× higher cadence, similar accuracy band.",
+      "Param sweep tested k∈{2,3} × kAtr∈{0.7, 1.0, 1.3} × tf∈{1m, 5m}. k=2/kAtr=0.7/5m won on edge×freq score.",
     ],
   },
 };
 
 /**
- * JD100 Liquidity Sweep — Jump 100 Index, BUY-only with wide stop.
+ * RDBULL breakout-continuation BUY-only (5m, lb=15, kAtr=2.0, momRatio=0.7).
  *
- * Validation (3-window CV, 2026-04-29):
- *   W0:    +$364
- *   TRAIN: +$747
- *   TEST:  +$277
- *   50 trades / 210d / SUM +$1,388 / ~0.24 trades/day
+ * Pattern: Bull Market Index has structural up-drift and "breaks out" of
+ * ranges in pulses. When price closes above the prior 15-bar high AND closes
+ * in the upper 70% of the bar (strong momentum), enter LONG with the
+ * breakout. Equidistant SL/TP at 2.0×ATR — wide geometry means losses are
+ * capped by the multiplier stop-out (-100% stake) while wins are uncapped,
+ * producing asymmetric R:R that pairs well with the 60%+ WR.
  *
- * Jump-diffusion synthetic — periodic up + down jumps. Wide stop buffer
- * (0.25× ATR) survives the jumps; BUY-only catches up-jumps cleanly.
+ * BUY-only: SELL breakouts on RDBULL are counter-trend drag (51% WR);
+ * filtering to BUY lifted WR to 62% in OOS.
+ *
+ * Validation:
+ *   In-sample (28d, Mar 30 → Apr 27): 307 trades / 62% WR / +$200 / 11/day
+ *   OOS aggregate (3×7d windows):     256 trades / 63% WR / +$171 / 12/day
+ *   OOS breakdown (3/3 windows pass):
+ *     • W1 Feb 01-08:    97t / 62% WR / +$63.16 ✅
+ *     • W2 Feb 22-Mar 01: 79t / 67% WR / +$62.21 ✅
+ *     • W3 Mar 15-22:    80t / 60% WR / +$46.07 ✅
  */
-export const jd100Sweep: StrategyDescriptor = {
-  id: "jd100_sweep",
-  name: "JD100 Sweep — jump-survival BUY-only",
-  description: "Liquidity-sweep BUY entries on Jump 100 Index (JD100) at 1h. stopBufferAtrMul=0.25, 4:1 R:R. Wide stop survives periodic jumps.",
-  symbols: ["JD100"],
-  granularity: 3600,
+export const rdbullBreakout: StrategyDescriptor = {
+  id: "rdbull_breakout",
+  name: "RDBULL breakout-continuation (5m, BUY-only)",
+  description:
+    "5m breakout-continuation on Bull Market Index (RDBULL). When close pierces " +
+    "the prior 15-bar high with strong momentum (close in upper 70% of bar), enter " +
+    "LONG with equidistant SL/TP at 2.0×ATR. ~12 trades/day at 60-67% WR. SELL-side " +
+    "filtered out — RDBULL up-drift makes down-breakouts counter-trend.",
+  symbols: ["RDBULL"],
+  granularity: 300,
   detectors: defaultDetectorConfigs().map((d) => ({
     ...d,
-    enabled: d.id === "liquiditySweep",
-    params: d.id === "liquiditySweep"
-      ? { atrPeriod: 14, equalToleranceAtrMul: 0.1, minEqualCount: 2, lookbackBars: 50, confirmationWindow: 3, poolRetentionBarsAfterSweep: 20, swingLeft: 2, swingRight: 2, targetRMult: 4.0, entryOnSweep: 0, stopBufferAtrMul: 0.25 }
+    enabled: d.id === "breakoutContinuation",
+    params: d.id === "breakoutContinuation"
+      ? { lookback: 15, atrPeriod: 14, kAtr: 2.0, momRatio: 0.7, sideFilter: 1 }
       : d.params,
   })),
   atrSlMult: 1.0,
-  atrTpMult: 4.0,
+  atrTpMult: 1.0,
   costBps: 5.0,
   buyOnly: true,
   validation: {
-    validatedAt: "2026-04-29",
-    sampleDays: 210,
-    trades: 50,
-    winRate: 0.55,
-    expectancyR: 1.0,
-    pnlUsd: 1388,
-    stake: 50,
-    multiplier: 30,
+    validatedAt: "2026-05-01",
+    sampleDays: 28,
+    trades: 307,
+    winRate: 0.62,
+    expectancyR: 0.650,
+    pnlUsd: 200,
+    stake: 1,
+    multiplier: 100,
     notes: [
-      "✓ 3-window CV PASS: all 3 windows positive across the lowest-trade-count winner — high $/trade quality.",
-      "stopBuf=0.25 + buyOnly was the only Sweep variant that passed CV; default-stop or SELL-bias variants all failed at least one window.",
-      "Sniper character: only ~1 fire every 4 days — pair with higher-frequency strategies for portfolio coverage.",
+      "✓ 28-day in-sample TRAIN: 62% WR / +$200 / 11 trades/day / both halves +$104/+$95.",
+      "✓ 3-window OOS PASS (3/3): 63% aggregate WR / +$171 / 12 trades/day across Feb-Mar 2026.",
+      "Replaces 1h rdbull_fvg (2.7/day). 4× higher cadence at 12-13% higher WR.",
+      "BUY-only filter critical: bidirectional version was 53% WR. Up-drift makes SELL breakouts counter-trend.",
+      "kAtr=2.0 loose geometry creates loss-cap asymmetry (wins uncapped, losses capped at -100% stake) — high expR=+0.65 reflects this leverage interaction, not raw accuracy alone.",
     ],
   },
 };
 
-/**
- * BOOM 300N OB — Boom 300 Index, raw OB on 1h.
- *
- * Validation (3-window CV, 2026-04-29):
- *   W0:    +$76
- *   TRAIN: +$494
- *   TEST:  +$97
- *   120 trades / 210d / SUM +$667 / ~0.57 trades/day
- *
- * Boom 300N is the inverse of crash indices: smooth down-drift punctuated by
- * rare big up-spikes. Raw OB at 1h fades the spike + catches the drift.
- */
-export const boom300nOb: StrategyDescriptor = {
-  id: "boom300n_ob",
-  name: "BOOM 300N OB — spike-fade + drift",
-  description: "Order-block entries on Boom 300N Index at 1h. Raw defaults, no filters. Catches the inverted up-spike + smooth down-drift pattern.",
-  symbols: ["BOOM300N"],
-  granularity: 3600,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    enabled: d.id === "orderBlock",
-    params: d.id === "orderBlock"
-      ? { lookback: 12, atrPeriod: 14, displacementAtrMultiplier: 0.8, obSearchMaxBack: 3, requireFVG: 0, requireLiquiditySweep: 0, sweepLookbackBars: 30, fourCandleValidation: 0, retestConfirmationBars: 2, qualityFilterLookback: 0, rejectionBodyAtrMul: 0.3, zoneStyle: 0, entryDepth: 0, targetRMult: 3.0 }
-      : d.params,
-  })),
-  atrSlMult: 1.0,
-  atrTpMult: 3.0,
-  costBps: 5.0,
-  validation: {
-    validatedAt: "2026-04-29",
-    sampleDays: 210,
-    trades: 120,
-    winRate: 0.50,
-    expectancyR: 0.5,
-    pnlUsd: 667,
-    stake: 50,
-    multiplier: 30,
-    notes: [
-      "✓ 3-window CV PASS: W0 +$76, TRAIN +$494, TEST +$97.",
-      "Moderate frequency: ~0.57/day on 1h. lb=18·ce·4:1 also passed (+$395 SUM) — kept raw·3:1 for higher SUM.",
-    ],
-  },
-};
-
-export const SYNTH_STRATEGIES: StrategyDescriptor[] = [rdbullFvg, jd100Sweep, boom300nOb];
+export const SYNTH_STRATEGIES: StrategyDescriptor[] = [boom300nDrift, rdbullBreakout];
 
 export function synthStrategiesForSymbol(symbol: string): StrategyDescriptor[] {
   return SYNTH_STRATEGIES.filter((s) => s.symbols.includes(symbol));
