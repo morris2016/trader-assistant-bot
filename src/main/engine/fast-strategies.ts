@@ -38,7 +38,13 @@ export const crash500nDrift: StrategyDescriptor = {
   granularity: 60,
   detectors: defaultDetectorConfigs().map((d) => ({
     ...d,
-    enabled: d.id === "trendContinuation",
+    // Disabled 2026-04-30 — first paper run produced 4 instant SL-hits on
+    // BOOM300N as the in-progress bar's spike tagged SL within ms of open.
+    // The drift-fade premise is sound but this implementation has three
+    // structural flaws: bar-start treated as bar-close, ATR inflated by
+    // spike memory making SL = typical spike size, and no validated edge.
+    // Re-enable only after backtest-validated replacement strategy.
+    enabled: false,
     // lookback 1 with close-vs-open was too strict — many bars closed flat or
     // slightly green-on-red-drift on Boom/Crash, producing zero signals. Bump
     // to 2 with close-vs-prev-close semantics so we trigger on any string of
@@ -82,7 +88,13 @@ export const boom300nDrift: StrategyDescriptor = {
   granularity: 60,
   detectors: defaultDetectorConfigs().map((d) => ({
     ...d,
-    enabled: d.id === "trendContinuation",
+    // Disabled 2026-04-30 — first paper run produced 4 instant SL-hits on
+    // BOOM300N as the in-progress bar's spike tagged SL within ms of open.
+    // The drift-fade premise is sound but this implementation has three
+    // structural flaws: bar-start treated as bar-close, ATR inflated by
+    // spike memory making SL = typical spike size, and no validated edge.
+    // Re-enable only after backtest-validated replacement strategy.
+    enabled: false,
     params: d.id === "trendContinuation"
       ? { direction: -1, lookback: 2, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
       : d.params,
