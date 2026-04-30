@@ -450,7 +450,20 @@ async function main() {
     if (isNewBar && r.signals.length === 0) {
       log.info(`bar processed no signal ${symbol}@${granularity}s rejected=${r.rejected ?? 0} adx=${r.regime?.adx?.toFixed(1) ?? "?"}`);
     }
+    // Stacked-zone dedupe: when multiple FVGs (or sweeps, or OBs) retest on
+    // the same bar, the detector emits one signal per zone. Trade layer
+    // already dedupes via the same-side-already-open guard, but the
+    // recentSignals buffer + UI would still show every duplicate. Suppress
+    // duplicates here so the operator sees one signal per (bar, sym, det,
+    // side); the first one wins, others are discarded silently.
+    const seenThisBar = new Set<string>();
     for (const sig of r.signals) {
+      const dedupeKey = `${candle.epoch}|${sig.symbol}|${sig.detector}|${sig.action}`;
+      if (seenThisBar.has(dedupeKey)) {
+        log.debug("signal deduped (stacked zones on same bar)", { dedupeKey });
+        continue;
+      }
+      seenThisBar.add(dedupeKey);
       log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence, granularity });
       recentSignals.push(sig);
       if (recentSignals.length > SIGNAL_HISTORY) recentSignals.splice(0, recentSignals.length - SIGNAL_HISTORY);
