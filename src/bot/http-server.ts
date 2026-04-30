@@ -6,7 +6,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { BotState, Fast2Config } from "./storage";
+import type { BotState, Fast1Config, Fast2Config } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
@@ -34,6 +34,8 @@ export type ManualControls = {
   resetSynthPaper: (balance?: number) => void;
   /** Reset fast-trade paper sandbox AND clear all per-strategy martingale ladders. */
   resetFastPaper: (balance?: number) => void;
+  /** Patch Fast (sandbox 1) runtime config (tradeMultiplier, martingaleMultiplier, fees, etc.). */
+  updateFast1Config: (patch: Partial<Fast1Config>) => void;
   /** Reset Fast2 sandbox AND clear all per-strategy martingale ladders. */
   resetFast2Paper: (balance?: number) => void;
   /** Patch Fast2 runtime config (tradeMultiplier, martingaleMultiplier, etc.). */
@@ -123,6 +125,8 @@ export function startHttpServer(opts: {
   getSynthStrategyStats: () => StrategyStats[];
   /** Per-strategy live stats for fast-trade strategies. */
   getFastStrategyStats: () => StrategyStats[];
+  /** Fast (sandbox 1) runtime config — leverage + martingale + fees. */
+  getFast1Config: () => Fast1Config;
   /** Fast2 paper sandbox state — separate balance/trades/equity from fastPaper. */
   getFast2PaperState: () => PaperState;
   getFast2PaperStats: () => Record<string, number>;
@@ -144,7 +148,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -160,6 +164,24 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-fast-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetFastPaper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/update-fast1-config") {
+            const patch: Partial<Fast1Config> = {};
+            const tm = url.searchParams.get("tradeMultiplier");
+            if (tm) patch.tradeMultiplier = Number(tm);
+            const mm = url.searchParams.get("martingaleMultiplier");
+            if (mm) patch.martingaleMultiplier = Number(mm);
+            const bs = url.searchParams.get("baseStake");
+            if (bs) patch.baseStake = Number(bs);
+            const ml = url.searchParams.get("maxLevels");
+            if (ml) patch.maxLevels = Number(ml);
+            const cap = url.searchParams.get("perTradeCap");
+            if (cap) patch.perTradeCap = Number(cap);
+            const cm = url.searchParams.get("commissionPct");
+            if (cm) patch.commissionPct = Number(cm);
+            const sp = url.searchParams.get("entrySpreadBps");
+            if (sp) patch.entrySpreadBps = Number(sp);
+            opts.manualControls.updateFast1Config(patch);
           }
           else if (path0 === "/api/control/reset-fast2-paper") {
             const balance = url.searchParams.get("balance");
@@ -179,6 +201,10 @@ export function startHttpServer(opts: {
             if (ml) patch.maxLevels = Number(ml);
             const cap = url.searchParams.get("perTradeCap");
             if (cap) patch.perTradeCap = Number(cap);
+            const cm = url.searchParams.get("commissionPct");
+            if (cm) patch.commissionPct = Number(cm);
+            const sp = url.searchParams.get("entrySpreadBps");
+            if (sp) patch.entrySpreadBps = Number(sp);
             opts.manualControls.updateFast2Config(patch);
           }
           else if (path0 === "/api/control/resubscribe") {
@@ -328,7 +354,12 @@ export function startHttpServer(opts: {
             daily: ps.daily,
             open: ps.open,
             martingale: opts.getFastMartingale(),
+            config: opts.getFast1Config(),
           });
+          return;
+        }
+        if (path0 === "/api/fast-config") {
+          json(res, 200, { config: opts.getFast1Config() });
           return;
         }
         if (path0 === "/api/fast-paper/trades") {
@@ -343,7 +374,11 @@ export function startHttpServer(opts: {
           return;
         }
         if (path0 === "/api/fast-strategies") {
-          json(res, 200, { strategies: opts.getFastStrategyStats(), martingale: opts.getFastMartingale() });
+          json(res, 200, {
+            strategies: opts.getFastStrategyStats(),
+            martingale: opts.getFastMartingale(),
+            config: opts.getFast1Config(),
+          });
           return;
         }
         if (path0 === "/api/fast-signals") {

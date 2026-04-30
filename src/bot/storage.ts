@@ -13,16 +13,15 @@ import {
 import { emptyMartingaleState, type MartingaleState } from "../main/engine/martingale";
 import { emptyPaperState, type PaperState } from "./paper-engine";
 
-/** Runtime-configurable parameters for the Fast2 sandbox. Set from the UI;
- *  consumed at trade-open time (tradeMultiplier sets the position leverage)
- *  and at ladder-advance time (martingaleMultiplier governs stake escalation
- *  on a loss). Independent of the existing FAST sandbox config. */
-export type Fast2Config = {
-  /** Position leverage applied to every Fast2 paper trade. UI exposes
-   *  100/200/300/400/500. */
+/** Shared shape for both Fast and Fast2 sandbox configs. Both expose the same
+ *  knobs — leverage, martingale, base stake, ladder depth, per-trade cap — plus
+ *  a Deriv-fee model (commission % of stake + entry-spread bps) so paper P&L
+ *  reflects what a real Deriv multiplier contract would settle at. */
+export type FastSandboxConfig = {
+  /** Position leverage applied to every paper trade. UI typically exposes
+   *  30/50/100/200/300/400/500. */
   tradeMultiplier: number;
-  /** Per-loss stake multiplier on the martingale ladder. UI exposes 1.7/2.0/2.2.
-   *  Combined with maxLevels and perTradeCap to bound ladder depth. */
+  /** Per-loss stake multiplier on the martingale ladder. */
   martingaleMultiplier: number;
   /** Stake at level 0 of the ladder. */
   baseStake: number;
@@ -30,14 +29,39 @@ export type Fast2Config = {
   maxLevels: number;
   /** Hard cap on a single trade's stake regardless of ladder level. */
   perTradeCap: number;
+  /** Deriv multiplier-contract commission as a fraction of stake (0.005 = 0.5%).
+   *  Charged once at trade open, deducted from pnl at settle. */
+  commissionPct: number;
+  /** Adverse entry slippage in basis points (1.0 = 1bp = 0.01% of price).
+   *  BUYs enter slightly higher, SELLs slightly lower — emulates Deriv's
+   *  bid/ask spread on the multiplier order. */
+  entrySpreadBps: number;
 };
 
+/** Fast (sandbox 1) — defaults targeted at the existing 30× / 2.2× / 5L config
+ *  that has been making real money on paper. Fees baked in for realistic P&L. */
+export type Fast1Config = FastSandboxConfig;
+export const DEFAULT_FAST1_CONFIG: Fast1Config = {
+  tradeMultiplier: 30,
+  martingaleMultiplier: 2.2,
+  baseStake: 0.5,
+  maxLevels: 5,
+  perTradeCap: 30,
+  commissionPct: 0.005,
+  entrySpreadBps: 1.0,
+};
+
+/** Fast2 — same shape as Fast1, defaults targeted at the validated 3-strategy
+ *  stack candidates (300×, 1.7× mart). */
+export type Fast2Config = FastSandboxConfig;
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   tradeMultiplier: 300,
   martingaleMultiplier: 1.7,
   baseStake: 1.5,
   maxLevels: 5,
   perTradeCap: 30,
+  commissionPct: 0.005,
+  entrySpreadBps: 1.0,
 };
 
 export type BotState = {
@@ -59,6 +83,10 @@ export type BotState = {
   /** Per-strategy martingale ladder state for the fast-trade sandbox. Keyed
    *  by strategy id (e.g. "crash500n_drift" / "boom300n_drift"). */
   fastMartingale: Record<string, MartingaleState>;
+  /** Fast (sandbox 1) runtime config — leverage, martingale, fees. Editable
+   *  from the UI; the bot applies it at every Fast trade open and ladder
+   *  advance so a live operator can tune behavior without redeploy. */
+  fast1Config: Fast1Config;
   /** Fast2 sandbox — parallel to fastPaper, independent balance / ladders /
    *  config. Hosts the validated 3-strategy stack with user-selectable
    *  martingale and trade leverage. */
@@ -79,6 +107,7 @@ export function emptyBotState(): BotState {
     synthPaper: emptyPaperState(),
     fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
     fastMartingale: {},
+    fast1Config: { ...DEFAULT_FAST1_CONFIG },
     fast2Paper: emptyPaperState(50), // Fast2 sandbox sized to the validated $50 starting balance
     fast2Martingale: {},
     fast2Config: { ...DEFAULT_FAST2_CONFIG },
@@ -107,6 +136,7 @@ export class BotStorage {
         synthPaper: parsed.synthPaper ?? emptyPaperState(),
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
+        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}) },
         fast2Paper: parsed.fast2Paper ?? emptyPaperState(50),
         fast2Martingale: parsed.fast2Martingale ?? {},
         fast2Config: { ...DEFAULT_FAST2_CONFIG, ...(parsed.fast2Config ?? {}) },

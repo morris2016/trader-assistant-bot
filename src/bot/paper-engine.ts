@@ -32,6 +32,10 @@ export type PaperPosition = {
   /** Stake multiplier applied at open (from adaptive shift), recorded for transparency. */
   appliedShiftMultiplier: number;
   appliedShiftReasons: string;
+  /** Deriv-style commission charged at open, deducted from pnl at settle. */
+  commission: number;
+  /** Adverse entry slippage applied to entryPrice at open (price units). */
+  entrySpread: number;
 };
 
 export type ClosedPaperPosition = PaperPosition & {
@@ -130,6 +134,15 @@ export class PaperEngine {
      *  externally) supplies the stake. The PaperEngine still enforces minStake
      *  and balance checks. */
     stakeOverride?: number;
+    /** Deriv-style commission as a fraction of stake (e.g. 0.005 = 0.5%).
+     *  Charged once at trade open; subtracted from pnl at settle so the paper
+     *  balance reflects what the real bot would actually keep. */
+    commissionPct?: number;
+    /** Adverse entry slippage as a fraction of entry price (e.g. 0.0001 = 1bp).
+     *  Shifts entry against the side direction so a BUY enters slightly higher
+     *  and a SELL slightly lower — matching Deriv's bid/ask spread on the
+     *  multiplier order. SL/TP and pnl are computed from the slipped entry. */
+    entrySpreadFrac?: number;
   }): PaperPosition | null {
     if (!isFinite(opts.atr) || opts.atr <= 0) return null;
     if (!isFinite(opts.entryPrice) || opts.entryPrice <= 0) return null;
@@ -150,12 +163,22 @@ export class PaperEngine {
       reasons = shift.reasons;
       stake = Math.max(opts.minStake, Math.round(opts.baseStake * mult * 100) / 100);
     }
-    if (stake > this.state.balance) return null; // can't afford
+    // Commission is recorded on the position and deducted from pnl at settle.
+    // Stake-affordability check applies to stake + commission so a thin balance
+    // can't open a trade whose fee alone exceeds available funds.
+    const commissionPct = isFinite(opts.commissionPct ?? 0) && (opts.commissionPct ?? 0) >= 0 ? (opts.commissionPct ?? 0) : 0;
+    const commission = round2(stake * commissionPct);
+    if (stake + commission > this.state.balance) return null; // can't afford stake + fee
+
+    // Apply entry slippage adversely (BUY pays higher, SELL receives lower).
+    const spreadFrac = isFinite(opts.entrySpreadFrac ?? 0) && (opts.entrySpreadFrac ?? 0) >= 0 ? (opts.entrySpreadFrac ?? 0) : 0;
+    const entrySpread = opts.entryPrice * spreadFrac;
+    const effectiveEntry = opts.side === "BUY" ? opts.entryPrice + entrySpread : opts.entryPrice - entrySpread;
 
     const slDelta = opts.atr * opts.atrSlMult;
     const tpDelta = opts.atr * opts.atrTpMult;
-    const atrStopPrice = opts.side === "BUY" ? opts.entryPrice - slDelta : opts.entryPrice + slDelta;
-    const atrTpPrice   = opts.side === "BUY" ? opts.entryPrice + tpDelta : opts.entryPrice - tpDelta;
+    const atrStopPrice = opts.side === "BUY" ? effectiveEntry - slDelta : effectiveEntry + slDelta;
+    const atrTpPrice   = opts.side === "BUY" ? effectiveEntry + tpDelta : effectiveEntry - tpDelta;
     // Prefer structural stops/targets emitted by the detector when present and
     // on the correct side of entry. Matches the backtest path so live and
     // validation use the same SL/TP.
@@ -169,8 +192,8 @@ export class PaperEngine {
     // structural stop as the unit, matching backtest behavior.
     const sigSL = opts.signalStopPrice;
     const sigTP = opts.signalTargetPrice;
-    const slOnRightSide = sigSL != null && isFinite(sigSL) && (opts.side === "BUY" ? sigSL < opts.entryPrice : sigSL > opts.entryPrice);
-    const tpOnRightSide = sigTP != null && isFinite(sigTP) && (opts.side === "BUY" ? sigTP > opts.entryPrice : sigTP < opts.entryPrice);
+    const slOnRightSide = sigSL != null && isFinite(sigSL) && (opts.side === "BUY" ? sigSL < effectiveEntry : sigSL > effectiveEntry);
+    const tpOnRightSide = sigTP != null && isFinite(sigTP) && (opts.side === "BUY" ? sigTP > effectiveEntry : sigTP < effectiveEntry);
     let stopPrice: number;
     let tpPrice: number;
     if (slOnRightSide && tpOnRightSide) {
@@ -178,16 +201,16 @@ export class PaperEngine {
       tpPrice = sigTP!;
     } else if (slOnRightSide) {
       stopPrice = sigSL!;
-      const stopDistance = Math.abs(opts.entryPrice - sigSL!);
+      const stopDistance = Math.abs(effectiveEntry - sigSL!);
       const rr = opts.atrSlMult > 0 ? opts.atrTpMult / opts.atrSlMult : 1;
       const derivedTpDelta = stopDistance * rr;
-      tpPrice = opts.side === "BUY" ? opts.entryPrice + derivedTpDelta : opts.entryPrice - derivedTpDelta;
+      tpPrice = opts.side === "BUY" ? effectiveEntry + derivedTpDelta : effectiveEntry - derivedTpDelta;
     } else if (tpOnRightSide) {
       tpPrice = sigTP!;
-      const tpDistance = Math.abs(sigTP! - opts.entryPrice);
+      const tpDistance = Math.abs(sigTP! - effectiveEntry);
       const rr = opts.atrTpMult > 0 ? opts.atrSlMult / opts.atrTpMult : 1;
       const derivedSlDelta = tpDistance * rr;
-      stopPrice = opts.side === "BUY" ? opts.entryPrice - derivedSlDelta : opts.entryPrice + derivedSlDelta;
+      stopPrice = opts.side === "BUY" ? effectiveEntry - derivedSlDelta : effectiveEntry + derivedSlDelta;
     } else {
       stopPrice = atrStopPrice;
       tpPrice = atrTpPrice;
@@ -201,7 +224,7 @@ export class PaperEngine {
       detector: opts.detector,
       stake,
       multiplier: opts.multiplier,
-      entryPrice: opts.entryPrice,
+      entryPrice: effectiveEntry,
       stopPrice,
       takeProfitPrice: tpPrice,
       openedAt: opts.nowMs,
@@ -209,6 +232,8 @@ export class PaperEngine {
       granularity: opts.granularity,
       appliedShiftMultiplier: mult,
       appliedShiftReasons: reasons.join("+") || "100%",
+      commission,
+      entrySpread: round2(entrySpread),
     };
     this.state.open.push(pos);
     this.state.daily.tradesOpened++;
@@ -239,20 +264,24 @@ export class PaperEngine {
       const moveAmt = (exitPrice - pos.entryPrice) / pos.entryPrice;
       const sideSign = pos.side === "BUY" ? 1 : -1;
       const pnlPct = Math.max(-1, moveAmt * pos.multiplier * sideSign); // cap at -100% stake
-      const pnl = pos.stake * pnlPct;
-      const rMultiple = pos.stake > 0 ? pnl / pos.stake : 0;
+      const grossPnl = pos.stake * pnlPct;
+      // Commission charged at open is deducted from final pnl. Net pnl is what
+      // hits balance — matches the real Deriv multiplier-contract settlement
+      // where the commission is removed from the contract value before payout.
+      const netPnl = grossPnl - (pos.commission ?? 0);
+      const rMultiple = pos.stake > 0 ? netPnl / pos.stake : 0;
       const closed: ClosedPaperPosition = {
         ...pos,
         closedAt: Date.now(),
         closedAtCandleEpoch: candle.epoch,
         exitPrice,
-        result: pnl > 0 ? "won" : "lost",
-        pnl: round2(pnl),
+        result: netPnl > 0 ? "won" : "lost",
+        pnl: round2(netPnl),
         rMultiple: round2(rMultiple),
       };
       settled.push(closed);
-      this.state.balance = round2(this.state.balance + pnl);
-      this.state.daily.profit = round2(this.state.daily.profit + pnl);
+      this.state.balance = round2(this.state.balance + netPnl);
+      this.state.daily.profit = round2(this.state.daily.profit + netPnl);
       this.state.closed.unshift(closed);
       if (this.state.closed.length > MAX_CLOSED_RETAINED) this.state.closed.length = MAX_CLOSED_RETAINED;
       this.state.equity.push({ ts: closed.closedAt, balance: this.state.balance });
@@ -260,7 +289,7 @@ export class PaperEngine {
       // Update adaptive shift
       this.state.adaptiveShift = updateAfterTrade(
         this.state.adaptiveShift,
-        pnl > 0 ? "W" : "L",
+        netPnl > 0 ? "W" : "L",
         pos.side,
         pos.symbol,
         closed.closedAt,

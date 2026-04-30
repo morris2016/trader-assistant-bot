@@ -8,6 +8,14 @@ import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast2Con
 
 const TRADE_MULT_OPTIONS = [100, 200, 300, 400, 500];
 const MART_MULT_OPTIONS = [1.7, 2.0, 2.2];
+const COMMISSION_OPTIONS = [
+  { v: 0,     label: "0% (off)" },
+  { v: 0.001, label: "0.1%" },
+  { v: 0.003, label: "0.3%" },
+  { v: 0.005, label: "0.5% (Deriv default)" },
+  { v: 0.006, label: "0.6%" },
+  { v: 0.01,  label: "1.0%" },
+];
 
 export function Fast2Panel({ doAction, pending }: {
   doAction: (label: string, fn: () => Promise<unknown>) => void;
@@ -55,7 +63,9 @@ export function Fast2Panel({ doAction, pending }: {
     pendingCfg.martingaleMultiplier !== paper.config.martingaleMultiplier ||
     pendingCfg.baseStake !== paper.config.baseStake ||
     pendingCfg.maxLevels !== paper.config.maxLevels ||
-    pendingCfg.perTradeCap !== paper.config.perTradeCap
+    pendingCfg.perTradeCap !== paper.config.perTradeCap ||
+    pendingCfg.commissionPct !== paper.config.commissionPct ||
+    pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps
   );
   const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
   const filtered = trades.filter((t) =>
@@ -70,7 +80,7 @@ export function Fast2Panel({ doAction, pending }: {
   const applyCfg = () => {
     if (!pendingCfg || !dirty) return;
     doAction(
-      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}× · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap}`,
+      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}× · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
       () => api.updateFast2Config(pendingCfg).then(() => setPendingCfg(null)),
     );
   };
@@ -115,9 +125,22 @@ export function Fast2Panel({ doAction, pending }: {
           <ConfigField label="Per-Trade Cap ($)">
             <input className="filter-input" type="number" step="1" min="1" value={cfg.perTradeCap} onChange={(e) => setCfg({ perTradeCap: Number(e.target.value) })} />
           </ConfigField>
+          <ConfigField label="Commission (% of stake)">
+            <select className="filter-select" value={cfg.commissionPct} onChange={(e) => setCfg({ commissionPct: Number(e.target.value) })}>
+              {COMMISSION_OPTIONS.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+            </select>
+          </ConfigField>
+          <ConfigField label="Entry Spread (bps adverse)">
+            <input className="filter-input" type="number" step="0.1" min="0" max="50" value={cfg.entrySpreadBps} onChange={(e) => setCfg({ entrySpreadBps: Number(e.target.value) })} />
+          </ConfigField>
           <ConfigField label="Max ladder stake (computed)">
             <div className={`mono ${stakeFitsBalance ? "" : "neg"}`} style={{ paddingTop: 6 }}>
               ${maxLadderStake.toFixed(2)} {stakeFitsBalance ? "" : `> $${paper.balance.toFixed(2)} balance`}
+            </div>
+          </ConfigField>
+          <ConfigField label="Per-trade fee at base stake">
+            <div className="mono" style={{ paddingTop: 6 }}>
+              ${(cfg.baseStake * cfg.commissionPct).toFixed(3)} commission · {cfg.entrySpreadBps.toFixed(1)} bps slip
             </div>
           </ConfigField>
         </div>
@@ -228,7 +251,7 @@ export function Fast2Panel({ doAction, pending }: {
         ) : (
           <table>
             <thead>
-              <tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Stake</th><th>MULT</th><th>Entry</th><th>Exit</th><th>R</th><th>P&amp;L</th><th>Result</th></tr>
+              <tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Stake</th><th>MULT</th><th>Fee</th><th>Entry</th><th>Exit</th><th>R</th><th>Net P&amp;L</th><th>Result</th></tr>
             </thead>
             <tbody>
               {filtered.map((t) => (
@@ -238,6 +261,7 @@ export function Fast2Panel({ doAction, pending }: {
                   <td><span className={`pill ${t.side === "BUY" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
                   <td className="mono">${t.stake.toFixed(2)}</td>
                   <td className="mono faint">{t.multiplier}×</td>
+                  <td className="mono faint">${(t.commission ?? 0).toFixed(2)}</td>
                   <td className="mono">{t.entryPrice.toFixed(5)}</td>
                   <td className="mono">{t.exitPrice.toFixed(5)}</td>
                   <td className={`mono ${t.rMultiple > 0 ? "pos" : "neg"}`}>{t.rMultiple.toFixed(2)}R</td>

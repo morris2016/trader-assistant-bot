@@ -110,6 +110,10 @@ export type PaperPosition = {
   stake: number; multiplier: number; entryPrice: number; stopPrice: number; takeProfitPrice: number;
   openedAt: number; openedAtCandleEpoch: number; granularity: number;
   appliedShiftMultiplier: number; appliedShiftReasons: string;
+  /** Deriv-style commission charged at open (present on Fast/Fast2 trades). */
+  commission?: number;
+  /** Adverse entry-spread amount applied to the entry price at open. */
+  entrySpread?: number;
 };
 export type ClosedPaperPosition = PaperPosition & {
   closedAt: number; closedAtCandleEpoch: number; exitPrice: number;
@@ -135,6 +139,18 @@ export type FastMartingaleSnapshot = {
   nextStake: number;
 };
 
+export type FastSandboxConfig = {
+  tradeMultiplier: number;
+  martingaleMultiplier: number;
+  baseStake: number;
+  maxLevels: number;
+  perTradeCap: number;
+  commissionPct: number;
+  entrySpreadBps: number;
+};
+export type Fast1Config = FastSandboxConfig;
+export type Fast2Config = FastSandboxConfig;
+
 export type FastPaperResp = {
   stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;
     trades: number; wins: number; losses: number; winRate: number; avgR: number;
@@ -143,17 +159,10 @@ export type FastPaperResp = {
   daily: Daily;
   open: PaperPosition[];
   martingale: Record<string, FastMartingaleSnapshot>;
+  config: Fast1Config;
 };
 
-export type Fast2Config = {
-  tradeMultiplier: number;
-  martingaleMultiplier: number;
-  baseStake: number;
-  maxLevels: number;
-  perTradeCap: number;
-};
-
-export type Fast2PaperResp = FastPaperResp & {
+export type Fast2PaperResp = Omit<FastPaperResp, "config"> & {
   config: Fast2Config;
 };
 
@@ -189,9 +198,17 @@ export const api = {
   fastPaper: () => get<FastPaperResp>("/api/fast-paper"),
   fastPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/fast-paper/trades?limit=${limit}`),
   fastPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/fast-paper/equity"),
-  fastStrategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot> }>("/api/fast-strategies"),
+  fastStrategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot>; config: Fast1Config }>("/api/fast-strategies"),
   fastSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/fast-signals?limit=${limit}`),
+  fastConfig: () => get<{ config: Fast1Config }>("/api/fast-config"),
   resetFastPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-fast-paper${balance ? `?balance=${balance}` : ""}`),
+  updateFast1Config: (patch: Partial<Fast1Config>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) {
+      if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast1-config?${p.toString()}`);
+  },
   // Fast2 sandbox — independent of Fast: 3-strategy spike+drift stack with
   // user-selectable trade leverage (100/200/300/400/500) and martingale
   // multiplier (1.7/2.0/2.2). Own paper account, ladders, and config.
