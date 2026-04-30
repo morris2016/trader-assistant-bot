@@ -6,7 +6,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { BotState } from "./storage";
+import type { BotState, Fast2Config } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
@@ -34,6 +34,10 @@ export type ManualControls = {
   resetSynthPaper: (balance?: number) => void;
   /** Reset fast-trade paper sandbox AND clear all per-strategy martingale ladders. */
   resetFastPaper: (balance?: number) => void;
+  /** Reset Fast2 sandbox AND clear all per-strategy martingale ladders. */
+  resetFast2Paper: (balance?: number) => void;
+  /** Patch Fast2 runtime config (tradeMultiplier, martingaleMultiplier, etc.). */
+  updateFast2Config: (patch: Partial<Fast2Config>) => void;
   /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
   forceResubscribe: () => Promise<void>;
 };
@@ -119,6 +123,15 @@ export function startHttpServer(opts: {
   getSynthStrategyStats: () => StrategyStats[];
   /** Per-strategy live stats for fast-trade strategies. */
   getFastStrategyStats: () => StrategyStats[];
+  /** Fast2 paper sandbox state — separate balance/trades/equity from fastPaper. */
+  getFast2PaperState: () => PaperState;
+  getFast2PaperStats: () => Record<string, number>;
+  /** Per-strategy martingale ladder snapshot for Fast2, keyed by strategy id. */
+  getFast2Martingale: () => Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }>;
+  /** Per-strategy live stats for Fast2 strategies. */
+  getFast2StrategyStats: () => StrategyStats[];
+  /** Fast2 runtime config — user-selectable trade leverage + martingale params. */
+  getFast2Config: () => Fast2Config;
   /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
   getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
   /** Recent in-memory log entries for the web UI's Logs panel. */
@@ -131,7 +144,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/resubscribe")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -147,6 +160,26 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-fast-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetFastPaper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/reset-fast2-paper") {
+            const balance = url.searchParams.get("balance");
+            opts.manualControls.resetFast2Paper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/update-fast2-config") {
+            // All knobs are passed as query params — kept consistent with the other
+            // POST controls. Only fields that arrive non-empty are forwarded.
+            const patch: Partial<Fast2Config> = {};
+            const tm = url.searchParams.get("tradeMultiplier");
+            if (tm) patch.tradeMultiplier = Number(tm);
+            const mm = url.searchParams.get("martingaleMultiplier");
+            if (mm) patch.martingaleMultiplier = Number(mm);
+            const bs = url.searchParams.get("baseStake");
+            if (bs) patch.baseStake = Number(bs);
+            const ml = url.searchParams.get("maxLevels");
+            if (ml) patch.maxLevels = Number(ml);
+            const cap = url.searchParams.get("perTradeCap");
+            if (cap) patch.perTradeCap = Number(cap);
+            opts.manualControls.updateFast2Config(patch);
           }
           else if (path0 === "/api/control/resubscribe") {
             opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));
@@ -323,6 +356,56 @@ export function startHttpServer(opts: {
             .slice(-limit)
             .reverse();
           json(res, 200, { signals: sigs });
+          return;
+        }
+        // ── Fast2 sandbox endpoints (3-strategy stack with user-config) ──
+        if (path0 === "/api/fast2-paper") {
+          const ps = opts.getFast2PaperState();
+          const stats = opts.getFast2PaperStats();
+          json(res, 200, {
+            stats,
+            startingBalance: ps.startingBalance,
+            balance: ps.balance,
+            daily: ps.daily,
+            open: ps.open,
+            martingale: opts.getFast2Martingale(),
+            config: opts.getFast2Config(),
+          });
+          return;
+        }
+        if (path0 === "/api/fast2-paper/trades") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 1000);
+          const ps = opts.getFast2PaperState();
+          json(res, 200, { trades: ps.closed.slice(0, limit) });
+          return;
+        }
+        if (path0 === "/api/fast2-paper/equity") {
+          const ps = opts.getFast2PaperState();
+          json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
+          return;
+        }
+        if (path0 === "/api/fast2-strategies") {
+          json(res, 200, {
+            strategies: opts.getFast2StrategyStats(),
+            martingale: opts.getFast2Martingale(),
+            config: opts.getFast2Config(),
+          });
+          return;
+        }
+        if (path0 === "/api/fast2-signals") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
+          const fast2Stats = opts.getFast2StrategyStats();
+          const fast2Syms = new Set(fast2Stats.flatMap((s) => s.symbols));
+          const fast2Detectors = new Set(fast2Stats.flatMap((s) => s.symbols.length ? ["spikeFade", "driftPullback"] : []));
+          const sigs = opts.getRecentSignals()
+            .filter((s) => fast2Syms.has(s.symbol) && fast2Detectors.has(s.detector))
+            .slice(-limit)
+            .reverse();
+          json(res, 200, { signals: sigs });
+          return;
+        }
+        if (path0 === "/api/fast2-config") {
+          json(res, 200, { config: opts.getFast2Config() });
           return;
         }
         if (path0 === "/api/logs") {

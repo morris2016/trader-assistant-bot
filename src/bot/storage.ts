@@ -13,6 +13,33 @@ import {
 import { emptyMartingaleState, type MartingaleState } from "../main/engine/martingale";
 import { emptyPaperState, type PaperState } from "./paper-engine";
 
+/** Runtime-configurable parameters for the Fast2 sandbox. Set from the UI;
+ *  consumed at trade-open time (tradeMultiplier sets the position leverage)
+ *  and at ladder-advance time (martingaleMultiplier governs stake escalation
+ *  on a loss). Independent of the existing FAST sandbox config. */
+export type Fast2Config = {
+  /** Position leverage applied to every Fast2 paper trade. UI exposes
+   *  100/200/300/400/500. */
+  tradeMultiplier: number;
+  /** Per-loss stake multiplier on the martingale ladder. UI exposes 1.7/2.0/2.2.
+   *  Combined with maxLevels and perTradeCap to bound ladder depth. */
+  martingaleMultiplier: number;
+  /** Stake at level 0 of the ladder. */
+  baseStake: number;
+  /** Maximum consecutive losses before circuit-breaker reset. */
+  maxLevels: number;
+  /** Hard cap on a single trade's stake regardless of ladder level. */
+  perTradeCap: number;
+};
+
+export const DEFAULT_FAST2_CONFIG: Fast2Config = {
+  tradeMultiplier: 300,
+  martingaleMultiplier: 1.7,
+  baseStake: 1.5,
+  maxLevels: 5,
+  perTradeCap: 30,
+};
+
 export type BotState = {
   /** Currently open contracts (still being tracked for settlement). */
   open: RealTrade[];
@@ -32,6 +59,12 @@ export type BotState = {
   /** Per-strategy martingale ladder state for the fast-trade sandbox. Keyed
    *  by strategy id (e.g. "crash500n_drift" / "boom300n_drift"). */
   fastMartingale: Record<string, MartingaleState>;
+  /** Fast2 sandbox — parallel to fastPaper, independent balance / ladders /
+   *  config. Hosts the validated 3-strategy stack with user-selectable
+   *  martingale and trade leverage. */
+  fast2Paper: PaperState;
+  fast2Martingale: Record<string, MartingaleState>;
+  fast2Config: Fast2Config;
 };
 
 const MAX_CLOSED_RETAINED = 500;
@@ -46,6 +79,9 @@ export function emptyBotState(): BotState {
     synthPaper: emptyPaperState(),
     fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
     fastMartingale: {},
+    fast2Paper: emptyPaperState(50), // Fast2 sandbox sized to the validated $50 starting balance
+    fast2Martingale: {},
+    fast2Config: { ...DEFAULT_FAST2_CONFIG },
   };
 }
 
@@ -71,6 +107,9 @@ export class BotStorage {
         synthPaper: parsed.synthPaper ?? emptyPaperState(),
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
+        fast2Paper: parsed.fast2Paper ?? emptyPaperState(50),
+        fast2Martingale: parsed.fast2Martingale ?? {},
+        fast2Config: { ...DEFAULT_FAST2_CONFIG, ...(parsed.fast2Config ?? {}) },
       };
     } catch (e: any) {
       if (e?.code === "ENOENT") return emptyBotState();

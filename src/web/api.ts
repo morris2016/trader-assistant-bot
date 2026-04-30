@@ -145,6 +145,18 @@ export type FastPaperResp = {
   martingale: Record<string, FastMartingaleSnapshot>;
 };
 
+export type Fast2Config = {
+  tradeMultiplier: number;
+  martingaleMultiplier: number;
+  baseStake: number;
+  maxLevels: number;
+  perTradeCap: number;
+};
+
+export type Fast2PaperResp = FastPaperResp & {
+  config: Fast2Config;
+};
+
 export type LogEntry = {
   ts: string;
   level: "trace" | "debug" | "info" | "warn" | "error";
@@ -180,6 +192,23 @@ export const api = {
   fastStrategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot> }>("/api/fast-strategies"),
   fastSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/fast-signals?limit=${limit}`),
   resetFastPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-fast-paper${balance ? `?balance=${balance}` : ""}`),
+  // Fast2 sandbox — independent of Fast: 3-strategy spike+drift stack with
+  // user-selectable trade leverage (100/200/300/400/500) and martingale
+  // multiplier (1.7/2.0/2.2). Own paper account, ladders, and config.
+  fast2Paper: () => get<Fast2PaperResp>("/api/fast2-paper"),
+  fast2PaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/fast2-paper/trades?limit=${limit}`),
+  fast2PaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/fast2-paper/equity"),
+  fast2Strategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot>; config: Fast2Config }>("/api/fast2-strategies"),
+  fast2Signals: (limit = 100) => get<{ signals: Signal[] }>(`/api/fast2-signals?limit=${limit}`),
+  fast2Config: () => get<{ config: Fast2Config }>("/api/fast2-config"),
+  resetFast2Paper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-fast2-paper${balance ? `?balance=${balance}` : ""}`),
+  updateFast2Config: (patch: Partial<Fast2Config>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) {
+      if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
+  },
   logs: (opts: { limit?: number; level?: string; q?: string } = {}) => {
     const p = new URLSearchParams();
     if (opts.limit) p.set("limit", String(opts.limit));

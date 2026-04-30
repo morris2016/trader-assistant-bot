@@ -10,11 +10,12 @@ import { SettingsPanel } from "./panels/Settings";
 import { PaperPanel } from "./panels/Paper";
 import { SynthPaperPanel } from "./panels/SynthPaper";
 import { FastPanel } from "./panels/Fast";
+import { Fast2Panel } from "./panels/Fast2";
 import { LogsPanel } from "./panels/Logs";
 
 const REFRESH_MS = 3000;
 
-type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "paper" | "synth" | "fast" | "adaptive" | "logs" | "settings";
+type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "paper" | "synth" | "fast" | "fast2" | "adaptive" | "logs" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
@@ -25,6 +26,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "paper",      label: "Paper",      icon: "📝" },
   { id: "synth",      label: "Synth",      icon: "🧪" },
   { id: "fast",       label: "Fast",       icon: "⚡" },
+  { id: "fast2",      label: "Fast2",      icon: "⚡⚡" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "logs",       label: "Logs",       icon: "📋" },
   { id: "settings",   label: "Settings",   icon: "⚙" },
@@ -90,6 +92,7 @@ export function App() {
             {tab === "paper"      && <PaperPanel doAction={doAction} pending={actionPending} />}
             {tab === "synth"      && <SynthPaperPanel doAction={doAction} pending={actionPending} />}
             {tab === "fast"       && <FastPanel doAction={doAction} pending={actionPending} />}
+            {tab === "fast2"      && <Fast2Panel doAction={doAction} pending={actionPending} />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "logs"       && <LogsPanel />}
             {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}
