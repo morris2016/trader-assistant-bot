@@ -42,6 +42,17 @@ export type FastSandboxConfig = {
    *  martingale-on for strategies (e.g. spike-fade) that the registry
    *  validated as flat-stake. When false, the per-strategy flag wins. */
   forceMartingale: boolean;
+  /** Trade-side filter applied at signal-routing time. "both" = trade both
+   *  directions (default), "BUY" = drop SELL signals, "SELL" = drop BUY
+   *  signals. Useful when one side has demonstrably worse edge in current
+   *  regime and the operator wants to disable it without redeploying. */
+  sideFilter: "both" | "BUY" | "SELL";
+  /** Ladder advance direction. "classic" = escalate stake on loss, reset
+   *  on win (textbook martingale). "anti" = escalate stake on win, reset
+   *  on loss (Paroli system — ride winning streaks, cut on first loss).
+   *  Telemetry counters (wins/losses) always reflect the actual trade
+   *  outcome regardless of mode. */
+  martingaleMode: "classic" | "anti";
 };
 
 /** Fast (sandbox 1) — defaults targeted at the existing 30× / 2.2× / 5L config
@@ -56,6 +67,8 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
   forceMartingale: false,
+  sideFilter: "both",
+  martingaleMode: "classic",
 };
 
 /** Fast2 — same shape as Fast1, defaults targeted at the validated 3-strategy
@@ -70,6 +83,26 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
   forceMartingale: false,
+  sideFilter: "both",
+  martingaleMode: "classic",
+};
+
+/** Synth sandbox — same shape as Fast1/Fast2. Defaults match the validation
+ *  baseline (MULT=100×, $1 stake, no martingale) so the live numbers map
+ *  directly to the OOS results. forceMartingale flag lets the operator opt
+ *  in via the UI without touching strategy descriptors. */
+export type SynthConfig = FastSandboxConfig;
+export const DEFAULT_SYNTH_CONFIG: SynthConfig = {
+  tradeMultiplier: 100,
+  martingaleMultiplier: 1.7,
+  baseStake: 1.0,
+  maxLevels: 5,
+  perTradeCap: 30,
+  commissionPct: 0.005,
+  entrySpreadBps: 1.0,
+  forceMartingale: false,
+  sideFilter: "both",
+  martingaleMode: "classic",
 };
 
 export type BotState = {
@@ -85,6 +118,12 @@ export type BotState = {
   paper: PaperState;
   /** Synth-strategies paper sandbox — completely isolated from real-asset paper. */
   synthPaper: PaperState;
+  /** Per-strategy martingale ladder state for the Synth sandbox, keyed by
+   *  strategy id. Same shape as fast/fast2 ladders. */
+  synthMartingale: Record<string, MartingaleState>;
+  /** Synth sandbox runtime config — leverage, martingale, fees. Editable
+   *  from the UI parallel to Fast/Fast2 sandboxes. */
+  synthConfig: SynthConfig;
   /** Fast-trade synth sandbox — own paper account for high-frequency
    *  drift-fade scalps with martingale stake escalation. */
   fastPaper: PaperState;
@@ -113,6 +152,8 @@ export function emptyBotState(): BotState {
     adaptiveShift: emptyAdaptiveShiftState(),
     paper: emptyPaperState(),
     synthPaper: emptyPaperState(),
+    synthMartingale: {},
+    synthConfig: { ...DEFAULT_SYNTH_CONFIG },
     fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
     fastMartingale: {},
     fast1Config: { ...DEFAULT_FAST1_CONFIG },
@@ -142,6 +183,8 @@ export class BotStorage {
         adaptiveShift: parsed.adaptiveShift ?? emptyAdaptiveShiftState(),
         paper: parsed.paper ?? emptyPaperState(),
         synthPaper: parsed.synthPaper ?? emptyPaperState(),
+        synthMartingale: parsed.synthMartingale ?? {},
+        synthConfig: { ...DEFAULT_SYNTH_CONFIG, ...(parsed.synthConfig ?? {}) },
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
         fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}) },

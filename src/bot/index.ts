@@ -23,7 +23,7 @@ import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, type Fast1Config, type Fast2Config } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_SYNTH_CONFIG, type Fast1Config, type Fast2Config, type SynthConfig } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -48,7 +48,7 @@ async function main() {
       getAccount: () => null,
       getRecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, forceResubscribe: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, forceResubscribe: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -57,6 +57,8 @@ async function main() {
       getPaperStats: () => ({}),
       getSynthPaperState: () => emptyPaperState(),
       getSynthPaperStats: () => ({}),
+      getSynthMartingale: () => ({}),
+      getSynthConfig: () => ({ ...DEFAULT_SYNTH_CONFIG }),
       getSynthStrategyStats: () => [],
       getFastPaperState: () => emptyPaperState(),
       getFastPaperStats: () => ({}),
@@ -103,6 +105,26 @@ async function main() {
     persisted.synthPaper = emptyPaperState(cfg.paperStartingBalance);
   }
   const synthPaper = new PaperEngine(persisted.synthPaper);
+  // Synth runtime config — same shape as Fast/Fast2, replaces the previous
+  // hardcoded use of cfg.stake / cfg.multiplier in the synth path. Drives
+  // leverage, optional martingale ladder, base stake, and Deriv-fee model.
+  const synthMartingale: Record<string, MartingaleState> = { ...persisted.synthMartingale };
+  for (const s of SYNTH_STRATEGIES) {
+    if (!synthMartingale[s.id]) synthMartingale[s.id] = emptyMartingaleState();
+  }
+  let synthConfig: SynthConfig = { ...DEFAULT_SYNTH_CONFIG, ...persisted.synthConfig };
+  const synthMartingaleParams = (): MartingaleParams => ({
+    baseStake: synthConfig.baseStake,
+    multiplier: synthConfig.martingaleMultiplier,
+    maxLevels: synthConfig.maxLevels,
+    perTradeCap: synthConfig.perTradeCap,
+  });
+  log.info("synthPaper: state loaded", {
+    balance: synthPaper.getState().balance,
+    closed: synthPaper.getState().closed.length,
+    config: synthConfig,
+    martingale: Object.fromEntries(SYNTH_STRATEGIES.map((s) => [s.id, synthMartingale[s.id]])),
+  });
 
   // Fast-trade sandbox — own paper account ($200 starting, smaller because
   // martingale needs less headroom). Stake comes from per-strategy martingale
@@ -220,6 +242,8 @@ async function main() {
       adaptiveShift: real.getAdaptiveShift(),
       paper: paper.getState(),
       synthPaper: synthPaper.getState(),
+      synthMartingale,
+      synthConfig,
       fastPaper: fastPaper.getState(),
       fastMartingale,
       fast1Config,
@@ -264,7 +288,30 @@ async function main() {
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
       resetPaper: (balance?: number) => { paper.reset(balance ?? cfg.paperStartingBalance); log.warn(`paper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
-      resetSynthPaper: (balance?: number) => { synthPaper.reset(balance ?? cfg.paperStartingBalance); log.warn(`synthPaper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
+      resetSynthPaper: (balance?: number) => {
+        const newBal = balance ?? cfg.paperStartingBalance;
+        synthPaper.reset(newBal);
+        for (const sId of Object.keys(synthMartingale)) synthMartingale[sId] = emptyMartingaleState();
+        persist();
+        log.warn(`synthPaper reset via API to $${newBal.toFixed(2)} — all martingale ladders cleared`);
+      },
+      updateSynthConfig: (patch: Partial<SynthConfig>) => {
+        const before = { ...synthConfig };
+        const next: SynthConfig = { ...synthConfig, ...patch };
+        if (!isFinite(next.tradeMultiplier) || next.tradeMultiplier <= 0) next.tradeMultiplier = before.tradeMultiplier;
+        if (!isFinite(next.martingaleMultiplier) || next.martingaleMultiplier <= 1) next.martingaleMultiplier = before.martingaleMultiplier;
+        if (!isFinite(next.baseStake) || next.baseStake <= 0) next.baseStake = before.baseStake;
+        if (!isFinite(next.maxLevels) || next.maxLevels < 1) next.maxLevels = before.maxLevels;
+        if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
+        if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
+        if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
+        if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
+        if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
+        if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
+        synthConfig = next;
+        persist();
+        log.warn("synthConfig updated via API", { before, after: next });
+      },
       resetFastPaper: (balance?: number) => {
         const newBal = balance ?? 200;
         fastPaper.reset(newBal);
@@ -284,6 +331,8 @@ async function main() {
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
+        if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
+        if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
         fast1Config = next;
         persist();
         log.warn("fast1Config updated via API", { before, after: next });
@@ -307,6 +356,8 @@ async function main() {
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
+        if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
+        if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
         fast2Config = next;
         persist();
         log.warn("fast2Config updated via API", { before, after: next });
@@ -395,6 +446,23 @@ async function main() {
     getPaperStats: () => paper.stats() as unknown as Record<string, number>,
     getSynthPaperState: () => synthPaper.getState(),
     getSynthPaperStats: () => synthPaper.stats() as unknown as Record<string, number>,
+    getSynthMartingale: () => {
+      const params = synthMartingaleParams();
+      return Object.fromEntries(
+        SYNTH_STRATEGIES.map((s) => {
+          const m = synthMartingale[s.id] ?? emptyMartingaleState();
+          return [s.id, {
+            level: m.level,
+            wins: m.wins,
+            losses: m.losses,
+            circuitBreakers: m.circuitBreakers,
+            lastCircuitBreakerAt: m.lastCircuitBreakerAt,
+            nextStake: fastNextStake(m, params),
+          }];
+        }),
+      );
+    },
+    getSynthConfig: () => ({ ...synthConfig }),
     getFastPaperState: () => fastPaper.getState(),
     getFastPaperStats: () => fastPaper.stats() as unknown as Record<string, number>,
     getFastMartingale: () => {
@@ -666,7 +734,34 @@ async function main() {
     // Settle synth paper positions (separate sandbox).
     const settledSynth = synthPaper.onCandle(symbol, granularity, candle);
     for (const c of settledSynth) {
-      log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)}`);
+      const synthStrat = SYNTH_STRATEGIES.find((s) => s.symbols.includes(c.symbol) && s.granularity === c.granularity);
+      if (synthStrat) {
+        const before = synthMartingale[synthStrat.id] ?? emptyMartingaleState();
+        const martingaleActive = synthStrat.useMartingale || synthConfig.forceMartingale;
+        if (martingaleActive) {
+          const params = synthMartingaleParams();
+          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), synthConfig.martingaleMode);
+          synthMartingale[synthStrat.id] = nextLadder;
+          const forced = !synthStrat.useMartingale && synthConfig.forceMartingale ? " FORCED" : "";
+          const modeTag = synthConfig.martingaleMode === "anti" ? " ANTI" : "";
+          log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)} strategy=${synthStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${synthConfig.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          if (circuitBreakerFired) {
+            log.warn(`synth martingale circuit-breaker fired for ${synthStrat.id}: ladder reset after ${params.maxLevels} ${synthConfig.martingaleMode === "anti" ? "wins" : "losses"}`);
+          }
+        } else {
+          synthMartingale[synthStrat.id] = {
+            ...before,
+            wins: before.wins + (c.pnl > 0 ? 1 : 0),
+            losses: before.losses + (c.pnl > 0 ? 0 : 1),
+            level: 0,
+            cumulativeSinceReset: 0,
+          };
+          log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)} strategy=${synthStrat.id} W=${synthMartingale[synthStrat.id].wins} L=${synthMartingale[synthStrat.id].losses} (no martingale)`);
+        }
+        persist();
+      } else {
+        log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)} (no matching synth strategy)`);
+      }
     }
     // Settle fast-trade paper positions and advance the martingale ladder for
     // each settled position. The martingale state is per-strategy keyed off
@@ -684,12 +779,13 @@ async function main() {
         const martingaleActive = fastStrat.useMartingale || fast1Config.forceMartingale;
         if (martingaleActive) {
           const params = fast1MartingaleParams();
-          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params);
+          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), fast1Config.martingaleMode);
           fastMartingale[fastStrat.id] = nextLadder;
           const forced = !fastStrat.useMartingale && fast1Config.forceMartingale ? " FORCED" : "";
-          log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${forced} MULT=${fast1Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          const modeTag = fast1Config.martingaleMode === "anti" ? " ANTI" : "";
+          log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${fast1Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
           if (circuitBreakerFired) {
-            log.warn(`fast martingale circuit-breaker fired for ${fastStrat.id}: ladder reset after ${params.maxLevels} losses`);
+            log.warn(`fast martingale circuit-breaker fired for ${fastStrat.id}: ladder reset after ${params.maxLevels} ${fast1Config.martingaleMode === "anti" ? "wins" : "losses"}`);
           }
         } else {
           // No-martingale path: track W/L for telemetry but never escalate.
@@ -718,12 +814,13 @@ async function main() {
         const martingaleActive = fast2Strat.useMartingale || fast2Config.forceMartingale;
         if (martingaleActive) {
           const params = fast2MartingaleParams();
-          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params);
+          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), fast2Config.martingaleMode);
           fast2Martingale[fast2Strat.id] = nextLadder;
           const forced = !fast2Strat.useMartingale && fast2Config.forceMartingale ? " FORCED" : "";
-          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${forced} MULT=${fast2Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          const modeTag = fast2Config.martingaleMode === "anti" ? " ANTI" : "";
+          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${fast2Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
           if (circuitBreakerFired) {
-            log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} losses`);
+            log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} ${fast2Config.martingaleMode === "anti" ? "wins" : "losses"}`);
           }
         } else {
           fast2Martingale[fast2Strat.id] = {
@@ -897,8 +994,15 @@ async function main() {
     let handledFast2 = false;
     if (fast2Match) {
       const passes = passesStrategyFilters(fast2Match);
+      // Sandbox-level side filter — set via UI (sideFilter dropdown). Drops
+      // signals on the disabled direction without changing the per-strategy
+      // descriptor. "both" lets every signal through.
+      const sideAllowed = fast2Config.sideFilter === "both" || fast2Config.sideFilter === sig.action;
       if (!passes) {
         log.info("fast2 signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
+        handledFast2 = true;
+      } else if (!sideAllowed) {
+        log.info("fast2 signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id, sideFilter: fast2Config.sideFilter });
         handledFast2 = true;
       } else {
         const alreadyOpen = fast2Paper.getState().open.some((p) => p.symbol === sig.symbol);
@@ -969,6 +1073,12 @@ async function main() {
         return;
       }
       const synthMatch = synthMatches[0];
+      const ladder = synthMartingale[synthMatch.id] ?? emptyMartingaleState();
+      const params = synthMartingaleParams();
+      const martingaleActive = synthMatch.useMartingale || synthConfig.forceMartingale;
+      const stake = martingaleActive
+        ? fastNextStake(ladder, params)
+        : params.baseStake;
       const pos = synthPaper.openPosition({
         signalId: sig.id,
         symbol: sig.symbol,
@@ -978,17 +1088,22 @@ async function main() {
         atr,
         atrTpMult: synthMatch.atrTpMult,
         atrSlMult: synthMatch.atrSlMult,
-        multiplier: cfg.multiplier,
+        // Synth uses the user-selected leverage from synthConfig rather than
+        // the bot-wide cfg.multiplier — same pattern as Fast/Fast2.
+        multiplier: synthConfig.tradeMultiplier,
         granularity,
         candleEpoch: candle.epoch,
-        baseStake: cfg.stake,
-        minStake: 1,
+        baseStake: params.baseStake,
+        minStake: 0.5,
         nowMs: Date.now(),
         signalStopPrice: sig.stopPrice,
         signalTargetPrice: sig.targetPrice,
+        stakeOverride: stake,
+        commissionPct: synthConfig.commissionPct,
+        entrySpreadFrac: synthConfig.entrySpreadBps / 10000,
       });
       if (pos) {
-        log.info(`synthPaper opened ${pos.symbol} ${pos.side} stake=$${pos.stake.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
+        log.info(`synthPaper opened ${pos.symbol} ${pos.side} strategy=${synthMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${synthConfig.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
       }
       return;
     }
@@ -1184,6 +1299,10 @@ async function main() {
       synthPaperBalance: synthState.balance,
       synthPaperOpenTrades: synthState.open.length,
       synthPaperClosedTrades: synthState.closed.length,
+      synthMartingaleLevel: Object.fromEntries(
+        SYNTH_STRATEGIES.map((s) => [s.id, synthMartingale[s.id]?.level ?? 0]),
+      ),
+      synthConfig,
       fastPaperBalance: fastState.balance,
       fastPaperOpenTrades: fastState.open.length,
       fastPaperClosedTrades: fastState.closed.length,

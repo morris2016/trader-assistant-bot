@@ -6,7 +6,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { BotState, Fast1Config, Fast2Config } from "./storage";
+import type { BotState, Fast1Config, Fast2Config, SynthConfig } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
@@ -32,6 +32,8 @@ export type ManualControls = {
   resetPaper: (balance?: number) => void;
   /** Reset SYNTH paper trading state (separate sandbox). */
   resetSynthPaper: (balance?: number) => void;
+  /** Patch Synth runtime config (tradeMultiplier, martingaleMultiplier, fees, etc.). */
+  updateSynthConfig: (patch: Partial<SynthConfig>) => void;
   /** Reset fast-trade paper sandbox AND clear all per-strategy martingale ladders. */
   resetFastPaper: (balance?: number) => void;
   /** Patch Fast (sandbox 1) runtime config (tradeMultiplier, martingaleMultiplier, fees, etc.). */
@@ -114,6 +116,10 @@ export function startHttpServer(opts: {
   /** Synth paper trading state + stats (separate sandbox). */
   getSynthPaperState: () => PaperState;
   getSynthPaperStats: () => Record<string, number>;
+  /** Per-strategy martingale ladder snapshot for the Synth sandbox. */
+  getSynthMartingale: () => Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }>;
+  /** Synth runtime config — leverage + martingale + fees. */
+  getSynthConfig: () => SynthConfig;
   /** Fast-trade sandbox paper state — own balance/trades/equity, isolated from
    *  real-asset paper and synth-paper. Stake comes from per-strategy martingale
    *  ladder rather than adaptive shift. */
@@ -148,7 +154,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/update-synth-config" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -160,6 +166,30 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-synth-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetSynthPaper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/update-synth-config") {
+            const patch: Partial<SynthConfig> = {};
+            const tm = url.searchParams.get("tradeMultiplier");
+            if (tm) patch.tradeMultiplier = Number(tm);
+            const mm = url.searchParams.get("martingaleMultiplier");
+            if (mm) patch.martingaleMultiplier = Number(mm);
+            const bs = url.searchParams.get("baseStake");
+            if (bs) patch.baseStake = Number(bs);
+            const ml = url.searchParams.get("maxLevels");
+            if (ml) patch.maxLevels = Number(ml);
+            const cap = url.searchParams.get("perTradeCap");
+            if (cap) patch.perTradeCap = Number(cap);
+            const cm = url.searchParams.get("commissionPct");
+            if (cm) patch.commissionPct = Number(cm);
+            const sp = url.searchParams.get("entrySpreadBps");
+            if (sp) patch.entrySpreadBps = Number(sp);
+            const fm = url.searchParams.get("forceMartingale");
+            if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
+            const sf = url.searchParams.get("sideFilter");
+            if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
+            const mm2 = url.searchParams.get("martingaleMode");
+            if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
+            opts.manualControls.updateSynthConfig(patch);
           }
           else if (path0 === "/api/control/reset-fast-paper") {
             const balance = url.searchParams.get("balance");
@@ -183,6 +213,10 @@ export function startHttpServer(opts: {
             if (sp) patch.entrySpreadBps = Number(sp);
             const fm = url.searchParams.get("forceMartingale");
             if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
+            const sf = url.searchParams.get("sideFilter");
+            if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
+            const mm2 = url.searchParams.get("martingaleMode");
+            if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
             opts.manualControls.updateFast1Config(patch);
           }
           else if (path0 === "/api/control/reset-fast2-paper") {
@@ -209,6 +243,10 @@ export function startHttpServer(opts: {
             if (sp) patch.entrySpreadBps = Number(sp);
             const fm = url.searchParams.get("forceMartingale");
             if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
+            const sf = url.searchParams.get("sideFilter");
+            if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
+            const mm2 = url.searchParams.get("martingaleMode");
+            if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
             opts.manualControls.updateFast2Config(patch);
           }
           else if (path0 === "/api/control/resubscribe") {
@@ -322,7 +360,13 @@ export function startHttpServer(opts: {
             daily: ps.daily,
             open: ps.open,
             adaptiveShift: ps.adaptiveShift,
+            martingale: opts.getSynthMartingale(),
+            config: opts.getSynthConfig(),
           });
+          return;
+        }
+        if (path0 === "/api/synth-config") {
+          json(res, 200, { config: opts.getSynthConfig() });
           return;
         }
         if (path0 === "/api/synth-paper/trades") {
@@ -337,7 +381,11 @@ export function startHttpServer(opts: {
           return;
         }
         if (path0 === "/api/synth-strategies") {
-          json(res, 200, { strategies: opts.getSynthStrategyStats() });
+          json(res, 200, {
+            strategies: opts.getSynthStrategyStats(),
+            martingale: opts.getSynthMartingale(),
+            config: opts.getSynthConfig(),
+          });
           return;
         }
         if (path0 === "/api/synth-signals") {

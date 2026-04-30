@@ -67,6 +67,13 @@ export function nextStake(state: MartingaleState, params: MartingaleParams): num
   return Math.round(capped * 100) / 100;
 }
 
+/** Ladder advance direction.
+ *  "classic" — escalate stake on loss, reset on win (textbook martingale).
+ *  "anti"    — escalate stake on win, reset on loss (Paroli system).
+ *  Telemetry counters (wins/losses) reflect the actual trade outcome in
+ *  both modes; only the level/reset behavior changes. */
+export type MartingaleMode = "classic" | "anti";
+
 /**
  * Advance state after a trade settles. Returns the new state plus a flag
  * indicating whether the circuit breaker fired.
@@ -76,17 +83,22 @@ export function updateAfterTrade(
   pnl: number,
   params: MartingaleParams,
   nowMs: number = Date.now(),
+  mode: MartingaleMode = "classic",
 ): { state: MartingaleState; circuitBreakerFired: boolean } {
   const next: MartingaleState = { ...state };
   const won = pnl > 0;
   next.cumulativeSinceReset += pnl;
-  if (won) {
-    next.wins++;
+  // Always update telemetry counters with the actual outcome.
+  if (won) next.wins++; else next.losses++;
+  // Whether this trade ESCALATES the ladder (vs RESETS) depends on mode.
+  // classic: loss → escalate, win → reset.
+  // anti:    win  → escalate, loss → reset.
+  const escalates = mode === "classic" ? !won : won;
+  if (!escalates) {
     next.level = 0;
     next.cumulativeSinceReset = 0;
     return { state: next, circuitBreakerFired: false };
   }
-  next.losses++;
   next.level++;
   if (next.level >= params.maxLevels) {
     // Circuit breaker — reset ladder and record the event.

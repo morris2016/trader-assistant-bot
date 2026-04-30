@@ -66,7 +66,9 @@ export function Fast2Panel({ doAction, pending }: {
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.commissionPct !== paper.config.commissionPct ||
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
-    pendingCfg.forceMartingale !== paper.config.forceMartingale
+    pendingCfg.forceMartingale !== paper.config.forceMartingale ||
+    pendingCfg.sideFilter !== paper.config.sideFilter ||
+    pendingCfg.martingaleMode !== paper.config.martingaleMode
   );
   const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
   const filtered = trades.filter((t) =>
@@ -81,7 +83,7 @@ export function Fast2Panel({ doAction, pending }: {
   const applyCfg = () => {
     if (!pendingCfg || !dirty) return;
     doAction(
-      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}× · forceMart=${pendingCfg.forceMartingale ? "on" : "off"} · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
+      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}×/${pendingCfg.martingaleMode} · forceMart=${pendingCfg.forceMartingale ? "on" : "off"} · sides=${pendingCfg.sideFilter} · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
       () => api.updateFast2Config(pendingCfg).then(() => setPendingCfg(null)),
     );
   };
@@ -155,6 +157,19 @@ export function Fast2Panel({ doAction, pending }: {
                 {cfg.forceMartingale ? "ON — every strategy ladders" : "OFF — registry decides"}
               </span>
             </label>
+          </ConfigField>
+          <ConfigField label="Trade Side Filter">
+            <select className="filter-select" value={cfg.sideFilter} onChange={(e) => setCfg({ sideFilter: e.target.value as "both" | "BUY" | "SELL" })}>
+              <option value="both">Both BUY + SELL</option>
+              <option value="BUY">BUY only</option>
+              <option value="SELL">SELL only</option>
+            </select>
+          </ConfigField>
+          <ConfigField label="Martingale Mode">
+            <select className="filter-select" value={cfg.martingaleMode} onChange={(e) => setCfg({ martingaleMode: e.target.value as "classic" | "anti" })}>
+              <option value="classic">Classic — escalate on loss, reset on win</option>
+              <option value="anti">Anti (Paroli) — escalate on win, reset on loss</option>
+            </select>
           </ConfigField>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

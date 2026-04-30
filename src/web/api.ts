@@ -150,9 +150,21 @@ export type FastSandboxConfig = {
   /** UI override: when true, every strategy in the sandbox runs the martingale
    *  ladder regardless of its per-strategy `useMartingale` flag in the registry. */
   forceMartingale: boolean;
+  /** Trade-side filter at signal routing. "both" lets every signal through. */
+  sideFilter: "both" | "BUY" | "SELL";
+  /** "classic" = escalate on loss, reset on win. "anti" = escalate on win,
+   *  reset on loss (Paroli system). Telemetry counters always reflect actual
+   *  outcomes; only the ladder advance behavior changes. */
+  martingaleMode: "classic" | "anti";
 };
 export type Fast1Config = FastSandboxConfig;
 export type Fast2Config = FastSandboxConfig;
+export type SynthConfig = FastSandboxConfig;
+
+export type SynthPaperResp = PaperResp & {
+  martingale: Record<string, FastMartingaleSnapshot>;
+  config: SynthConfig;
+};
 
 export type FastPaperResp = {
   stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;
@@ -190,12 +202,22 @@ export const api = {
   paper: () => get<PaperResp>("/api/paper"),
   paperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/paper/trades?limit=${limit}`),
   paperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/paper/equity"),
-  // Synth sandbox — completely isolated paper-trading for the 3 synth strategies
-  synthPaper: () => get<PaperResp>("/api/synth-paper"),
+  // Synth sandbox — completely isolated paper-trading for the synth strategies.
+  // Now config-driven (leverage / martingale / fees) like Fast and Fast2.
+  synthPaper: () => get<SynthPaperResp>("/api/synth-paper"),
   synthPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/synth-paper/trades?limit=${limit}`),
   synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
-  synthStrategies: () => get<{ strategies: StrategyStats[] }>("/api/synth-strategies"),
+  synthStrategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot>; config: SynthConfig }>("/api/synth-strategies"),
   synthSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/synth-signals?limit=${limit}`),
+  synthConfig: () => get<{ config: SynthConfig }>("/api/synth-config"),
+  updateSynthConfig: (patch: Partial<SynthConfig>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) {
+      if (typeof v === "boolean") p.set(k, String(v));
+      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-synth-config?${p.toString()}`);
+  },
   // Fast-trade sandbox — own paper account, own martingale ladders, own
   // strategy registry (CRASH500N + BOOM300N drift-fade scalping).
   fastPaper: () => get<FastPaperResp>("/api/fast-paper"),
