@@ -126,6 +126,25 @@ export type PaperResp = {
 };
 export type EquityPoint = { ts: number; balance: number };
 
+export type FastMartingaleSnapshot = {
+  level: number;
+  wins: number;
+  losses: number;
+  circuitBreakers: number;
+  lastCircuitBreakerAt: number;
+  nextStake: number;
+};
+
+export type FastPaperResp = {
+  stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;
+    trades: number; wins: number; losses: number; winRate: number; avgR: number;
+    peak: number; ddPct: number; open: number };
+  startingBalance: number; balance: number;
+  daily: Daily;
+  open: PaperPosition[];
+  martingale: Record<string, FastMartingaleSnapshot>;
+};
+
 export type LogEntry = {
   ts: string;
   level: "trace" | "debug" | "info" | "warn" | "error";
@@ -153,6 +172,14 @@ export const api = {
   synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
   synthStrategies: () => get<{ strategies: StrategyStats[] }>("/api/synth-strategies"),
   synthSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/synth-signals?limit=${limit}`),
+  // Fast-trade sandbox — own paper account, own martingale ladders, own
+  // strategy registry (CRASH500N + BOOM300N drift-fade scalping).
+  fastPaper: () => get<FastPaperResp>("/api/fast-paper"),
+  fastPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/fast-paper/trades?limit=${limit}`),
+  fastPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/fast-paper/equity"),
+  fastStrategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot> }>("/api/fast-strategies"),
+  fastSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/fast-signals?limit=${limit}`),
+  resetFastPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-fast-paper${balance ? `?balance=${balance}` : ""}`),
   logs: (opts: { limit?: number; level?: string; q?: string } = {}) => {
     const p = new URLSearchParams();
     if (opts.limit) p.set("limit", String(opts.limit));

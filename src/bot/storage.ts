@@ -10,6 +10,7 @@ import {
   emptyAdaptiveShiftState,
   type AdaptiveShiftState,
 } from "../main/engine/adaptive-shift";
+import { emptyMartingaleState, type MartingaleState } from "../main/engine/martingale";
 import { emptyPaperState, type PaperState } from "./paper-engine";
 
 export type BotState = {
@@ -25,6 +26,12 @@ export type BotState = {
   paper: PaperState;
   /** Synth-strategies paper sandbox — completely isolated from real-asset paper. */
   synthPaper: PaperState;
+  /** Fast-trade synth sandbox — own paper account for high-frequency
+   *  drift-fade scalps with martingale stake escalation. */
+  fastPaper: PaperState;
+  /** Per-strategy martingale ladder state for the fast-trade sandbox. Keyed
+   *  by strategy id (e.g. "crash500n_drift" / "boom300n_drift"). */
+  fastMartingale: Record<string, MartingaleState>;
 };
 
 const MAX_CLOSED_RETAINED = 500;
@@ -37,6 +44,8 @@ export function emptyBotState(): BotState {
     adaptiveShift: emptyAdaptiveShiftState(),
     paper: emptyPaperState(),
     synthPaper: emptyPaperState(),
+    fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
+    fastMartingale: {},
   };
 }
 
@@ -60,6 +69,8 @@ export class BotStorage {
         adaptiveShift: parsed.adaptiveShift ?? emptyAdaptiveShiftState(),
         paper: parsed.paper ?? emptyPaperState(),
         synthPaper: parsed.synthPaper ?? emptyPaperState(),
+        fastPaper: parsed.fastPaper ?? emptyPaperState(200),
+        fastMartingale: parsed.fastMartingale ?? {},
       };
     } catch (e: any) {
       if (e?.code === "ENOENT") return emptyBotState();

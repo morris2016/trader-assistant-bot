@@ -125,14 +125,31 @@ export class PaperEngine {
     signalStopPrice?: number;
     /** Structural TP emitted by the detector. Used in preference to ATR TP. */
     signalTargetPrice?: number;
+    /** When provided, bypasses the adaptive-shift multiplier and uses this
+     *  exact stake. Used by the fast-trade sandbox where martingale (computed
+     *  externally) supplies the stake. The PaperEngine still enforces minStake
+     *  and balance checks. */
+    stakeOverride?: number;
   }): PaperPosition | null {
     if (!isFinite(opts.atr) || opts.atr <= 0) return null;
     if (!isFinite(opts.entryPrice) || opts.entryPrice <= 0) return null;
     if (this.state.balance < opts.minStake) return null;
 
-    // Apply adaptive shift to stake
-    const { mult, reasons } = computeStakeMultiplier(this.state.adaptiveShift, opts.side, opts.symbol, opts.nowMs);
-    const stake = Math.max(opts.minStake, Math.round(opts.baseStake * mult * 100) / 100);
+    // Stake selection: caller-provided override (martingale) wins over the
+    // engine's adaptive-shift logic. Reasons string still records what was
+    // applied for audit trail.
+    let mult = 1;
+    let reasons: string[] = [];
+    let stake: number;
+    if (opts.stakeOverride != null && isFinite(opts.stakeOverride) && opts.stakeOverride > 0) {
+      stake = Math.max(opts.minStake, Math.round(opts.stakeOverride * 100) / 100);
+      reasons = ["override"];
+    } else {
+      const shift = computeStakeMultiplier(this.state.adaptiveShift, opts.side, opts.symbol, opts.nowMs);
+      mult = shift.mult;
+      reasons = shift.reasons;
+      stake = Math.max(opts.minStake, Math.round(opts.baseStake * mult * 100) / 100);
+    }
     if (stake > this.state.balance) return null; // can't afford
 
     const slDelta = opts.atr * opts.atrSlMult;

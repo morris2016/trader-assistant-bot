@@ -3,15 +3,17 @@ import { CandleBuffer } from "./candles";
 import { orderBlock } from "./detectors/orderBlock";
 import { fairValueGap } from "./detectors/fvg";
 import { liquiditySweep } from "./detectors/liquiditySweep";
+import { trendContinuation } from "./detectors/trendContinuation";
 import { applyStrategy } from "./strategy";
 import { latestAtr, latestRegime } from "./indicators";
 import type { Detector } from "./detectors/types";
 import type { Candle, DetectorConfig, DetectorDiagnostics, LiquidityPool, OrderBlock, RegimeSnapshot, Signal, StrategyConfig, StructureMark, SymbolCode } from "@shared/types";
 
-// Focused SMC stack: OB + FVG + Liquidity Sweep. emaCross and structure
-// detectors still exist in the codebase but are intentionally not registered —
-// we're drilling this trio first, everything else is deferred.
-export const ALL_DETECTORS: Detector[] = [orderBlock, fairValueGap, liquiditySweep];
+// SMC stack: OB + FVG + Liquidity Sweep — used by the validated real-asset and
+// synth-strategy registries. trendContinuation is the rule-based detector used
+// by FAST_STRATEGIES (Boom/Crash drift-fade scalping). emaCross and structure
+// detectors still exist in the codebase but are intentionally not registered.
+export const ALL_DETECTORS: Detector[] = [orderBlock, fairValueGap, liquiditySweep, trendContinuation];
 
 type StrategyTrace = { barIndex: number; signal: Signal };
 

@@ -32,6 +32,8 @@ export type ManualControls = {
   resetPaper: (balance?: number) => void;
   /** Reset SYNTH paper trading state (separate sandbox). */
   resetSynthPaper: (balance?: number) => void;
+  /** Reset fast-trade paper sandbox AND clear all per-strategy martingale ladders. */
+  resetFastPaper: (balance?: number) => void;
   /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
   forceResubscribe: () => Promise<void>;
 };
@@ -106,8 +108,17 @@ export function startHttpServer(opts: {
   /** Synth paper trading state + stats (separate sandbox). */
   getSynthPaperState: () => PaperState;
   getSynthPaperStats: () => Record<string, number>;
+  /** Fast-trade sandbox paper state — own balance/trades/equity, isolated from
+   *  real-asset paper and synth-paper. Stake comes from per-strategy martingale
+   *  ladder rather than adaptive shift. */
+  getFastPaperState: () => PaperState;
+  getFastPaperStats: () => Record<string, number>;
+  /** Per-strategy martingale ladder snapshot, keyed by strategy id. */
+  getFastMartingale: () => Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }>;
   /** Per-strategy live stats for synth strategies. */
   getSynthStrategyStats: () => StrategyStats[];
+  /** Per-strategy live stats for fast-trade strategies. */
+  getFastStrategyStats: () => StrategyStats[];
   /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
   getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
   /** Recent in-memory log entries for the web UI's Logs panel. */
@@ -120,7 +131,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/resubscribe")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/resubscribe")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -132,6 +143,10 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-synth-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetSynthPaper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/reset-fast-paper") {
+            const balance = url.searchParams.get("balance");
+            opts.manualControls.resetFastPaper(balance ? Number(balance) : undefined);
           }
           else if (path0 === "/api/control/resubscribe") {
             opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));
@@ -266,6 +281,47 @@ export function startHttpServer(opts: {
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
           const synthSyms = new Set(opts.getSynthStrategyStats().flatMap((s) => s.symbols));
           const sigs = opts.getRecentSignals().filter((s) => synthSyms.has(s.symbol)).slice(-limit).reverse();
+          json(res, 200, { signals: sigs });
+          return;
+        }
+        // ── Fast-trade sandbox endpoints (CRASH500N + BOOM300N drift-fade) ──
+        if (path0 === "/api/fast-paper") {
+          const ps = opts.getFastPaperState();
+          const stats = opts.getFastPaperStats();
+          json(res, 200, {
+            stats,
+            startingBalance: ps.startingBalance,
+            balance: ps.balance,
+            daily: ps.daily,
+            open: ps.open,
+            martingale: opts.getFastMartingale(),
+          });
+          return;
+        }
+        if (path0 === "/api/fast-paper/trades") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 1000);
+          const ps = opts.getFastPaperState();
+          json(res, 200, { trades: ps.closed.slice(0, limit) });
+          return;
+        }
+        if (path0 === "/api/fast-paper/equity") {
+          const ps = opts.getFastPaperState();
+          json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
+          return;
+        }
+        if (path0 === "/api/fast-strategies") {
+          json(res, 200, { strategies: opts.getFastStrategyStats(), martingale: opts.getFastMartingale() });
+          return;
+        }
+        if (path0 === "/api/fast-signals") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
+          const fastSyms = new Set(opts.getFastStrategyStats().flatMap((s) => s.symbols));
+          // Match by symbol AND detector — the trendContinuation detector is
+          // unique to fast strategies so the routing is unambiguous.
+          const sigs = opts.getRecentSignals()
+            .filter((s) => fastSyms.has(s.symbol) && s.detector === "trendContinuation")
+            .slice(-limit)
+            .reverse();
           json(res, 200, { signals: sigs });
           return;
         }
