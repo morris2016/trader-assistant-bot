@@ -142,12 +142,39 @@ export class PaperEngine {
     // Prefer structural stops/targets emitted by the detector when present and
     // on the correct side of entry. Matches the backtest path so live and
     // validation use the same SL/TP.
+    //
+    // CRITICAL: when SL is structural but TP is missing, do NOT fall back to
+    // ATR×atrTpMult for TP — that produces an SL/TP unit mismatch. A structural
+    // SL on a wide-ATR FVG can be 10x bigger than ATR×atrTpMult, leaving
+    // wins of ~0.1R while losses are 1R (catastrophic). Instead, derive TP
+    // from the structural stop distance × the validated R:R ratio
+    // (atrTpMult / atrSlMult). This preserves the validated R:R using the
+    // structural stop as the unit, matching backtest behavior.
     const sigSL = opts.signalStopPrice;
     const sigTP = opts.signalTargetPrice;
     const slOnRightSide = sigSL != null && isFinite(sigSL) && (opts.side === "BUY" ? sigSL < opts.entryPrice : sigSL > opts.entryPrice);
     const tpOnRightSide = sigTP != null && isFinite(sigTP) && (opts.side === "BUY" ? sigTP > opts.entryPrice : sigTP < opts.entryPrice);
-    const stopPrice = slOnRightSide ? sigSL! : atrStopPrice;
-    const tpPrice   = tpOnRightSide ? sigTP! : atrTpPrice;
+    let stopPrice: number;
+    let tpPrice: number;
+    if (slOnRightSide && tpOnRightSide) {
+      stopPrice = sigSL!;
+      tpPrice = sigTP!;
+    } else if (slOnRightSide) {
+      stopPrice = sigSL!;
+      const stopDistance = Math.abs(opts.entryPrice - sigSL!);
+      const rr = opts.atrSlMult > 0 ? opts.atrTpMult / opts.atrSlMult : 1;
+      const derivedTpDelta = stopDistance * rr;
+      tpPrice = opts.side === "BUY" ? opts.entryPrice + derivedTpDelta : opts.entryPrice - derivedTpDelta;
+    } else if (tpOnRightSide) {
+      tpPrice = sigTP!;
+      const tpDistance = Math.abs(sigTP! - opts.entryPrice);
+      const rr = opts.atrTpMult > 0 ? opts.atrSlMult / opts.atrTpMult : 1;
+      const derivedSlDelta = tpDistance * rr;
+      stopPrice = opts.side === "BUY" ? opts.entryPrice - derivedSlDelta : opts.entryPrice + derivedSlDelta;
+    } else {
+      stopPrice = atrStopPrice;
+      tpPrice = atrTpPrice;
+    }
 
     const pos: PaperPosition = {
       id: randomUUID(),

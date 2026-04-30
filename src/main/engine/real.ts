@@ -197,19 +197,34 @@ export class RealEngine extends EventEmitter {
         const priceDistToPnl = (d: number) => +((d / entry) * stake * multiplier).toFixed(2);
         // Prefer structural SL/TP emitted by the detector when on the correct
         // side of entry (matches the backtest path so live mirrors validation).
+        //
+        // CRITICAL: when SL is structural but TP is missing, do NOT fall back
+        // to ATR×atrTpMult for TP — that produces an SL/TP unit mismatch
+        // (structural SL distance vs. ATR-derived TP distance), which can
+        // give 0.1R wins against 1R losses. Instead, derive TP from the
+        // structural stop distance × the validated R:R ratio.
         const sigSL = params.signalStopPrice;
         const sigTP = params.signalTargetPrice;
         const slOk = sigSL != null && isFinite(sigSL) && (params.side === "BUY" ? sigSL < entry : sigSL > entry);
         const tpOk = sigTP != null && isFinite(sigTP) && (params.side === "BUY" ? sigTP > entry : sigTP < entry);
-        if (slOk) {
+        const atrTpMult = params.atrTpMult ?? 0;
+        const atrSlMult = params.atrSlMult ?? 0;
+        const rrTpOverSl = atrSlMult > 0 ? atrTpMult / atrSlMult : 1;
+        const rrSlOverTp = atrTpMult > 0 ? atrSlMult / atrTpMult : 1;
+        if (slOk && tpOk) {
           sl = priceDistToPnl(Math.abs(entry - sigSL!));
-        } else if (params.atrSlMult && params.atrSlMult > 0) {
-          sl = priceDistToPnl(params.atrSlMult * params.atr!);
-        }
-        if (tpOk) {
           tp = priceDistToPnl(Math.abs(sigTP! - entry));
-        } else if (params.atrTpMult && params.atrTpMult > 0) {
-          tp = priceDistToPnl(params.atrTpMult * params.atr!);
+        } else if (slOk) {
+          const stopDistance = Math.abs(entry - sigSL!);
+          sl = priceDistToPnl(stopDistance);
+          if (atrTpMult > 0) tp = priceDistToPnl(stopDistance * rrTpOverSl);
+        } else if (tpOk) {
+          const tpDistance = Math.abs(sigTP! - entry);
+          tp = priceDistToPnl(tpDistance);
+          if (atrSlMult > 0) sl = priceDistToPnl(tpDistance * rrSlOverTp);
+        } else {
+          if (atrSlMult > 0) sl = priceDistToPnl(atrSlMult * params.atr!);
+          if (atrTpMult > 0) tp = priceDistToPnl(atrTpMult * params.atr!);
         }
       } else {
         if (params.takeProfitPct && params.takeProfitPct > 0) {
