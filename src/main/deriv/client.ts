@@ -330,9 +330,15 @@ export class DerivClient extends EventEmitter {
   }
 
   private resubscribeAll() {
+    // Emit per-pair events so the bot can log success/failure of the
+    // post-reconnect resubscribe. Without this, "relying on client
+    // auto-resubscribe" is opaque — there's no way to tell from logs whether
+    // each subscription actually re-established.
     for (const sub of this.subscriptions.values()) {
       if (sub.kind === "ticks") {
-        this.send({ ticks: sub.symbol, subscribe: 1 }).catch(() => undefined);
+        this.send({ ticks: sub.symbol, subscribe: 1 })
+          .then(() => this.emit("resubscribed", { kind: "ticks", symbol: sub.symbol }))
+          .catch((e) => this.emit("resubscribeError", { kind: "ticks", symbol: sub.symbol, error: e instanceof Error ? e : new Error(String(e)) }));
       } else {
         this.send({
           ticks_history: sub.symbol,
@@ -342,7 +348,9 @@ export class DerivClient extends EventEmitter {
           style: "candles",
           granularity: sub.granularity,
           subscribe: 1,
-        }).catch(() => undefined);
+        })
+          .then(() => this.emit("resubscribed", { kind: "candles", symbol: sub.symbol, granularity: sub.granularity }))
+          .catch((e) => this.emit("resubscribeError", { kind: "candles", symbol: sub.symbol, granularity: sub.granularity, error: e instanceof Error ? e : new Error(String(e)) }));
       }
     }
   }

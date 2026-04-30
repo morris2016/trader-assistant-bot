@@ -17,7 +17,7 @@ import { STRATEGIES } from "../main/engine/strategies";
 import { strategiesForSymbol } from "../main/engine/strategies";
 import { SYNTH_STRATEGIES, isSynthSymbol, synthStrategiesForSymbol } from "../main/engine/synth-strategies";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
-import type { AccountInfo, Candle, Signal, SymbolCode } from "@shared/types";
+import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
 import { BotStorage } from "./storage";
@@ -63,7 +63,11 @@ async function main() {
     return; // idle forever; do not throw (would trigger restart loop)
   }
   const log = new Logger(cfg.logLevel);
-  log.info("bot starting", { config: describeConfig(cfg), strategies: STRATEGIES.map((s) => s.id) });
+  log.info("bot starting", {
+    config: describeConfig(cfg),
+    strategies: STRATEGIES.map((s) => s.id),
+    synthStrategies: SYNTH_STRATEGIES.map((s) => s.id),
+  });
 
   const storage = new BotStorage(cfg.stateDir);
   const persisted = await storage.load();
@@ -111,6 +115,17 @@ async function main() {
   // Heartbeat state — used for hang detection in /health
   let lastHeartbeatMs = Date.now();
   const lastCandleAtByKey = new Map<string, number>(); // sym|gr -> Date.now() ms
+  // Per-key counters reset every heartbeat. Tells the operator which streams
+  // actually delivered candles + which closed a bar in the last minute.
+  const candlesSinceHeartbeat = new Map<string, number>();
+  const newBarsSinceHeartbeat = new Map<string, number>();
+  // Cumulative since startup — surfaced in /api/diag and Strategies panel.
+  const totalCandlesByKey = new Map<string, number>();
+  const totalNewBarsByKey = new Map<string, number>();
+  // Per-strategy "I saw a bar from one of my symbols at this time" — fills the
+  // Strategies UI's `lastBarSeenAt` so an operator can spot a strategy whose
+  // stream silently went dead.
+  const strategyLastBarSeenAt = new Map<string, number>();
 
   // Wrap an interval body so it never escapes — a thrown error in setInterval
   // would otherwise kill the timer silently. We log + continue.
@@ -366,6 +381,8 @@ async function main() {
     if (granularity == null) return; // pre-emit-update legacy event — ignore
     const key = engKey(symbol, granularity);
     lastCandleAtByKey.set(key, Date.now());
+    candlesSinceHeartbeat.set(key, (candlesSinceHeartbeat.get(key) ?? 0) + 1);
+    totalCandlesByKey.set(key, (totalCandlesByKey.get(key) ?? 0) + 1);
     // Update chart buffer using epoch-aware merge. Deriv's WS may emit ohlc
     // updates that alternate between the just-closed bar and the in-progress
     // bar within the same tick — trusting `isNew` causes duplicate pushes
@@ -412,7 +429,27 @@ async function main() {
     // Run the matching engine (only one per key — silver_15m engine doesn't see 1h candles)
     const eng = engines.get(key);
     if (!eng) return;
+    if (isNewBar) {
+      newBarsSinceHeartbeat.set(key, (newBarsSinceHeartbeat.get(key) ?? 0) + 1);
+      totalNewBarsByKey.set(key, (totalNewBarsByKey.get(key) ?? 0) + 1);
+      // Track per-strategy "I saw a bar" so a stalled stream is observable.
+      const now = Date.now();
+      for (const s of STRATEGIES) {
+        if (s.symbols.includes(symbol as SymbolCode) && s.granularity === granularity) {
+          strategyLastBarSeenAt.set(s.id, now);
+        }
+      }
+      for (const s of SYNTH_STRATEGIES) {
+        if (s.symbols.includes(symbol) && s.granularity === granularity) {
+          strategyLastBarSeenAt.set(s.id, now);
+        }
+      }
+      log.info(`new bar ${symbol}@${granularity}s epoch=${candle.epoch} close=${candle.close}`);
+    }
     const r = eng.onCandle(symbol, candle, isNewBar);
+    if (isNewBar && r.signals.length === 0) {
+      log.info(`bar processed no signal ${symbol}@${granularity}s rejected=${r.rejected ?? 0} adx=${r.regime?.adx?.toFixed(1) ?? "?"}`);
+    }
     for (const sig of r.signals) {
       log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence, granularity });
       recentSignals.push(sig);
@@ -594,6 +631,9 @@ async function main() {
 
       if (reconnect) {
         // DerivClient's resubscribeAll() already handled it. Don't double-subscribe.
+        // Record the reconnect timestamp so the post-reconnect heal can detect
+        // streams that didn't actually re-attach.
+        lastReconnectMs = Date.now();
         log.info("reconnect — relying on client auto-resubscribe", { previouslySubscribed: subscribedKeys.size });
       } else {
         await subscribeAll();
@@ -627,7 +667,17 @@ async function main() {
     lastHeartbeatMs = Date.now();
     const realState = real.state();
     const paperState = paper.getState();
+    const synthState = synthPaper.getState();
     const realBalance = account?.balance ?? 0;
+    // Snapshot per-key counters then reset for the next interval. Operator can
+    // see in a glance: `candlesByKey: {"frxXAUUSD|3600": 14}` → stream alive,
+    // empty/missing key → stream dead.
+    const candlesByKey: Record<string, number> = {};
+    for (const [k, v] of candlesSinceHeartbeat) candlesByKey[k] = v;
+    const newBarsByKey: Record<string, number> = {};
+    for (const [k, v] of newBarsSinceHeartbeat) newBarsByKey[k] = v;
+    candlesSinceHeartbeat.clear();
+    newBarsSinceHeartbeat.clear();
     log.info("heartbeat", {
       uptimeSec: Math.floor((Date.now() - startTs) / 1000),
       wsConnected,
@@ -640,11 +690,18 @@ async function main() {
       paperBalance: paperState.balance,
       paperOpenTrades: paperState.open.length,
       paperClosedTrades: paperState.closed.length,
+      synthPaperBalance: synthState.balance,
+      synthPaperOpenTrades: synthState.open.length,
+      synthPaperClosedTrades: synthState.closed.length,
       consecLosses: real.getAdaptiveShift().consecLosses,
       paperConsecLosses: paperState.adaptiveShift.consecLosses,
-      signalsToday: recentSignals.length,
+      signalsBuffered: recentSignals.length,
+      candlesByKey,
+      newBarsByKey,
     });
-    // Subscription staleness — warn if a stream hasn't received a candle in 2×granularity
+    // Subscription staleness — warn if a stream hasn't received a candle in
+    // 1.5× granularity. Old threshold was 2×, which hid 90-min outages on 1h
+    // streams. 1.5× → 1h streams flagged at 90 min, 15m streams at 22.5 min.
     const nowMs = Date.now();
     for (const key of subscribedKeys) {
       const [, grStr] = key.split("|");
@@ -652,7 +709,7 @@ async function main() {
       const lastMs = lastCandleAtByKey.get(key);
       if (!lastMs) continue; // not seen yet — fine
       const stalenessSec = Math.floor((nowMs - lastMs) / 1000);
-      if (stalenessSec > 2 * gr) {
+      if (stalenessSec > 1.5 * gr) {
         log.warn(`stale subscription ${key}: no candle for ${stalenessSec}s (granularity ${gr}s)`);
       }
     }
@@ -671,9 +728,60 @@ async function main() {
     }
   }, 30_000);
 
+  // Per-pair confirmation from DerivClient.resubscribeAll(). Logs make it
+  // possible to tell, after a WS reconnect, which streams actually re-attached.
+  (deriv as unknown as { on(event: "resubscribed", l: (info: { kind: "ticks" | "candles"; symbol: string; granularity?: number }) => void): void }).on(
+    "resubscribed",
+    (info) => {
+      if (info.kind === "candles") log.info(`resubscribed ${info.symbol}@${info.granularity}s`);
+      else log.info(`resubscribed ticks ${info.symbol}`);
+    },
+  );
+  (deriv as unknown as { on(event: "resubscribeError", l: (info: { kind: "ticks" | "candles"; symbol: string; granularity?: number; error: Error }) => void): void }).on(
+    "resubscribeError",
+    (info) => {
+      if (info.kind === "candles") log.error(`resubscribe failed ${info.symbol}@${info.granularity}s`, { err: info.error.message });
+      else log.error(`resubscribe failed ticks ${info.symbol}`, { err: info.error.message });
+    },
+  );
+
+  // Post-reconnect heal: after the auto-resubscribe quiet period, scan every
+  // (sym,gr) we expected and force a fresh subscribe for any that haven't
+  // received a candle since the reconnect. Catches the case where Deriv
+  // accepts the resubscribe response but never starts emitting ohlc updates.
+  let lastReconnectMs = 0;
+  safeInterval("post-reconnect-heal", async () => {
+    if (shuttingDown || !wsConnected || !authorized) return;
+    if (lastReconnectMs === 0) return; // first connection — subscribeAll handled it
+    const elapsed = Date.now() - lastReconnectMs;
+    if (elapsed < 30_000 || elapsed > 120_000) return; // act in the 30-120s window after reconnect, then once
+    const stalePairs: Array<{ sym: string; gr: number }> = [];
+    for (const key of subscribedKeys) {
+      const lastMs = lastCandleAtByKey.get(key) ?? 0;
+      // If lastMs predates the reconnect, no candle has arrived since reconnect.
+      if (lastMs < lastReconnectMs) {
+        const [sym, grStr] = key.split("|");
+        stalePairs.push({ sym, gr: Number(grStr) });
+      }
+    }
+    if (stalePairs.length === 0) return;
+    log.warn("post-reconnect-heal: streams silent since reconnect, forcing fresh subscribe", { stalePairs });
+    for (const { sym, gr } of stalePairs) {
+      try {
+        const history = await deriv.subscribeCandles(sym as SymbolCode, gr as Granularity, 100);
+        log.info(`post-reconnect re-subscribed ${sym}@${gr}s (history=${history.length})`);
+      } catch (e) {
+        log.error(`post-reconnect re-subscribe failed ${sym}@${gr}s`, { err: (e as Error).message });
+      }
+    }
+    // Mark this reconnect as healed so we don't loop the action.
+    lastReconnectMs = 0;
+  }, 15_000);
+
   deriv.on("close", () => {
     wsConnected = false;
     authorized = false;
+    lastReconnectMs = Date.now(); // record so the next "open" is treated as reconnect by heal
     log.warn("ws closed (client will auto-reconnect)");
     // Note: keep subscribedKeys populated. The deriv client maintains its
     // own subscription registry and resubscribes on reconnect. Clearing
