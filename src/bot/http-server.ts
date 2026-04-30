@@ -181,6 +181,8 @@ export function startHttpServer(opts: {
             if (cm) patch.commissionPct = Number(cm);
             const sp = url.searchParams.get("entrySpreadBps");
             if (sp) patch.entrySpreadBps = Number(sp);
+            const fm = url.searchParams.get("forceMartingale");
+            if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
             opts.manualControls.updateFast1Config(patch);
           }
           else if (path0 === "/api/control/reset-fast2-paper") {
@@ -205,6 +207,8 @@ export function startHttpServer(opts: {
             if (cm) patch.commissionPct = Number(cm);
             const sp = url.searchParams.get("entrySpreadBps");
             if (sp) patch.entrySpreadBps = Number(sp);
+            const fm = url.searchParams.get("forceMartingale");
+            if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
             opts.manualControls.updateFast2Config(patch);
           }
           else if (path0 === "/api/control/resubscribe") {

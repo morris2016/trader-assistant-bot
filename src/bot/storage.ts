@@ -36,6 +36,12 @@ export type FastSandboxConfig = {
    *  BUYs enter slightly higher, SELLs slightly lower — emulates Deriv's
    *  bid/ask spread on the multiplier order. */
   entrySpreadBps: number;
+  /** UI override: when true, the bot escalates the martingale ladder for
+   *  EVERY strategy in the sandbox, regardless of the per-strategy
+   *  `useMartingale` flag in the registry. Lets the operator force
+   *  martingale-on for strategies (e.g. spike-fade) that the registry
+   *  validated as flat-stake. When false, the per-strategy flag wins. */
+  forceMartingale: boolean;
 };
 
 /** Fast (sandbox 1) — defaults targeted at the existing 30× / 2.2× / 5L config
@@ -49,6 +55,7 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   perTradeCap: 30,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
+  forceMartingale: false,
 };
 
 /** Fast2 — same shape as Fast1, defaults targeted at the validated 3-strategy
@@ -62,6 +69,7 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   perTradeCap: 30,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
+  forceMartingale: false,
 };
 
 export type BotState = {

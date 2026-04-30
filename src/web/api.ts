@@ -147,6 +147,9 @@ export type FastSandboxConfig = {
   perTradeCap: number;
   commissionPct: number;
   entrySpreadBps: number;
+  /** UI override: when true, every strategy in the sandbox runs the martingale
+   *  ladder regardless of its per-strategy `useMartingale` flag in the registry. */
+  forceMartingale: boolean;
 };
 export type Fast1Config = FastSandboxConfig;
 export type Fast2Config = FastSandboxConfig;
@@ -205,7 +208,8 @@ export const api = {
   updateFast1Config: (patch: Partial<Fast1Config>) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
-      if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+      if (typeof v === "boolean") p.set(k, String(v));
+      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-fast1-config?${p.toString()}`);
   },
@@ -222,7 +226,8 @@ export const api = {
   updateFast2Config: (patch: Partial<Fast2Config>) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
-      if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+      if (typeof v === "boolean") p.set(k, String(v));
+      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
   },

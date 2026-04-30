@@ -283,6 +283,7 @@ async function main() {
         if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
+        if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         fast1Config = next;
         persist();
         log.warn("fast1Config updated via API", { before, after: next });
@@ -305,6 +306,7 @@ async function main() {
         if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
+        if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         fast2Config = next;
         persist();
         log.warn("fast2Config updated via API", { before, after: next });
@@ -676,12 +678,16 @@ async function main() {
       if (fastStrat) {
         const before = fastMartingale[fastStrat.id] ?? emptyMartingaleState();
         // Always update the W/L counters (telemetry) but only escalate the
-        // ladder for strategies that opted into martingale.
-        if (fastStrat.useMartingale) {
+        // ladder for strategies that opted into martingale (per-strategy flag)
+        // OR when the UI has flipped the forceMartingale override on the
+        // sandbox config.
+        const martingaleActive = fastStrat.useMartingale || fast1Config.forceMartingale;
+        if (martingaleActive) {
           const params = fast1MartingaleParams();
           const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params);
           fastMartingale[fastStrat.id] = nextLadder;
-          log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}× MULT=${fast1Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          const forced = !fastStrat.useMartingale && fast1Config.forceMartingale ? " FORCED" : "";
+          log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${forced} MULT=${fast1Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
           if (circuitBreakerFired) {
             log.warn(`fast martingale circuit-breaker fired for ${fastStrat.id}: ladder reset after ${params.maxLevels} losses`);
           }
@@ -709,12 +715,25 @@ async function main() {
       const fast2Strat = FAST2_STRATEGIES.find((s) => s.symbols.includes(c.symbol) && s.granularity === c.granularity);
       if (fast2Strat) {
         const before = fast2Martingale[fast2Strat.id] ?? emptyMartingaleState();
-        const params = fast2MartingaleParams();
-        const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params);
-        fast2Martingale[fast2Strat.id] = nextLadder;
-        log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}× MULT=${fast2Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
-        if (circuitBreakerFired) {
-          log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} losses`);
+        const martingaleActive = fast2Strat.useMartingale || fast2Config.forceMartingale;
+        if (martingaleActive) {
+          const params = fast2MartingaleParams();
+          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params);
+          fast2Martingale[fast2Strat.id] = nextLadder;
+          const forced = !fast2Strat.useMartingale && fast2Config.forceMartingale ? " FORCED" : "";
+          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${forced} MULT=${fast2Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          if (circuitBreakerFired) {
+            log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} losses`);
+          }
+        } else {
+          fast2Martingale[fast2Strat.id] = {
+            ...before,
+            wins: before.wins + (c.pnl > 0 ? 1 : 0),
+            losses: before.losses + (c.pnl > 0 ? 0 : 1),
+            level: 0,
+            cumulativeSinceReset: 0,
+          };
+          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} W=${fast2Martingale[fast2Strat.id].wins} L=${fast2Martingale[fast2Strat.id].losses} (no martingale)`);
         }
         persist();
       } else {
@@ -825,8 +844,11 @@ async function main() {
           const params = fast1MartingaleParams();
           // Strategies with positive raw expectancy can opt out of martingale
           // (useMartingale=false) — they get a flat baseStake. Strategies with
-          // useMartingale=true ride the configured ladder.
-          const stake = fastMatch.useMartingale
+          // useMartingale=true ride the configured ladder. The UI override
+          // (fast1Config.forceMartingale) wins regardless of the per-strategy
+          // flag so the operator can flip martingale on for any strategy.
+          const martingaleActive = fastMatch.useMartingale || fast1Config.forceMartingale;
+          const stake = martingaleActive
             ? fastNextStake(ladder, params)
             : params.baseStake;
           const pos = fastPaper.openPosition({
@@ -886,7 +908,8 @@ async function main() {
         } else {
           const ladder = fast2Martingale[fast2Match.id] ?? emptyMartingaleState();
           const params = fast2MartingaleParams();
-          const stake = fast2Match.useMartingale
+          const martingaleActive = fast2Match.useMartingale || fast2Config.forceMartingale;
+          const stake = martingaleActive
             ? fastNextStake(ladder, params)
             : params.baseStake;
           const pos = fast2Paper.openPosition({

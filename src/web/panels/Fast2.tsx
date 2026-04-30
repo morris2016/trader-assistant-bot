@@ -65,7 +65,8 @@ export function Fast2Panel({ doAction, pending }: {
     pendingCfg.maxLevels !== paper.config.maxLevels ||
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.commissionPct !== paper.config.commissionPct ||
-    pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps
+    pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
+    pendingCfg.forceMartingale !== paper.config.forceMartingale
   );
   const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
   const filtered = trades.filter((t) =>
@@ -80,7 +81,7 @@ export function Fast2Panel({ doAction, pending }: {
   const applyCfg = () => {
     if (!pendingCfg || !dirty) return;
     doAction(
-      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}× · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
+      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}× · forceMart=${pendingCfg.forceMartingale ? "on" : "off"} · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
       () => api.updateFast2Config(pendingCfg).then(() => setPendingCfg(null)),
     );
   };
@@ -142,6 +143,18 @@ export function Fast2Panel({ doAction, pending }: {
             <div className="mono" style={{ paddingTop: 6 }}>
               ${(cfg.baseStake * cfg.commissionPct).toFixed(3)} commission · {cfg.entrySpreadBps.toFixed(1)} bps slip
             </div>
+          </ConfigField>
+          <ConfigField label="Force Martingale (override)">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 6 }}>
+              <input
+                type="checkbox"
+                checked={cfg.forceMartingale}
+                onChange={(e) => setCfg({ forceMartingale: e.target.checked })}
+              />
+              <span className={`mono ${cfg.forceMartingale ? "pos" : "muted"}`}>
+                {cfg.forceMartingale ? "ON — every strategy ladders" : "OFF — registry decides"}
+              </span>
+            </label>
           </ConfigField>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
