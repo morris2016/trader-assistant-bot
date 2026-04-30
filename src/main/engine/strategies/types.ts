@@ -42,6 +42,12 @@ export type StrategyDescriptor = {
   skipDaysOfWeekUtc?: number[];
   buyOnly?: boolean;
   sellOnly?: boolean;
+  /** Fast-trade sandbox flag: when true, the bot routes signals through the
+   *  per-strategy martingale ladder (escalating stake on losses). When false
+   *  or unset, the fast path uses a flat baseStake regardless of W/L history.
+   *  Strategies with positive raw expectancy should keep this OFF — martingale
+   *  would burn the edge by amplifying rare losing streaks. */
+  useMartingale?: boolean;
 
   /** Snapshot of the validation run that promoted this strategy from "tuning" to "tradeable". */
   validation: {

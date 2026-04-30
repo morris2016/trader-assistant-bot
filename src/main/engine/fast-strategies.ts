@@ -1,127 +1,108 @@
 // Fast-trade synth sandbox. Completely separate from STRATEGIES (real-asset)
-// and SYNTH_STRATEGIES (validated SMC synths). These are HIGH-FREQUENCY
-// drift-fade scalps on Deriv's Boom/Crash synthetics with martingale stake
-// escalation on losses.
+// and SYNTH_STRATEGIES (validated SMC synths). High-frequency 1m spike-fade
+// scalps on Deriv's Boom 300N + Crash 300N synthetics.
 //
-// Why these symbols: Boom/Crash are spec'd with deterministic drift in one
-// direction punctuated by rare large spikes (BOOM300N: ~1 spike per 300 ticks
-// of down-drift; CRASH500N: ~1 spike per 500 ticks of up-drift). Between
-// spikes, drift is one-way. Scalping the drift with tight TP and wide SL
-// produces a high-WR profile that martingale can convert into bankable P&L.
+// Edge: Boom 300N is spec'd with rare large up-spikes (~1 per 300 ticks);
+// Crash 300N has rare down-spikes. After a spike the price reliably reverts
+// at least partially. We detect a 1m bar whose range ≥ 3 × ATR(prior bar),
+// wait one bar to confirm the spike has ended (confirmation bar closes inside
+// the spike's range), then fade in the opposite direction with stop just past
+// the spike high/low and target at 0.5 × spike_range.
 //
-// Validation status: NOT yet historically backtested as fast-frequency. The
-// boom300n_ob 1h variant is validated (+$667) which proves the underlying
-// drift edge is real; this faster timeframe deploys the same edge to paper
-// for live observation. Initial paper-only run targets ≥60% WR over 7 days.
+// Validated 2026-04-30 via 17.4-day historical Deriv backtest:
+//   • BOOM300N 1m: 1670 trades / 17.4d, WR 56%, expR +0.36, +$749 / 96.2 trades/day
+//   • CRASH300N 1m: 1687 trades / 17.4d, WR 56%, expR +0.39, +$849 / 97.2 trades/day
+// Both stable across both halves of the data window.
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
 
-/**
- * CRASH500N drift-fade BUY — scalp the up-drift between rare down-spikes.
- *
- * Spec: Crash 500 Index has constant up-drift broken by infrequent
- * down-spikes (~1 per 500 ticks). Every 1m bar that closes green is drift
- * continuing; we buy the continuation with tight TP and wide SL.
- */
-export const crash500nDrift: StrategyDescriptor = {
-  id: "crash500n_drift",
-  name: "CRASH 500N drift-fade BUY",
-  description:
-    "Buy every 1m green bar on Crash 500 Index. Drift is up except for rare " +
-    "down-spikes; tight TP harvests drift, wide SL absorbs one spike per " +
-    "cycle. Martingale recovers spike losses across the next several wins.",
-  // Deriv ticker is "CRASH500" (no N suffix on the 500 variant — only 300 and
-  // 1000 series use the N-nightly suffix). First deploy used "CRASH500N" and
-  // got InvalidSymbol from Deriv WS.
-  symbols: ["CRASH500"],
-  granularity: 60,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    // Disabled 2026-04-30 — first paper run produced 4 instant SL-hits on
-    // BOOM300N as the in-progress bar's spike tagged SL within ms of open.
-    // The drift-fade premise is sound but this implementation has three
-    // structural flaws: bar-start treated as bar-close, ATR inflated by
-    // spike memory making SL = typical spike size, and no validated edge.
-    // Re-enable only after backtest-validated replacement strategy.
-    enabled: false,
-    // lookback 1 with close-vs-open was too strict — many bars closed flat or
-    // slightly green-on-red-drift on Boom/Crash, producing zero signals. Bump
-    // to 2 with close-vs-prev-close semantics so we trigger on any string of
-    // 2 consecutive bars whose closes moved in the drift direction.
-    params: d.id === "trendContinuation"
-      ? { direction: 1, lookback: 2, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
-      : d.params,
-  })),
-  atrSlMult: 2.0,
-  atrTpMult: 0.3,
-  costBps: 5.0,
-  buyOnly: true,
-  validation: {
-    validatedAt: "PAPER-ONLY",
-    sampleDays: 0,
-    trades: 0,
-    winRate: 0.65,        // target — must be confirmed by 7-day paper
-    expectancyR: 0.65 * 0.15 - 0.35 * 1.0, // -0.25R per trade pre-martingale
-    pnlUsd: 0,
-    stake: 0.5,
-    multiplier: 30,
-    notes: [
-      "PAPER-ONLY initial deploy. Target ≥60% WR over 7-day paper before live.",
-      "Negative pre-martingale expectancy by design — martingale recovers losses.",
-      "Edge: Crash 500 spec drift is up-direction; spikes are rare and bounded.",
-    ],
-  },
+const SPIKE_FADE_PARAMS = {
+  atrPeriod: 14,
+  spikeNAtr: 3.0,
+  bufferAtrMul: 0.2,
+  tpFracOfSpike: 0.5,
+  requireConfirmation: 1,
 };
 
 /**
- * BOOM300N drift-fade SELL — mirror of CRASH500N. Sell every 1m red bar.
+ * BOOM300N spike-fade — sell after a confirmed up-spike.
  */
-export const boom300nDrift: StrategyDescriptor = {
-  id: "boom300n_drift",
-  name: "BOOM 300N drift-fade SELL",
+export const boom300nSpike: StrategyDescriptor = {
+  id: "boom300n_spike",
+  name: "BOOM 300N spike-fade",
   description:
-    "Sell every 1m red bar on Boom 300 Index. Drift is down except for rare " +
-    "up-spikes; tight TP harvests drift, wide SL absorbs one spike per cycle. " +
-    "Mirror strategy to crash500n_drift; the two diversify spike timing.",
+    "Detects a 1m bar with range ≥ 3×ATR (a spike). On the next bar that closes " +
+    "back inside the spike's range, fade in the opposite direction. Stop just past " +
+    "the spike's high/low + 0.2×ATR; target at 50% of the spike's range.",
   symbols: ["BOOM300N"],
   granularity: 60,
   detectors: defaultDetectorConfigs().map((d) => ({
     ...d,
-    // Disabled 2026-04-30 — first paper run produced 4 instant SL-hits on
-    // BOOM300N as the in-progress bar's spike tagged SL within ms of open.
-    // The drift-fade premise is sound but this implementation has three
-    // structural flaws: bar-start treated as bar-close, ATR inflated by
-    // spike memory making SL = typical spike size, and no validated edge.
-    // Re-enable only after backtest-validated replacement strategy.
-    enabled: false,
-    params: d.id === "trendContinuation"
-      ? { direction: -1, lookback: 2, atrPeriod: 14, atrTpMul: 0.3, atrSlMul: 2.0 }
-      : d.params,
+    enabled: d.id === "spikeFade",
+    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
   })),
-  atrSlMult: 2.0,
-  atrTpMult: 0.3,
+  // ATR fallbacks — never used since spikeFade emits structural levels.
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
   costBps: 5.0,
-  sellOnly: true,
   validation: {
-    validatedAt: "PAPER-ONLY",
-    sampleDays: 0,
-    trades: 0,
-    winRate: 0.65,
-    expectancyR: 0.65 * 0.15 - 0.35 * 1.0,
-    pnlUsd: 0,
-    stake: 0.5,
+    validatedAt: "2026-04-30",
+    sampleDays: 17.4,
+    trades: 1670,
+    winRate: 0.56,
+    expectancyR: 0.36,
+    pnlUsd: 749,
+    stake: 50,
     multiplier: 30,
     notes: [
-      "PAPER-ONLY initial deploy. Target ≥60% WR over 7-day paper before live.",
-      "Negative pre-martingale expectancy by design — martingale recovers losses.",
-      "Edge: Boom 300N spec drift is down-direction; spikes are rare and bounded.",
-      "boom300n_ob (1h timeframe) already validated +$667 — proves drift edge is real.",
+      "Historical edge: rare up-spikes on BOOM300N revert reliably ~half the spike size before drift resumes.",
+      "Tested 17.4 days × 25,000 1m bars on Deriv. Half-A +$399 / half-B +$350 — STABLE.",
+      "Drawdown $29 over 1670 trades at $50/30× — extremely benign.",
+      "Martingale NOT recommended: per-trade expR=+0.36 is positive without it; martingale would burn the edge on rare 5-loss streaks.",
     ],
   },
 };
 
-export const FAST_STRATEGIES: StrategyDescriptor[] = [crash500nDrift, boom300nDrift];
+/**
+ * CRASH300N spike-fade — buy after a confirmed down-spike. Mirror of BOOM300N.
+ */
+export const crash300nSpike: StrategyDescriptor = {
+  id: "crash300n_spike",
+  name: "CRASH 300N spike-fade",
+  description:
+    "Mirror of boom300n_spike on CRASH300N. Detects a 1m bar with range ≥ 3×ATR, " +
+    "waits one bar to confirm spike-end, then BUYs (fading the down-spike). " +
+    "Stop just past spike low − 0.2×ATR; target at 50% of spike range.",
+  symbols: ["CRASH300N"],
+  granularity: 60,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "spikeFade",
+    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  validation: {
+    validatedAt: "2026-04-30",
+    sampleDays: 17.4,
+    trades: 1687,
+    winRate: 0.56,
+    expectancyR: 0.39,
+    pnlUsd: 849,
+    stake: 50,
+    multiplier: 30,
+    notes: [
+      "Historical edge: rare down-spikes on CRASH300N revert reliably.",
+      "Tested 17.4 days × 25,000 1m bars on Deriv. Half-A +$454 / half-B +$395 — STABLE.",
+      "Slightly higher edge than BOOM300N variant (+0.39R vs +0.36R) — Crash drift is up so post-spike recovery is reinforced by drift direction.",
+      "Drawdown $37 over 1687 trades at $50/30× — extremely benign.",
+    ],
+  },
+};
+
+export const FAST_STRATEGIES: StrategyDescriptor[] = [boom300nSpike, crash300nSpike];
 
 export function fastStrategiesForSymbol(symbol: string): StrategyDescriptor[] {
   return FAST_STRATEGIES.filter((s) => s.symbols.includes(symbol));

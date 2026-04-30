@@ -4,6 +4,7 @@ import { orderBlock } from "./detectors/orderBlock";
 import { fairValueGap } from "./detectors/fvg";
 import { liquiditySweep } from "./detectors/liquiditySweep";
 import { trendContinuation } from "./detectors/trendContinuation";
+import { spikeFade } from "./detectors/spikeFade";
 import { applyStrategy } from "./strategy";
 import { latestAtr, latestRegime } from "./indicators";
 import type { Detector } from "./detectors/types";
@@ -13,7 +14,7 @@ import type { Candle, DetectorConfig, DetectorDiagnostics, LiquidityPool, OrderB
 // synth-strategy registries. trendContinuation is the rule-based detector used
 // by FAST_STRATEGIES (Boom/Crash drift-fade scalping). emaCross and structure
 // detectors still exist in the codebase but are intentionally not registered.
-export const ALL_DETECTORS: Detector[] = [orderBlock, fairValueGap, liquiditySweep, trendContinuation];
+export const ALL_DETECTORS: Detector[] = [orderBlock, fairValueGap, liquiditySweep, trendContinuation, spikeFade];
 
 type StrategyTrace = { barIndex: number; signal: Signal };
 

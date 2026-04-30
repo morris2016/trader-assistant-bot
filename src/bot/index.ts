@@ -532,11 +532,25 @@ async function main() {
       const fastStrat = FAST_STRATEGIES.find((s) => s.symbols.includes(c.symbol) && s.granularity === c.granularity);
       if (fastStrat) {
         const before = fastMartingale[fastStrat.id] ?? emptyMartingaleState();
-        const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, DEFAULT_FAST_MARTINGALE);
-        fastMartingale[fastStrat.id] = nextLadder;
-        log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses}${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
-        if (circuitBreakerFired) {
-          log.warn(`fast martingale circuit-breaker fired for ${fastStrat.id}: ladder reset after maxLevels losses`);
+        // Always update the W/L counters (telemetry) but only escalate the
+        // ladder for strategies that opted into martingale.
+        if (fastStrat.useMartingale) {
+          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, DEFAULT_FAST_MARTINGALE);
+          fastMartingale[fastStrat.id] = nextLadder;
+          log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses}${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          if (circuitBreakerFired) {
+            log.warn(`fast martingale circuit-breaker fired for ${fastStrat.id}: ladder reset after maxLevels losses`);
+          }
+        } else {
+          // No-martingale path: track W/L for telemetry but never escalate.
+          fastMartingale[fastStrat.id] = {
+            ...before,
+            wins: before.wins + (c.pnl > 0 ? 1 : 0),
+            losses: before.losses + (c.pnl > 0 ? 0 : 1),
+            level: 0,
+            cumulativeSinceReset: 0,
+          };
+          log.info(`fastPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fastPaper.getState().balance.toFixed(2)} strategy=${fastStrat.id} W=${fastMartingale[fastStrat.id].wins} L=${fastMartingale[fastStrat.id].losses} (no martingale)`);
         }
         persist();
       } else {
@@ -638,7 +652,14 @@ async function main() {
         return;
       }
       const ladder = fastMartingale[fastMatch.id] ?? emptyMartingaleState();
-      const stake = fastNextStake(ladder, DEFAULT_FAST_MARTINGALE);
+      // Strategies with positive raw expectancy (e.g. spike-fade with +0.36R)
+      // skip martingale escalation — multiplying stake on a 5-loss streak that
+      // happens once per ~70 trades would erase the edge. Strategies with
+      // useMartingale=true (currently none in the validated registry) get
+      // the classic 2.2× × 5-level ladder.
+      const stake = fastMatch.useMartingale
+        ? fastNextStake(ladder, DEFAULT_FAST_MARTINGALE)
+        : DEFAULT_FAST_MARTINGALE.baseStake;
       const pos = fastPaper.openPosition({
         signalId: sig.id,
         symbol: sig.symbol,
