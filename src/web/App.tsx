@@ -92,7 +92,7 @@ export function App() {
             {tab === "paper"      && <PaperPanel doAction={doAction} pending={actionPending} />}
             {tab === "synth"      && <SynthPaperPanel doAction={doAction} pending={actionPending} />}
             {tab === "fast"       && <FastPanel doAction={doAction} pending={actionPending} />}
-            {tab === "fast2"      && <Fast2Panel doAction={doAction} pending={actionPending} />}
+            {tab === "fast2"      && <Fast2Panel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "logs"       && <LogsPanel />}
             {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}

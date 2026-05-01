@@ -42,6 +42,14 @@ export type RealTrade = {
   status: string;
   profit: number | null;
   detector: string;
+  /** Origin sandbox: "real" (default), "fast", "fast2", or "synth". */
+  sandbox?: "real" | "fast" | "fast2" | "synth";
+  sandboxStrategyId?: string;
+  signalFiredAt?: number | null;
+  signalEntry?: number | null;
+  contractOpenedAt?: number | null;
+  entrySlippage?: number | null;
+  openLatencyMs?: number | null;
 };
 
 export type StateResp = {

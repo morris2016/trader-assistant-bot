@@ -4,7 +4,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
-import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast2Config, type Fast2PaperResp, type FastMartingaleSnapshot, type Signal, type StrategyStats } from "../api";
+import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast2Config, type Fast2PaperResp, type FastMartingaleSnapshot, type RealTrade, type Signal, type StateResp, type StrategyStats } from "../api";
 
 const TRADE_MULT_OPTIONS = [100, 200, 300, 400, 500];
 const MART_MULT_OPTIONS = [1.7, 2.0, 2.2];
@@ -17,16 +17,20 @@ const COMMISSION_OPTIONS = [
   { v: 0.01,  label: "1.0%" },
 ];
 
-export function Fast2Panel({ doAction, pending }: {
+export function Fast2Panel({ state, doAction, pending }: {
+  state: StateResp | null;
   doAction: (label: string, fn: () => Promise<unknown>) => void;
   pending: string | null;
 }) {
   const [paper, setPaper] = useState<Fast2PaperResp | null>(null);
-  const [trades, setTrades] = useState<ClosedPaperPosition[]>([]);
+  const [paperTrades, setPaperTrades] = useState<ClosedPaperPosition[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
   const [martingale, setMartingale] = useState<Record<string, FastMartingaleSnapshot>>({});
   const [signals, setSignals] = useState<Signal[]>([]);
+  // Real (live) trades — filtered to sandbox==="fast2" client-side. Used
+  // only when liveTradingEnabled is on; otherwise paper trades drive the UI.
+  const [liveTrades, setLiveTrades] = useState<RealTrade[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filterSym, setFilterSym] = useState<string>("ALL");
   const [filterRes, setFilterRes] = useState<"ALL" | "won" | "lost">("ALL");
@@ -36,15 +40,16 @@ export function Fast2Panel({ doAction, pending }: {
   useEffect(() => {
     const load = async () => {
       try {
-        const [p, t, e, s, sig] = await Promise.all([
-          api.fast2Paper(), api.fast2PaperTrades(500), api.fast2PaperEquity(), api.fast2Strategies(), api.fast2Signals(100),
+        const [p, t, e, s, sig, rt] = await Promise.all([
+          api.fast2Paper(), api.fast2PaperTrades(500), api.fast2PaperEquity(), api.fast2Strategies(), api.fast2Signals(100), api.trades(500),
         ]);
         setPaper(p);
-        setTrades(t.trades);
+        setPaperTrades(t.trades);
         setEquity(e.equity);
         setStrategies(s.strategies);
         setMartingale(s.martingale);
         setSignals(sig.signals);
+        setLiveTrades(rt.trades.filter((rec) => rec.sandbox === "fast2"));
         setError(null);
       } catch (err) { setError((err as Error).message); }
     };
@@ -56,8 +61,8 @@ export function Fast2Panel({ doAction, pending }: {
   if (error && !paper) return <div className="banner banner-danger">⚠ {error}</div>;
   if (!paper) return <div className="empty">Loading…</div>;
 
-  const stats = paper.stats;
   const cfg = pendingCfg ?? paper.config;
+  const isLive = paper.config.liveTradingEnabled;
   const dirty = pendingCfg !== null && (
     pendingCfg.tradeMultiplier !== paper.config.tradeMultiplier ||
     pendingCfg.martingaleMultiplier !== paper.config.martingaleMultiplier ||
@@ -71,11 +76,97 @@ export function Fast2Panel({ doAction, pending }: {
     pendingCfg.martingaleMode !== paper.config.martingaleMode ||
     pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
   );
-  const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
-  const filtered = trades.filter((t) =>
+
+  // ── Mode-aware view: when live is on, show Deriv account balance + only
+  // fast2-tagged real trades. When paper, show simulated balance + paper
+  // trades. Both modes share the same configuration UI below.
+  const liveClosed = liveTrades.filter((t) => t.closedAt != null);
+  const liveOpenCount = liveTrades.length - liveClosed.length;
+  const liveWins = liveClosed.filter((t) => (t.profit ?? 0) > 0).length;
+  const liveLosses = liveClosed.length - liveWins;
+  const liveTotalPnl = liveClosed.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+  const liveAvgR = liveClosed.length > 0
+    ? liveClosed.reduce((acc, t) => acc + (t.stake > 0 ? (t.profit ?? 0) / t.stake : 0), 0) / liveClosed.length
+    : 0;
+  const accountBalance = state?.account?.balance ?? 0;
+  const accountLogin = state?.account?.loginid ?? "—";
+
+  const view = isLive
+    ? {
+        balance: accountBalance,
+        balanceSub: `Deriv · ${accountLogin}`,
+        balanceTone: accountBalance > 0 ? "pos" : "muted",
+        totalPnl: liveTotalPnl,
+        totalPnlSub: `${liveClosed.length} live trades · ${liveOpenCount} open`,
+        wr: liveClosed.length > 0 ? liveWins / liveClosed.length : 0,
+        wrSub: `${liveWins}W / ${liveLosses}L · ${liveClosed.length} trades · avg ${liveAvgR.toFixed(2)}R`,
+        wrTrades: liveClosed.length,
+        peak: 0,
+        peakSub: "live peak tracking — see logs",
+        ddPct: 0,
+      }
+    : (() => {
+        const s = paper.stats;
+        return {
+          balance: paper.balance,
+          balanceSub: `paper · started at $${paper.startingBalance.toFixed(2)}`,
+          balanceTone: (paper.balance >= paper.startingBalance ? "pos" : "neg") as const,
+          totalPnl: s.totalPnl,
+          totalPnlSub: `${s.pnlPct >= 0 ? "+" : ""}${s.pnlPct.toFixed(1)}% from start`,
+          wr: s.winRate,
+          wrSub: `${s.wins}W / ${s.losses}L · ${s.trades} trades · avg ${s.avgR.toFixed(2)}R`,
+          wrTrades: s.trades,
+          peak: s.peak,
+          peakSub: `${s.ddPct.toFixed(1)}% from peak · ${s.open} open`,
+          ddPct: s.ddPct,
+        };
+      })();
+
+  // Trade table source — paper or live depending on mode.
+  const tradeRows: Array<{
+    id: string; closedAt: number | null; symbol: string; side: "BUY" | "SELL"; detector: string;
+    stake: number; multiplier?: number; commission: number; entryPrice: number; exitPrice: number;
+    rMultiple: number; pnl: number; result: "won" | "lost"; latencyMs?: number | null;
+  }> = isLive
+    ? liveClosed.map((t) => ({
+        id: t.id,
+        closedAt: t.closedAt,
+        symbol: t.symbol,
+        side: t.side,
+        detector: t.detector,
+        stake: t.stake,
+        multiplier: t.multiplier,
+        commission: 0,
+        entryPrice: t.entrySpot ?? 0,
+        exitPrice: t.exitSpot ?? 0,
+        rMultiple: t.stake > 0 ? (t.profit ?? 0) / t.stake : 0,
+        pnl: t.profit ?? 0,
+        result: (t.profit ?? 0) > 0 ? "won" : "lost",
+        latencyMs: t.openLatencyMs,
+      }))
+    : paperTrades.map((t) => ({
+        id: t.id,
+        closedAt: t.closedAt,
+        symbol: t.symbol,
+        side: t.side,
+        detector: t.detector,
+        stake: t.stake,
+        multiplier: t.multiplier,
+        commission: t.commission ?? 0,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        rMultiple: t.rMultiple,
+        pnl: t.pnl,
+        result: t.result,
+        latencyMs: null,
+      }));
+
+  const symbols = Array.from(new Set(tradeRows.map((t) => t.symbol))).sort();
+  const filtered = tradeRows.filter((t) =>
     (filterSym === "ALL" || t.symbol === filterSym) &&
     (filterRes === "ALL" || t.result === filterRes)
   );
+  const totalCommission = tradeRows.reduce((acc, t) => acc + t.commission, 0);
 
   const setCfg = (patch: Partial<Fast2Config>) => {
     setPendingCfg({ ...cfg, ...patch });
@@ -94,7 +185,8 @@ export function Fast2Panel({ doAction, pending }: {
   };
 
   const maxLadderStake = round2(cfg.baseStake * Math.pow(cfg.martingaleMultiplier, cfg.maxLevels - 1));
-  const stakeFitsBalance = maxLadderStake <= paper.balance;
+  const balanceForCheck = view.balance;
+  const stakeFitsBalance = maxLadderStake <= balanceForCheck;
 
   return (
     <>
@@ -111,10 +203,10 @@ export function Fast2Panel({ doAction, pending }: {
       </div>
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Card title="Balance" value={`$${paper.balance.toFixed(2)}`} sub={`started at $${paper.startingBalance.toFixed(2)}`} tone={paper.balance >= paper.startingBalance ? "pos" : "neg"} />
-        <Card title="Total P&L" value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toFixed(2)}`} sub={`${stats.pnlPct >= 0 ? "+" : ""}${stats.pnlPct.toFixed(1)}% from start`} tone={stats.totalPnl >= 0 ? "pos" : "neg"} />
-        <Card title="Win Rate" value={stats.trades > 0 ? `${(stats.winRate * 100).toFixed(0)}%` : "—"} sub={`${stats.wins}W / ${stats.losses}L · ${stats.trades} trades · avg ${stats.avgR.toFixed(2)}R`} tone={stats.winRate >= 0.55 ? "pos" : stats.trades > 5 ? "neg" : "muted"} />
-        <Card title="Peak / DD" value={`$${stats.peak.toFixed(2)}`} sub={`${stats.ddPct.toFixed(1)}% from peak · ${stats.open} open`} tone={stats.ddPct > -10 ? "pos" : "neg"} />
+        <Card title={isLive ? "Live Balance" : "Paper Balance"} value={`$${view.balance.toFixed(2)}`} sub={view.balanceSub} tone={view.balanceTone as "pos" | "neg" | "muted"} />
+        <Card title={isLive ? "Live P&L" : "Total P&L"} value={`${view.totalPnl >= 0 ? "+" : ""}$${view.totalPnl.toFixed(2)}`} sub={view.totalPnlSub} tone={view.totalPnl >= 0 ? "pos" : "neg"} />
+        <Card title="Win Rate" value={view.wrTrades > 0 ? `${(view.wr * 100).toFixed(0)}%` : "—"} sub={view.wrSub} tone={view.wr >= 0.55 ? "pos" : view.wrTrades > 5 ? "neg" : "muted"} />
+        <Card title="Peak / DD" value={isLive ? "—" : `$${view.peak.toFixed(2)}`} sub={view.peakSub} tone={isLive ? "muted" : view.ddPct > -10 ? "pos" : "neg"} />
       </div>
 
       <h3 className="section-title">Configuration</h3>
@@ -149,7 +241,7 @@ export function Fast2Panel({ doAction, pending }: {
           </ConfigField>
           <ConfigField label="Max ladder stake (computed)">
             <div className={`mono ${stakeFitsBalance ? "" : "neg"}`} style={{ paddingTop: 6 }}>
-              ${maxLadderStake.toFixed(2)} {stakeFitsBalance ? "" : `> $${paper.balance.toFixed(2)} balance`}
+              ${maxLadderStake.toFixed(2)} {stakeFitsBalance ? "" : `> $${balanceForCheck.toFixed(2)} balance`}
             </div>
           </ConfigField>
           <ConfigField label="Per-trade fee at base stake">
@@ -182,17 +274,54 @@ export function Fast2Panel({ doAction, pending }: {
               <option value="anti">Anti (Paroli) — escalate on win, reset on loss</option>
             </select>
           </ConfigField>
-          <ConfigField label="🔴 LIVE Trading (real money)">
-            <label style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 6 }}>
-              <input
-                type="checkbox"
-                checked={cfg.liveTradingEnabled}
-                onChange={(e) => setCfg({ liveTradingEnabled: e.target.checked })}
-              />
-              <span className={`mono ${cfg.liveTradingEnabled ? "neg" : "muted"}`}>
-                {cfg.liveTradingEnabled ? "LIVE — real Deriv contracts" : "PAPER — simulation"}
+          <ConfigField label="Trading Mode">
+            <button
+              type="button"
+              onClick={() => setCfg({ liveTradingEnabled: !cfg.liveTradingEnabled })}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "8px 14px",
+                borderRadius: 999,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 13,
+                border: `1.5px solid ${cfg.liveTradingEnabled ? "#e8504c" : "#3a4255"}`,
+                background: cfg.liveTradingEnabled ? "rgba(232, 80, 76, 0.15)" : "rgba(58, 66, 85, 0.20)",
+                color: cfg.liveTradingEnabled ? "#ff8a87" : "#a8b3c5",
+                transition: "all 0.15s ease",
+                width: "100%",
+                justifyContent: "center",
+              }}
+            >
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 32,
+                  height: 16,
+                  borderRadius: 999,
+                  background: cfg.liveTradingEnabled ? "#e8504c" : "#3a4255",
+                  position: "relative",
+                  flexShrink: 0,
+                  transition: "background 0.15s ease",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    left: cfg.liveTradingEnabled ? 18 : 2,
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    transition: "left 0.15s ease",
+                  }}
+                />
               </span>
-            </label>
+              {cfg.liveTradingEnabled ? "🔴 LIVE — real Deriv contracts" : "📝 PAPER — simulation (default)"}
+            </button>
           </ConfigField>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -298,11 +427,16 @@ export function Fast2Panel({ doAction, pending }: {
           </select>
         </div>
         {filtered.length === 0 ? (
-          <div className="empty"><span className="empty-emoji">⚡⚡</span>No fast2-paper trades yet</div>
+          <div className="empty"><span className="empty-emoji">⚡⚡</span>No {isLive ? "live" : "paper"} trades yet</div>
         ) : (
           <table>
             <thead>
-              <tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Stake</th><th>MULT</th><th>Fee</th><th>Entry</th><th>Exit</th><th>R</th><th>Net P&amp;L</th><th>Result</th></tr>
+              <tr>
+                <th>Closed</th><th>Symbol</th><th>Side</th><th>Stake</th><th>MULT</th>
+                {!isLive && <th>Fee</th>}
+                {isLive && <th>Latency</th>}
+                <th>Entry</th><th>Exit</th><th>R</th><th>{isLive ? "P&L" : "Net P&L"}</th><th>Result</th>
+              </tr>
             </thead>
             <tbody>
               {filtered.map((t) => (
@@ -311,8 +445,9 @@ export function Fast2Panel({ doAction, pending }: {
                   <td className="mono">{t.symbol}</td>
                   <td><span className={`pill ${t.side === "BUY" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
                   <td className="mono">${t.stake.toFixed(2)}</td>
-                  <td className="mono faint">{t.multiplier}×</td>
-                  <td className="mono faint">${(t.commission ?? 0).toFixed(2)}</td>
+                  <td className="mono faint">{t.multiplier ?? "—"}×</td>
+                  {!isLive && <td className="mono faint">${t.commission.toFixed(2)}</td>}
+                  {isLive && <td className="mono faint">{t.latencyMs != null ? `${t.latencyMs}ms` : "—"}</td>}
                   <td className="mono">{t.entryPrice.toFixed(5)}</td>
                   <td className="mono">{t.exitPrice.toFixed(5)}</td>
                   <td className={`mono ${t.rMultiple > 0 ? "pos" : "neg"}`}>{t.rMultiple.toFixed(2)}R</td>
