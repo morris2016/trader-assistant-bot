@@ -100,6 +100,13 @@ export function startHttpServer(opts: {
   getState: () => BotState;
   getAccount: () => AccountInfo | null;
   getRecentSignals: () => Signal[];
+  /** Per-sandbox signal buffers — each only contains signals matched by that
+   *  sandbox's strategy registry (sym + gr + detector). Lets the UI surface
+   *  signals isolated per tab so an empty list = definitively no signal. */
+  getRealRecentSignals: () => Signal[];
+  getSynthRecentSignals: () => Signal[];
+  getFastRecentSignals: () => Signal[];
+  getFast2RecentSignals: () => Signal[];
   getAdaptiveShiftDescription: () => string;
   manualControls: ManualControls;
   /** Per-(symbol,granularity) candle history for chart rendering. */
@@ -295,6 +302,17 @@ export function startHttpServer(opts: {
           return;
         }
         if (path0 === "/api/signals") {
+          // Real-strategy signals only. Per-sandbox isolation: this route
+          // returns ONLY signals that matched a real-strategy registry entry
+          // (silver/gold/plat/pall/etc). Synth/fast/fast2 each have their
+          // own routes consulting their own buffers.
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
+          const sigs = opts.getRealRecentSignals().slice(-limit).reverse();
+          json(res, 200, { signals: sigs });
+          return;
+        }
+        if (path0 === "/api/signals/all") {
+          // Escape hatch: full unfiltered buffer for diagnostic use.
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
           const sigs = opts.getRecentSignals().slice(-limit).reverse();
           json(res, 200, { signals: sigs });
@@ -390,8 +408,7 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/synth-signals") {
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
-          const synthSyms = new Set(opts.getSynthStrategyStats().flatMap((s) => s.symbols));
-          const sigs = opts.getRecentSignals().filter((s) => synthSyms.has(s.symbol)).slice(-limit).reverse();
+          const sigs = opts.getSynthRecentSignals().slice(-limit).reverse();
           json(res, 200, { signals: sigs });
           return;
         }
@@ -435,13 +452,7 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/fast-signals") {
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
-          const fastSyms = new Set(opts.getFastStrategyStats().flatMap((s) => s.symbols));
-          // Match by symbol AND detector — the trendContinuation detector is
-          // unique to fast strategies so the routing is unambiguous.
-          const sigs = opts.getRecentSignals()
-            .filter((s) => fastSyms.has(s.symbol) && s.detector === "trendContinuation")
-            .slice(-limit)
-            .reverse();
+          const sigs = opts.getFastRecentSignals().slice(-limit).reverse();
           json(res, 200, { signals: sigs });
           return;
         }
@@ -481,13 +492,7 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/fast2-signals") {
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
-          const fast2Stats = opts.getFast2StrategyStats();
-          const fast2Syms = new Set(fast2Stats.flatMap((s) => s.symbols));
-          const fast2Detectors = new Set(fast2Stats.flatMap((s) => s.symbols.length ? ["spikeFade", "driftPullback"] : []));
-          const sigs = opts.getRecentSignals()
-            .filter((s) => fast2Syms.has(s.symbol) && fast2Detectors.has(s.detector))
-            .slice(-limit)
-            .reverse();
+          const sigs = opts.getFast2RecentSignals().slice(-limit).reverse();
           json(res, 200, { signals: sigs });
           return;
         }

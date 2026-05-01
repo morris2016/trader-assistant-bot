@@ -47,6 +47,10 @@ async function main() {
       getState: () => ({ open: [], closed: [], daily: { date: "", profit: 0, tradesOpened: 0, capHit: false }, adaptiveShift: emptyAdaptiveShiftState() }),
       getAccount: () => null,
       getRecentSignals: () => [],
+      getRealRecentSignals: () => [],
+      getSynthRecentSignals: () => [],
+      getFastRecentSignals: () => [],
+      getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
       manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, forceResubscribe: async () => {} },
       getCandles: () => [],
@@ -203,6 +207,21 @@ async function main() {
   const subscribedKeys = new Set<string>();
   const recentSignals: Signal[] = [];
   const SIGNAL_HISTORY = 200;
+  // Per-sandbox signal buffers — each only gets signals that matched a
+  // strategy in THAT sandbox's registry (by sym + gr + detector tuple). Lets
+  // the UI show "what signals would have routed here?" definitively, so an
+  // empty list in the Synth tab means "no synth signal fired", not "synth
+  // fired but got filtered out as a fast/real signal." A single signal can
+  // appear in multiple buffers if multiple sandboxes share its (sym,gr,det)
+  // tuple — e.g. spike-fade on BOOM300N@60 routes to both Fast and Fast2.
+  const realRecentSignals: Signal[] = [];
+  const synthRecentSignals: Signal[] = [];
+  const fastRecentSignals: Signal[] = [];
+  const fast2RecentSignals: Signal[] = [];
+  const pushBounded = (buf: Signal[], sig: Signal) => {
+    buf.push(sig);
+    if (buf.length > SIGNAL_HISTORY) buf.splice(0, buf.length - SIGNAL_HISTORY);
+  };
   // Heartbeat state — used for hang detection in /health
   let lastHeartbeatMs = Date.now();
   const lastCandleAtByKey = new Map<string, number>(); // sym|gr -> Date.now() ms
@@ -281,6 +300,10 @@ async function main() {
     },
     getAccount: () => account,
     getRecentSignals: () => recentSignals,
+    getRealRecentSignals: () => realRecentSignals,
+    getSynthRecentSignals: () => synthRecentSignals,
+    getFastRecentSignals: () => fastRecentSignals,
+    getFast2RecentSignals: () => fast2RecentSignals,
     getAdaptiveShiftDescription: () => real.describeAdaptiveShift(),
     manualControls: {
       isPaused: () => manualPaused,
@@ -914,6 +937,24 @@ async function main() {
       log.info("signal", { symbol: sig.symbol, side: sig.action, detector: sig.detector, confidence: sig.confidence, granularity });
       recentSignals.push(sig);
       if (recentSignals.length > SIGNAL_HISTORY) recentSignals.splice(0, recentSignals.length - SIGNAL_HISTORY);
+      // Per-sandbox routing: push the signal into every sandbox's buffer
+      // whose strategy registry contains a matching (sym, gr, detector)
+      // tuple. A signal can land in multiple buffers (e.g. spike-fade on
+      // BOOM300N@60 → Fast AND Fast2 both consume it), and zero buffers if
+      // it's an orphan — useful diagnostic in itself.
+      const sym = sig.symbol;
+      const det = sig.detector;
+      const matchedReal  = STRATEGIES.some((s) => s.symbols.includes(sym as SymbolCode) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
+      const matchedSynth = SYNTH_STRATEGIES.some((s) => s.symbols.includes(sym) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
+      const matchedFast  = FAST_STRATEGIES.some((s) => s.symbols.includes(sym) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
+      const matchedFast2 = FAST2_STRATEGIES.some((s) => s.symbols.includes(sym) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
+      if (matchedReal)  pushBounded(realRecentSignals, sig);
+      if (matchedSynth) pushBounded(synthRecentSignals, sig);
+      if (matchedFast)  pushBounded(fastRecentSignals, sig);
+      if (matchedFast2) pushBounded(fast2RecentSignals, sig);
+      if (!matchedReal && !matchedSynth && !matchedFast && !matchedFast2) {
+        log.warn("signal landed in no sandbox buffer", { symbol: sym, granularity, detector: det, action: sig.action });
+      }
       executeSignal(sig, candle, key, granularity).catch((e) => log.error("execute failed", { err: (e as Error).message }));
     }
   });
