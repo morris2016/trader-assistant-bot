@@ -6,7 +6,12 @@ import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
 import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast2Config, type Fast2PaperResp, type FastMartingaleSnapshot, type RealTrade, type Signal, type StateResp, type StrategyStats } from "../api";
 
-const TRADE_MULT_OPTIONS = [100, 200, 300, 400, 500];
+// Deriv contract constraints for BOOM/CRASH 300N MULTIPLIER contracts.
+// Source: Deriv contracts_for API response. Anything outside these ranges
+// is rejected by the live buy endpoint with ContractBuyValidationError.
+const TRADE_MULT_OPTIONS = [20, 40, 60, 80, 100];
+const DERIV_MIN_STAKE = 1;       // USD — minimum stake per multiplier contract
+const DERIV_MAX_STAKE = 2000;    // USD — maximum stake (Deriv default ceiling)
 const MART_MULT_OPTIONS = [1.7, 2.0, 2.2];
 const COMMISSION_OPTIONS = [
   { v: 0,     label: "0% (off)" },
@@ -174,13 +179,23 @@ export function Fast2Panel({ state, doAction, pending }: {
 
   const applyCfg = () => {
     if (!pendingCfg || !dirty) return;
-    const liveDelta = pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled;
-    const liveWarning = pendingCfg.liveTradingEnabled
+    // Client-side Deriv-constraint clamp before sending. Server clamps too,
+    // but doing it here lets the user see the snapped value immediately.
+    const clamped: Fast2Config = { ...pendingCfg };
+    if (!TRADE_MULT_OPTIONS.includes(clamped.tradeMultiplier)) {
+      clamped.tradeMultiplier = TRADE_MULT_OPTIONS.reduce((best, v) => Math.abs(v - clamped.tradeMultiplier) < Math.abs(best - clamped.tradeMultiplier) ? v : best, TRADE_MULT_OPTIONS[0]);
+    }
+    if (clamped.baseStake < DERIV_MIN_STAKE) clamped.baseStake = DERIV_MIN_STAKE;
+    if (clamped.baseStake > DERIV_MAX_STAKE) clamped.baseStake = DERIV_MAX_STAKE;
+    if (clamped.perTradeCap < DERIV_MIN_STAKE) clamped.perTradeCap = DERIV_MIN_STAKE;
+    if (clamped.perTradeCap > DERIV_MAX_STAKE) clamped.perTradeCap = DERIV_MAX_STAKE;
+    const liveDelta = clamped.liveTradingEnabled !== paper.config.liveTradingEnabled;
+    const liveWarning = clamped.liveTradingEnabled
       ? " ⚠ LIVE TRADING — REAL MONEY"
       : (liveDelta ? " · returning to paper" : "");
     doAction(
-      `Apply Fast2 config:${liveWarning} MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}×/${pendingCfg.martingaleMode} · forceMart=${pendingCfg.forceMartingale ? "on" : "off"} · sides=${pendingCfg.sideFilter} · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
-      () => api.updateFast2Config(pendingCfg).then(() => setPendingCfg(null)),
+      `Apply Fast2 config:${liveWarning} MULT=${clamped.tradeMultiplier}× · martingale=${clamped.martingaleMultiplier}×/${clamped.martingaleMode} · forceMart=${clamped.forceMartingale ? "on" : "off"} · sides=${clamped.sideFilter} · base=$${clamped.baseStake} · levels=${clamped.maxLevels} · cap=$${clamped.perTradeCap} · commission=${(clamped.commissionPct * 100).toFixed(2)}% · spread=${clamped.entrySpreadBps}bps`,
+      () => api.updateFast2Config(clamped).then(() => setPendingCfg(null)),
     );
   };
 
@@ -210,9 +225,12 @@ export function Fast2Panel({ state, doAction, pending }: {
       </div>
 
       <h3 className="section-title">Configuration</h3>
+      <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
+        Deriv constraints (BOOM/CRASH 300N MULTIPLIER): leverage ∈ {`{${TRADE_MULT_OPTIONS.join(", ")}}`}× · stake ∈ ${DERIV_MIN_STAKE}–${DERIV_MAX_STAKE}. Out-of-range values are auto-snapped on Apply.
+      </div>
       <div className="card" style={{ marginBottom: 16, padding: 16 }}>
         <div className="grid grid-3" style={{ gap: 12, marginBottom: 12 }}>
-          <ConfigField label="Trade Leverage (MULT)">
+          <ConfigField label="Trade Leverage (MULT) — Deriv-valid only">
             <select className="filter-select" value={cfg.tradeMultiplier} onChange={(e) => setCfg({ tradeMultiplier: Number(e.target.value) })}>
               {TRADE_MULT_OPTIONS.map((m) => <option key={m} value={m}>{m}×</option>)}
             </select>
@@ -222,14 +240,30 @@ export function Fast2Panel({ state, doAction, pending }: {
               {MART_MULT_OPTIONS.map((m) => <option key={m} value={m}>{m.toFixed(1)}×</option>)}
             </select>
           </ConfigField>
-          <ConfigField label="Base Stake (level 0)">
-            <input className="filter-input" type="number" step="0.5" min="0.5" value={cfg.baseStake} onChange={(e) => setCfg({ baseStake: Number(e.target.value) })} />
+          <ConfigField label={`Base Stake (level 0) — Deriv min $${DERIV_MIN_STAKE}`}>
+            <input
+              className="filter-input"
+              type="number"
+              step="0.5"
+              min={DERIV_MIN_STAKE}
+              max={DERIV_MAX_STAKE}
+              value={cfg.baseStake}
+              onChange={(e) => setCfg({ baseStake: Number(e.target.value) })}
+            />
           </ConfigField>
           <ConfigField label="Max Ladder Levels">
             <input className="filter-input" type="number" step="1" min="1" max="10" value={cfg.maxLevels} onChange={(e) => setCfg({ maxLevels: Number(e.target.value) })} />
           </ConfigField>
-          <ConfigField label="Per-Trade Cap ($)">
-            <input className="filter-input" type="number" step="1" min="1" value={cfg.perTradeCap} onChange={(e) => setCfg({ perTradeCap: Number(e.target.value) })} />
+          <ConfigField label={`Per-Trade Cap ($) — Deriv max $${DERIV_MAX_STAKE}`}>
+            <input
+              className="filter-input"
+              type="number"
+              step="1"
+              min={DERIV_MIN_STAKE}
+              max={DERIV_MAX_STAKE}
+              value={cfg.perTradeCap}
+              onChange={(e) => setCfg({ perTradeCap: Number(e.target.value) })}
+            />
           </ConfigField>
           <ConfigField label="Commission (% of stake)">
             <select className="filter-select" value={cfg.commissionPct} onChange={(e) => setCfg({ commissionPct: Number(e.target.value) })}>

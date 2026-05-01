@@ -7,7 +7,11 @@ import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
 import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast1Config, type FastMartingaleSnapshot, type FastPaperResp, type Signal, type StrategyStats } from "../api";
 
-const TRADE_MULT_OPTIONS = [30, 50, 100, 200, 300, 400, 500];
+// Deriv only accepts these multipliers for BOOM/CRASH 300N contracts.
+// Other values trigger ContractBuyValidationError on live trades. The
+// validated paper configs (30×) won't be reachable here anymore — closest
+// live-valid option is 20× or 40×.
+const TRADE_MULT_OPTIONS = [20, 40, 60, 80, 100];
 const MART_MULT_OPTIONS = [1.5, 1.7, 2.0, 2.2, 2.5];
 const COMMISSION_OPTIONS = [
   { v: 0,     label: "0% (off)" },

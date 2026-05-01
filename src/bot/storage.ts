@@ -79,11 +79,16 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   liveTradingEnabled: false,
 };
 
-/** Fast2 — same shape as Fast1, defaults targeted at the validated 3-strategy
- *  stack candidates (300×, 1.7× mart). */
+/** Fast2 — same shape as Fast1. Defaults aligned to Deriv's actual contract
+ *  constraints for BOOM/CRASH 300N multiplier contracts:
+ *    multiplier ∈ {20, 40, 60, 80, 100}
+ *    minStake = $1, maxStake = $2000 (per Deriv contracts_for)
+ *    commission = 0.5% baked into proposal pricing
+ *  Picking 100× (max Deriv allows) keeps the validated paper edge while
+ *  staying within the live-tradable range. */
 export type Fast2Config = FastSandboxConfig;
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
-  tradeMultiplier: 300,
+  tradeMultiplier: 100,
   martingaleMultiplier: 1.7,
   baseStake: 1.5,
   maxLevels: 5,
@@ -95,6 +100,28 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   martingaleMode: "classic",
   liveTradingEnabled: false,
 };
+
+/** Deriv-valid multiplier values for BOOM/CRASH 300N MULTIPLIER contracts.
+ *  Source: Deriv contracts_for response (multiplier_range field).
+ *  Anything outside this set is rejected by the buy endpoint with
+ *  ContractBuyValidationError. Same set applies to BOOM/CRASH 300/500/1000N. */
+export const DERIV_BOOMCRASH_MULTIPLIERS = [20, 40, 60, 80, 100] as const;
+/** Snap an arbitrary multiplier to the closest Deriv-accepted value. */
+export function clampDerivMultiplier(m: number): number {
+  if (!isFinite(m) || m <= 0) return 100;
+  let best = DERIV_BOOMCRASH_MULTIPLIERS[0];
+  let bestDist = Math.abs(m - best);
+  for (const v of DERIV_BOOMCRASH_MULTIPLIERS) {
+    const d = Math.abs(m - v);
+    if (d < bestDist) { best = v; bestDist = d; }
+  }
+  return best;
+}
+/** Deriv min/max stake on synthetic-index multipliers (USD). The actual
+ *  ceiling depends on multiplier choice (smaller MULT permits larger stake)
+ *  but $2000 is a safe universal upper bound. */
+export const DERIV_MIN_STAKE_USD = 1;
+export const DERIV_MAX_STAKE_USD = 2000;
 
 /** Synth sandbox — same shape as Fast1/Fast2. Defaults match the validation
  *  baseline (MULT=100×, $1 stake, no martingale) so the live numbers map

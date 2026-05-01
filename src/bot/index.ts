@@ -23,7 +23,7 @@ import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_SYNTH_CONFIG, type Fast1Config, type Fast2Config, type SynthConfig } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_SYNTH_CONFIG, DERIV_BOOMCRASH_MULTIPLIERS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, type Fast1Config, type Fast2Config, type SynthConfig } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -422,6 +422,25 @@ async function main() {
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
         if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
+        // Deriv contract constraints — clamp to live-tradable range. Even if
+        // the operator types an invalid value via the API, the bot enforces
+        // valid Deriv-accepted values so live placeTrade can never reject.
+        const clampedMult = clampDerivMultiplier(next.tradeMultiplier);
+        if (clampedMult !== next.tradeMultiplier) {
+          log.warn(`fast2Config tradeMultiplier ${next.tradeMultiplier}× snapped to Deriv-valid ${clampedMult}× (accepts: ${DERIV_BOOMCRASH_MULTIPLIERS.join(",")})`);
+          next.tradeMultiplier = clampedMult;
+        }
+        if (next.baseStake < DERIV_MIN_STAKE_USD) {
+          log.warn(`fast2Config baseStake $${next.baseStake} clamped to Deriv min $${DERIV_MIN_STAKE_USD}`);
+          next.baseStake = DERIV_MIN_STAKE_USD;
+        }
+        if (next.perTradeCap > DERIV_MAX_STAKE_USD) {
+          log.warn(`fast2Config perTradeCap $${next.perTradeCap} clamped to Deriv max $${DERIV_MAX_STAKE_USD}`);
+          next.perTradeCap = DERIV_MAX_STAKE_USD;
+        }
+        if (next.perTradeCap < DERIV_MIN_STAKE_USD) {
+          next.perTradeCap = DERIV_MIN_STAKE_USD;
+        }
         fast2Config = next;
         persist();
         log.warn("fast2Config updated via API", { before, after: next });
@@ -1145,12 +1164,23 @@ async function main() {
               log.warn(`fast2 LIVE blocked by real-engine gate: ${realGate.reason}`);
               handledFast2 = true;
             } else {
+              // Final-mile clamps before sending to Deriv. The validator on
+              // updateFast2Config already snaps these; this is a belt-and-
+              // braces guard against persisted-state from older deploys.
+              const liveMult = clampDerivMultiplier(fast2Config.tradeMultiplier);
+              const liveStake = Math.min(DERIV_MAX_STAKE_USD, Math.max(DERIV_MIN_STAKE_USD, stake));
+              if (liveMult !== fast2Config.tradeMultiplier) {
+                log.warn(`fast2 LIVE: tradeMultiplier ${fast2Config.tradeMultiplier}× → ${liveMult}× (Deriv-valid clamp before placeTrade)`);
+              }
+              if (liveStake !== stake) {
+                log.warn(`fast2 LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD})`);
+              }
               try {
                 const trade = await real.placeTrade({
                   symbol: sig.symbol as SymbolCode,
                   side: sig.action,
                   family: "MULTIPLIER",
-                  multiplier: fast2Config.tradeMultiplier,
+                  multiplier: liveMult,
                   tpSlMode: "atr",
                   atrTpMult: fast2Match.atrTpMult,
                   atrSlMult: fast2Match.atrSlMult,
@@ -1160,11 +1190,11 @@ async function main() {
                   signalStopPrice: sig.stopPrice,
                   signalTargetPrice: sig.targetPrice,
                   signalFiredAt: sig.ts,
-                  stakeOverride: stake,
+                  stakeOverride: liveStake,
                   sandbox: "fast2",
                   sandboxStrategyId: fast2Match.id,
                 });
-                log.info(`fast2 LIVE opened ${trade.symbol} ${trade.side} strategy=${fast2Match.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${fast2Config.tradeMultiplier}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
+                log.info(`fast2 LIVE opened ${trade.symbol} ${trade.side} strategy=${fast2Match.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${liveMult}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
               } catch (e) {
                 log.error(`fast2 LIVE placeTrade failed`, { err: (e as Error).message, symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
               }
