@@ -129,6 +129,13 @@ export class RealEngine extends EventEmitter {
     return sum / this.recentOpenLatenciesMs.length;
   }
 
+  /** Number of latency samples currently in the rolling buffer. Used by the
+   *  latency circuit to require a minimum sample count before tripping —
+   *  prevents one slow buy from blowing the circuit. */
+  recentOpenLatencySampleCount(): number {
+    return this.recentOpenLatenciesMs.length;
+  }
+
   /** Hydrate open/closed contract history from Deriv's authoritative state.
    *  Used at bot startup when local state was wiped (Railway redeploy etc.)
    *  so the UI can show the user's actual trade history even after a fresh

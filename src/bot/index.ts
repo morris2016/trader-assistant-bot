@@ -1667,23 +1667,36 @@ async function main() {
 
   // ──────── Production risk circuit breakers ────────
   // Latency circuit: if the rolling-average open latency exceeds the threshold,
-  // auto-pause the bot. High latency means slippage between signal and fill is
-  // big enough to invalidate the strategy edge — better to wait it out than
-  // bleed money. Recovery is manual (operator unpauses via UI).
-  const LATENCY_CIRCUIT_MS = Number(process.env.LATENCY_CIRCUIT_MS ?? 800);
+  // auto-pause the bot. The 800ms default was too aggressive — Railway → Deriv
+  // round-trips on multiplier_buy commonly land 700–1100ms even from EU West,
+  // which would trip on every single trade. Defaults raised to a 2500ms ceiling
+  // and 5-sample minimum so a one-off slow buy doesn't blow the circuit.
+  // Auto-resumes when avg drops back below threshold/2 — manual-only recovery
+  // was the wrong default; the user shouldn't have to babysit every spike.
+  // All thresholds are env-configurable (LATENCY_CIRCUIT_MS, LATENCY_MIN_SAMPLES,
+  // LATENCY_AUTO_RESUME=0 to disable auto-resume).
+  const LATENCY_CIRCUIT_MS = Number(process.env.LATENCY_CIRCUIT_MS ?? 2500);
+  const LATENCY_MIN_SAMPLES = Number(process.env.LATENCY_MIN_SAMPLES ?? 5);
+  const LATENCY_AUTO_RESUME = (process.env.LATENCY_AUTO_RESUME ?? "1") === "1";
   let latencyPaused = false;
   safeInterval("latency-circuit", () => {
-    if (manualPaused) return; // already paused — nothing to do
     const avg = real.averageOpenLatencyMs();
-    if (avg == null) return; // no samples yet
+    const samples = real.recentOpenLatencySampleCount();
+    if (avg == null || samples < LATENCY_MIN_SAMPLES) return; // not enough data yet
     if (avg > LATENCY_CIRCUIT_MS && !latencyPaused) {
-      log.error(`LATENCY CIRCUIT: avg open latency ${avg.toFixed(0)}ms > ${LATENCY_CIRCUIT_MS}ms threshold — auto-pausing`);
+      log.error(`LATENCY CIRCUIT: avg open latency ${avg.toFixed(0)}ms > ${LATENCY_CIRCUIT_MS}ms threshold (n=${samples}) — auto-pausing`);
       manualPaused = true;
       latencyPaused = true;
     } else if (avg <= LATENCY_CIRCUIT_MS / 2 && latencyPaused) {
-      // Latency recovered to half the threshold — let operator resume; we
-      // don't auto-unpause to keep humans in the loop after a circuit fire.
-      log.warn(`latency recovered to ${avg.toFixed(0)}ms (well below ${LATENCY_CIRCUIT_MS}ms). Manual resume required.`);
+      if (LATENCY_AUTO_RESUME) {
+        log.warn(`latency recovered to ${avg.toFixed(0)}ms (n=${samples}, well below ${LATENCY_CIRCUIT_MS}ms) — auto-resuming`);
+        // Only flip OFF the latency-induced pause; if the operator manually
+        // paused for some other reason, leave it paused.
+        manualPaused = false;
+        latencyPaused = false;
+      } else {
+        log.warn(`latency recovered to ${avg.toFixed(0)}ms (well below ${LATENCY_CIRCUIT_MS}ms). Manual resume required (LATENCY_AUTO_RESUME=0).`);
+      }
     }
   }, 60_000);
 
