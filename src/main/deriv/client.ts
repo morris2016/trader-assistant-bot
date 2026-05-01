@@ -241,6 +241,26 @@ export class DerivClient extends EventEmitter {
     await this.send({ sell: String(contractId), price });
   }
 
+  /** Fetch the user's currently-open contracts from Deriv. Used at bot
+   *  startup to recover open positions when local state was wiped (Railway
+   *  redeploy, container restart, etc.) so the UI can show them as Open
+   *  Positions even after the bot lost its in-memory copy. */
+  async fetchPortfolio(): Promise<unknown[]> {
+    if (!this.authToken) throw new Error("Not authorized");
+    const resp = await this.send({ portfolio: 1 });
+    const p = (resp as { portfolio?: { contracts?: unknown[] } }).portfolio;
+    return p?.contracts ?? [];
+  }
+
+  /** Fetch recent closed contracts from Deriv's profit_table. Used at
+   *  startup to repopulate Recent Trades after a state wipe. */
+  async fetchProfitTable(limit: number = 100): Promise<unknown[]> {
+    if (!this.authToken) throw new Error("Not authorized");
+    const resp = await this.send({ profit_table: 1, description: 1, limit });
+    const pt = (resp as { profit_table?: { transactions?: unknown[] } }).profit_table;
+    return pt?.transactions ?? [];
+  }
+
   private subscribeOpenContract(contractId: number) {
     this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 })
       .catch((e) => this.emit("error", e instanceof Error ? e : new Error(String(e))));

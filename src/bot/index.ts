@@ -1449,6 +1449,20 @@ async function main() {
       } else {
         await subscribeAll();
         isFirstConnection = false;
+        // Hydrate open + closed contract history from Deriv. Local persistence
+        // is wiped on Railway redeploys (ephemeral state dir), so without
+        // this the Fast2 panel would show empty history after every push.
+        // BOOM/CRASH 300N MULTIPLIER contracts are tagged sandbox="fast2"
+        // since that's the only path the bot uses for those symbols.
+        try {
+          const res = await real.restoreFromDeriv(100);
+          if (res.openImported > 0 || res.closedImported > 0) {
+            log.info("restored from Deriv", res);
+            persist();
+          }
+        } catch (e) {
+          log.warn("restoreFromDeriv failed", { err: (e as Error).message });
+        }
         log.info("bot ready", { liveTrading: cfg.liveTradingEnabled, strategies: STRATEGIES.length, subs: subscribedKeys.size });
       }
     } catch (e) {

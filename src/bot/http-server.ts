@@ -310,7 +310,11 @@ export function startHttpServer(opts: {
         if (path0 === "/api/trades") {
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
           const s = opts.getState();
-          json(res, 200, { trades: s.closed.slice(0, limit) });
+          // Include open trades alongside closed — open ones have closedAt=null
+          // so callers (Fast2 Open Positions, Trades panel) can filter by that.
+          // Without this, real open Deriv contracts were invisible to the UI.
+          const trades = [...s.open, ...s.closed].slice(0, limit);
+          json(res, 200, { trades });
           return;
         }
         if (path0 === "/api/signals") {

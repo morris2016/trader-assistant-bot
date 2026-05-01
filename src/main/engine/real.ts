@@ -129,6 +129,133 @@ export class RealEngine extends EventEmitter {
     return sum / this.recentOpenLatenciesMs.length;
   }
 
+  /** Hydrate open/closed contract history from Deriv's authoritative state.
+   *  Used at bot startup when local state was wiped (Railway redeploy etc.)
+   *  so the UI can show the user's actual trade history even after a fresh
+   *  install. Tags every BOOM/CRASH 300N MULTIPLIER contract as Fast2 since
+   *  that's the only path the bot uses for those symbols today — without
+   *  this, post-restart trades fall under the unfiltered "real" sandbox
+   *  and disappear from the Fast2 panel.
+   *
+   *  Pulls in:
+   *    • portfolio: 1   → currently open contracts (re-subscribes to each
+   *                       so settlement events flow back through onContractUpdate)
+   *    • profit_table   → recent closed contracts (last `closedLimit`)
+   */
+  async restoreFromDeriv(closedLimit: number = 100): Promise<{ openImported: number; closedImported: number }> {
+    let openImported = 0;
+    let closedImported = 0;
+
+    // Open contracts ----------------------------------------------------
+    try {
+      const portfolio = await this.deriv.fetchPortfolio();
+      for (const c of portfolio) {
+        const info = c as Record<string, unknown>;
+        const contractId = Number(info.contract_id ?? 0);
+        if (!contractId) continue;
+        if (this.byContractId.has(contractId)) continue; // already known
+        const trade = this.contractToTrade(info, /*open=*/ true);
+        if (!trade) continue;
+        this.open.push(trade);
+        this.byContractId.set(contractId, trade);
+        openImported++;
+        // Re-attach to the contract update stream so settlement flows in
+        // exactly as it does for trades opened by the bot itself.
+        try {
+          const live = await this.deriv.getOpenContract(contractId);
+          if (live) this.onContractUpdate(live as Parameters<typeof this.onContractUpdate>[0]);
+        } catch { /* ignore — best-effort hydration */ }
+      }
+    } catch (e) {
+      // Don't throw — startup must continue even if portfolio fetch fails.
+      this.emit("error", e instanceof Error ? e : new Error(String(e)));
+    }
+
+    // Closed contract history -------------------------------------------
+    try {
+      const transactions = await this.deriv.fetchProfitTable(closedLimit);
+      // Newest first from Deriv → reverse so we unshift in chronological order
+      // and end up with newest at the head of `closed` (matches existing
+      // "this.closed.unshift" convention in onContractUpdate).
+      for (const t of [...transactions].reverse()) {
+        const info = t as Record<string, unknown>;
+        const contractId = Number(info.contract_id ?? 0);
+        if (!contractId) continue;
+        if (this.byContractId.has(contractId)) continue; // already known (open or closed)
+        const trade = this.contractToTrade(info, /*open=*/ false);
+        if (!trade) continue;
+        this.closed.unshift(trade);
+        this.byContractId.set(contractId, trade);
+        closedImported++;
+      }
+      if (this.closed.length > 500) this.closed.length = 500;
+    } catch (e) {
+      this.emit("error", e instanceof Error ? e : new Error(String(e)));
+    }
+
+    return { openImported, closedImported };
+  }
+
+  /** Convert a Deriv contract record (from portfolio or profit_table) into
+   *  a RealTrade we can store. Tags BOOM/CRASH 300N MULTIPLIER contracts as
+   *  sandbox="fast2" so they appear under the Fast2 panel. */
+  private contractToTrade(info: Record<string, unknown>, isOpen: boolean): RealTrade | null {
+    const contractId = Number(info.contract_id ?? 0);
+    if (!contractId) return null;
+    const symbol = String(info.symbol ?? info.underlying_symbol ?? "") as SymbolCode;
+    if (!symbol) return null;
+    const contractType = String(info.contract_type ?? "");
+    // Multiplier contracts are "MULTUP"/"MULTDOWN"; Rise/Fall are "CALL"/"PUT".
+    const isMultiplier = contractType.startsWith("MULT");
+    const family: ContractFamily = isMultiplier ? "MULTIPLIER" : "CALL_PUT";
+    const side: RealTradeSide = (contractType === "MULTUP" || contractType === "CALL") ? "BUY" : "SELL";
+    const stake = Number(info.buy_price ?? info.stake ?? 0);
+    const buyPrice = Number(info.buy_price ?? stake);
+    const payout = info.payout != null ? Number(info.payout) : null;
+    const profit = info.profit != null ? Number(info.profit) : null;
+    const entrySpot = info.entry_spot != null ? Number(info.entry_spot) : (info.entry_tick != null ? Number(info.entry_tick) : null);
+    const exitSpot = info.exit_spot != null ? Number(info.exit_spot) : (info.exit_tick != null ? Number(info.exit_tick) : null);
+    const openedAt = Number(info.purchase_time ?? info.date_start ?? 0) * 1000;
+    const closedAt = isOpen ? null : Number(info.sell_time ?? info.transaction_time ?? 0) * 1000;
+    const status = isOpen ? "open" : (profit != null && profit > 0 ? "won" : "lost");
+    const multiplier = info.multiplier != null ? Number(info.multiplier) : undefined;
+    const takeProfit = info.take_profit != null ? Number((info.take_profit as { order_amount?: number })?.order_amount ?? info.take_profit) : null;
+    const stopLoss = info.stop_loss != null ? Number((info.stop_loss as { order_amount?: number })?.order_amount ?? info.stop_loss) : null;
+
+    // Heuristic: Fast2 is the only path that opens BOOM/CRASH 300N MULT
+    // contracts in this bot. Tag them so the Fast2 panel can find them.
+    const isFast2 = isMultiplier && (symbol === "BOOM300N" || symbol === "CRASH300N");
+
+    return {
+      id: randomUUID(),
+      contractId,
+      symbol,
+      side,
+      family,
+      contractType,
+      stake,
+      currency: this.account?.currency ?? "USD",
+      entrySpot,
+      exitSpot,
+      buyPrice,
+      payout,
+      multiplier,
+      takeProfit,
+      stopLoss,
+      openedAt,
+      closedAt,
+      status,
+      profit,
+      detector: "restored",
+      sandbox: isFast2 ? "fast2" : "real",
+      sandboxStrategyId: isFast2
+        ? (side === "BUY" && symbol === "CRASH300N" ? "fast2_crash300n_spike"
+          : side === "SELL" && symbol === "BOOM300N" ? "fast2_boom300n_spike"
+          : undefined)
+        : undefined,
+    };
+  }
+
   /** Reconcile every open contract against Deriv after a WS reconnect.
    *  Settlements that completed during the disconnect window are applied
    *  via the same onContractUpdate path; positions that are still open get
