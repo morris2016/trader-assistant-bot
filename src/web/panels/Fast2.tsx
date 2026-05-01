@@ -225,6 +225,32 @@ export function Fast2Panel({ state, doAction, pending }: {
         <Card title="Peak / DD" value={isLive ? "—" : `$${view.peak.toFixed(2)}`} sub={view.peakSub} tone={isLive ? "muted" : view.ddPct > -10 ? "pos" : "neg"} />
       </div>
 
+      {!isLive && (
+        <div className="card" style={{ display: "flex", gap: 8, alignItems: "center", padding: 12, marginBottom: 16 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>Set Paper Balance:</span>
+          <span className="muted">$</span>
+          <input
+            className="filter-input"
+            type="number"
+            step="any"
+            min={DERIV_MIN_STAKE}
+            value={resetTo}
+            onChange={(e) => setResetTo(e.target.value)}
+            style={{ width: 100 }}
+          />
+          <button
+            className="btn btn-warn btn-sm"
+            disabled={pending !== null}
+            onClick={() => doAction(`Set Fast2 paper balance to $${resetTo}? Wipes trades, ladders, and equity history (sandbox restart).`, () => api.resetFast2Paper(Number(resetTo)))}
+          >
+            {pending ? "…" : "Set & Restart Sandbox"}
+          </button>
+          <span className="muted" style={{ fontSize: 11, marginLeft: 8 }}>
+            sets starting balance and resets ladders. Use any value (Deriv min stake $${DERIV_MIN_STAKE}).
+          </span>
+        </div>
+      )}
+
       <h3 className="section-title">Configuration</h3>
       <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
         Deriv constraints (BOOM/CRASH 300N MULTIPLIER): leverage ∈ {`{${TRADE_MULT_OPTIONS.join(", ")}}`}× · stake ∈ ${DERIV_MIN_STAKE}–${DERIV_MAX_STAKE}. Out-of-range values are auto-snapped on Apply.
@@ -438,18 +464,6 @@ export function Fast2Panel({ state, doAction, pending }: {
 
       <h3 className="section-title">Equity Curve <span className="muted" style={{ fontSize: 11 }}>{equity.length} samples</span></h3>
       <EquityChart points={equity} />
-
-      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "16px 0" }}>
-        <span className="muted">Reset to:</span>
-        <input className="filter-input" type="number" value={resetTo} onChange={(e) => setResetTo(e.target.value)} style={{ width: 80 }} />
-        <button
-          className="btn btn-warn btn-sm"
-          disabled={pending !== null}
-          onClick={() => doAction(`Reset fast2-paper to $${resetTo}? Wipes balance, all closed trades, and all martingale ladders.`, () => api.resetFast2Paper(Number(resetTo)))}
-        >
-          {pending ? "…" : "Reset Fast2 Sandbox"}
-        </button>
-      </div>
 
       <h3 className="section-title">Recent Trades ({filtered.length})</h3>
       <div className="card table-card">

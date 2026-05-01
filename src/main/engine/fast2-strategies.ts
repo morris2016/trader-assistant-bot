@@ -1,9 +1,9 @@
 // Fast2 sandbox — parallel to FAST_STRATEGIES, completely independent.
-// Runs the validated 3-strategy stack (spike-fade BOOM/CRASH 300N at 1m +
-// drift-pullback CRASH300N 5m) with user-configurable trade leverage and
-// martingale multiplier supplied at runtime via Fast2Config (see storage).
-// Detector params are shared with FAST_STRATEGIES on (sym, gr=60) so the
-// per-key engine merge in bot/index.ts does not collide.
+// Runs the validated 2-strategy spike-fade stack (BOOM/CRASH 300N at 1m)
+// with user-configurable trade leverage and martingale multiplier supplied
+// at runtime via Fast2Config (see storage). Detector params are shared with
+// FAST_STRATEGIES on (sym, gr=60) so the per-key engine merge in bot/index.ts
+// does not collide.
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
@@ -14,13 +14,6 @@ const SPIKE_FADE_PARAMS = {
   bufferAtrMul: 0.2,
   tpFracOfSpike: 0.5,
   requireConfirmation: 1,
-};
-
-const DRIFT_PULLBACK_CRASH_PARAMS = {
-  driftDirection: 1, // CRASH = up-drift
-  consec: 3,
-  atrPeriod: 14,
-  kAtr: 1.0,
 };
 
 export const fast2Boom300nSpike: StrategyDescriptor = {
@@ -50,10 +43,9 @@ export const fast2Boom300nSpike: StrategyDescriptor = {
     stake: 1.5,
     multiplier: 300,
     notes: [
-      "Validated as part of the 3-strategy Fast2 stack on Feb 1-28 + Mar 15-22 + Apr 14-21 + Apr 23-29 windows.",
-      "Used together with crash300n_spike (1m) and crash300n_drift (5m) in a shared $50 paper account.",
+      "Validated as part of the Fast2 spike-fade stack on Feb 1-28 + Mar 15-22 + Apr 14-21 + Apr 23-29 windows.",
+      "Used together with crash300n_spike (1m) in a shared paper account. drift-pullback removed 2026-05-01 (negative contribution under honest engine).",
       "Martingale multiplier and trade leverage are runtime-configurable via Fast2Config.",
-      "C-7 (200×, 2.0× mart) +1575% / 28d at $50; B-1.7 (100×, 1.7× mart) +562% / 28d at $50.",
     ],
   },
 };
@@ -91,45 +83,9 @@ export const fast2Crash300nSpike: StrategyDescriptor = {
   },
 };
 
-export const fast2Crash300nDrift: StrategyDescriptor = {
-  id: "fast2_crash300n_drift",
-  name: "Fast2 CRASH 300N drift-pullback",
-  description:
-    "5m drift-pullback on CRASH 300N. After 3 consecutive against-drift " +
-    "(down) closes, BUY back into up-drift with equidistant SL/TP at 1×ATR. " +
-    "R:R = 1:1 — designed for martingale (60% WR + 1:1 RR keeps cycle EV positive).",
-  symbols: ["CRASH300N"],
-  granularity: 300,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    enabled: d.id === "driftPullback",
-    params: d.id === "driftPullback" ? DRIFT_PULLBACK_CRASH_PARAMS : d.params,
-  })),
-  atrSlMult: 1.0,
-  atrTpMult: 1.0,
-  costBps: 5.0,
-  useMartingale: true,
-  validation: {
-    validatedAt: "2026-04-30",
-    sampleDays: 31.2,
-    trades: 454,
-    winRate: 0.59,
-    expectancyR: 0.18,
-    pnlUsd: 0,
-    stake: 1.5,
-    multiplier: 300,
-    notes: [
-      "Standalone validation: 454 trades / 31.2d, WR 59%, R:R 1.00, bust prob 1.19%, cycle EV +$0.24.",
-      "Stable across both halves of the window. The high-WR + 1:1 RR is the engine of the Fast2 stack.",
-      "Part of the 3-strategy Fast2 stack — see fast2_boom300n_spike notes.",
-    ],
-  },
-};
-
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
   fast2Boom300nSpike,
   fast2Crash300nSpike,
-  fast2Crash300nDrift,
 ];
 
 export function fast2StrategiesForSymbol(symbol: string): StrategyDescriptor[] {

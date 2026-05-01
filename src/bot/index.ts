@@ -1118,8 +1118,7 @@ async function main() {
     // Fast2 sandbox: parallel to Fast. Same signal can be routed to BOTH
     // sandboxes when the (sym, gr, detector) tuple matches both registries —
     // each sandbox owns its own paper account, ladder, leverage, and martingale
-    // multiplier so they evolve independently. CRASH300N@300 (drift-pullback)
-    // matches Fast2 only.
+    // multiplier so they evolve independently.
     const fast2Match = FAST2_STRATEGIES.find((s) =>
       s.symbols.includes(sig.symbol) &&
       s.granularity === granularity &&
