@@ -122,6 +122,10 @@ export function clampDerivMultiplier(m: number): number {
  *  but $2000 is a safe universal upper bound. */
 export const DERIV_MIN_STAKE_USD = 1;
 export const DERIV_MAX_STAKE_USD = 2000;
+/** Deriv minimum take_profit / stop_loss amount on multiplier contracts.
+ *  ContractBuyValidationError fires below this. Universal minimum across
+ *  synthetics — applies to BOOM/CRASH/Volatility/Step indices. */
+export const DERIV_MIN_TPSL_USD = 0.10;
 
 /** Synth sandbox — same shape as Fast1/Fast2. Defaults match the validation
  *  baseline (MULT=100×, $1 stake, no martingale) so the live numbers map

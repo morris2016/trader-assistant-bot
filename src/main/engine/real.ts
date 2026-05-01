@@ -342,6 +342,22 @@ export class RealEngine extends EventEmitter {
         }
       }
 
+      // Deriv enforces a $0.10 minimum on take_profit and stop_loss amounts.
+      // When stake × MULT × price_distance / entry rounds below the floor,
+      // the buy endpoint rejects with ContractBuyValidationError. Snap the
+      // computed values up to the floor so the trade goes through. The price
+      // distance to actually trigger the level becomes slightly wider than
+      // the strategy intended — operator should bump base stake or MULT to
+      // keep the validated paper geometry intact.
+      const TP_SL_FLOOR = 0.10;
+      const tpRaw = tp;
+      const slRaw = sl;
+      if (tp != null && tp < TP_SL_FLOOR) tp = TP_SL_FLOOR;
+      if (sl != null && sl < TP_SL_FLOOR) sl = TP_SL_FLOOR;
+      if (tp !== tpRaw || sl !== slRaw) {
+        console.log(`[real.placeTrade] ${params.symbol} ${params.side} TP/SL clamped to Deriv $${TP_SL_FLOOR.toFixed(2)} floor (TP ${tpRaw} → ${tp}, SL ${slRaw} → ${sl}). Bump stake or MULT to restore validated geometry.`);
+      }
+
       const { proposal, buy } = await this.deriv.placeMultiplier({
         symbol: params.symbol,
         contract_type: contractType,
