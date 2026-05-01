@@ -199,6 +199,11 @@ export class RealEngine extends EventEmitter {
     signalFiredAt?: number;
     /** Stake override (e.g., martingale-derived). Bypasses adaptive shift. */
     stakeOverride?: number;
+    /** Origin sandbox tag — propagated onto the RealTrade so the settle
+     *  handler can advance the right martingale ladder. Defaults to "real". */
+    sandbox?: "real" | "fast" | "fast2" | "synth";
+    /** Strategy id within the origin sandbox (e.g. "fast2_crash300n_spike"). */
+    sandboxStrategyId?: string;
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
@@ -281,6 +286,8 @@ export class RealEngine extends EventEmitter {
         contractOpenedAt,
         entrySlippage: slip,
         openLatencyMs: latency,
+        sandbox: params.sandbox ?? "real",
+        sandboxStrategyId: params.sandboxStrategyId,
       };
     } else {
       const contractType = params.side === "BUY" ? "MULTUP" : "MULTDOWN";
@@ -377,6 +384,8 @@ export class RealEngine extends EventEmitter {
         contractOpenedAt,
         entrySlippage: slip,
         openLatencyMs: latency,
+        sandbox: params.sandbox ?? "real",
+        sandboxStrategyId: params.sandboxStrategyId,
       };
     }
 

@@ -191,6 +191,16 @@ export type RealTrade = {
   entrySlippage?: number | null;
   /** Total round-trip latency in ms from signalFiredAt to contractOpenedAt. */
   openLatencyMs?: number | null;
+  /** Which sandbox routed this trade. "real" = registered real-asset
+   *  strategy (silver/gold/plat/pall/etc). "fast2" = Fast2 sandbox running
+   *  live (signals route to real.placeTrade instead of fast2Paper). Used at
+   *  settle time to advance the correct martingale ladder. Defaults to
+   *  "real" when undefined for backward compatibility with existing trades. */
+  sandbox?: "real" | "fast" | "fast2" | "synth";
+  /** Strategy id within the sandbox (e.g. "fast2_crash300n_spike"). Lets
+   *  the settle handler look up the right ladder without re-deriving from
+   *  symbol+detector. */
+  sandboxStrategyId?: string;
 };
 
 export type RealState = {

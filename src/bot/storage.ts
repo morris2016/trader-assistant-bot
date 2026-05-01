@@ -53,6 +53,13 @@ export type FastSandboxConfig = {
    *  Telemetry counters (wins/losses) always reflect the actual trade
    *  outcome regardless of mode. */
   martingaleMode: "classic" | "anti";
+  /** Live-trading toggle for THIS sandbox specifically. When true, signals
+   *  bypass the paper engine and route to real.placeTrade — actual money
+   *  on the Deriv account. The paper sandbox stops opening new positions;
+   *  trade history continues to populate but tagged with sandbox="fast2"
+   *  on the real-engine side. All circuits (price-tolerance, latency,
+   *  session-DD) remain enforced. */
+  liveTradingEnabled: boolean;
 };
 
 /** Fast (sandbox 1) — defaults targeted at the existing 30× / 2.2× / 5L config
@@ -69,6 +76,7 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
+  liveTradingEnabled: false,
 };
 
 /** Fast2 — same shape as Fast1, defaults targeted at the validated 3-strategy
@@ -85,6 +93,7 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
+  liveTradingEnabled: false,
 };
 
 /** Synth sandbox — same shape as Fast1/Fast2. Defaults match the validation
@@ -103,6 +112,7 @@ export const DEFAULT_SYNTH_CONFIG: SynthConfig = {
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
+  liveTradingEnabled: false,
 };
 
 export type BotState = {

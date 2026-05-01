@@ -68,7 +68,8 @@ export function Fast2Panel({ doAction, pending }: {
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
     pendingCfg.forceMartingale !== paper.config.forceMartingale ||
     pendingCfg.sideFilter !== paper.config.sideFilter ||
-    pendingCfg.martingaleMode !== paper.config.martingaleMode
+    pendingCfg.martingaleMode !== paper.config.martingaleMode ||
+    pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
   );
   const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
   const filtered = trades.filter((t) =>
@@ -82,8 +83,12 @@ export function Fast2Panel({ doAction, pending }: {
 
   const applyCfg = () => {
     if (!pendingCfg || !dirty) return;
+    const liveDelta = pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled;
+    const liveWarning = pendingCfg.liveTradingEnabled
+      ? " ⚠ LIVE TRADING — REAL MONEY"
+      : (liveDelta ? " · returning to paper" : "");
     doAction(
-      `Apply Fast2 config: MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}×/${pendingCfg.martingaleMode} · forceMart=${pendingCfg.forceMartingale ? "on" : "off"} · sides=${pendingCfg.sideFilter} · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
+      `Apply Fast2 config:${liveWarning} MULT=${pendingCfg.tradeMultiplier}× · martingale=${pendingCfg.martingaleMultiplier}×/${pendingCfg.martingaleMode} · forceMart=${pendingCfg.forceMartingale ? "on" : "off"} · sides=${pendingCfg.sideFilter} · base=$${pendingCfg.baseStake} · levels=${pendingCfg.maxLevels} · cap=$${pendingCfg.perTradeCap} · commission=${(pendingCfg.commissionPct * 100).toFixed(2)}% · spread=${pendingCfg.entrySpreadBps}bps`,
       () => api.updateFast2Config(pendingCfg).then(() => setPendingCfg(null)),
     );
   };
@@ -93,8 +98,14 @@ export function Fast2Panel({ doAction, pending }: {
 
   return (
     <>
+      {paper.config.liveTradingEnabled && (
+        <div className="banner banner-danger" style={{ marginBottom: 12, fontWeight: 600 }}>
+          🔴 LIVE TRADING ACTIVE — Fast2 signals are routing to real Deriv contracts. Account balance is at risk.
+          Latency circuit ({/* surfaced via avg latency telemetry on trades table */}set to 800ms) and session-DD circuit (30%) will auto-pause if triggered.
+        </div>
+      )}
       <div className="banner" style={{ marginBottom: 12 }}>
-        <strong>Fast2 Sandbox</strong> — paper-only. 3-strategy stack: BOOM 300N spike-fade (1m) + CRASH 300N spike-fade (1m) + CRASH 300N drift-pullback (5m).
+        <strong>Fast2 Sandbox</strong> — {paper.config.liveTradingEnabled ? "live mode (real Deriv multipliers)" : "paper-only"}. 3-strategy stack: BOOM 300N spike-fade (1m) + CRASH 300N spike-fade (1m) + CRASH 300N drift-pullback (5m).
         Runtime-configurable trade leverage and martingale multiplier.
         Currently running at <strong>MULT={paper.config.tradeMultiplier}× · martingale={paper.config.martingaleMultiplier}×</strong> on a ${paper.startingBalance.toFixed(0)} starting balance.
       </div>
@@ -170,6 +181,18 @@ export function Fast2Panel({ doAction, pending }: {
               <option value="classic">Classic — escalate on loss, reset on win</option>
               <option value="anti">Anti (Paroli) — escalate on win, reset on loss</option>
             </select>
+          </ConfigField>
+          <ConfigField label="🔴 LIVE Trading (real money)">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 6 }}>
+              <input
+                type="checkbox"
+                checked={cfg.liveTradingEnabled}
+                onChange={(e) => setCfg({ liveTradingEnabled: e.target.checked })}
+              />
+              <span className={`mono ${cfg.liveTradingEnabled ? "neg" : "muted"}`}>
+                {cfg.liveTradingEnabled ? "LIVE — real Deriv contracts" : "PAPER — simulation"}
+              </span>
+            </label>
           </ConfigField>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

@@ -156,6 +156,10 @@ export type FastSandboxConfig = {
    *  reset on loss (Paroli system). Telemetry counters always reflect actual
    *  outcomes; only the ladder advance behavior changes. */
   martingaleMode: "classic" | "anti";
+  /** When true, this sandbox routes signals to LIVE trading (real money on
+   *  Deriv) instead of paper. Sandbox-scoped — flipping Fast2 live keeps
+   *  Fast/Synth on paper. */
+  liveTradingEnabled: boolean;
 };
 export type Fast1Config = FastSandboxConfig;
 export type Fast2Config = FastSandboxConfig;

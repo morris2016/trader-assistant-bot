@@ -196,6 +196,8 @@ export function startHttpServer(opts: {
             if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
             const mm2 = url.searchParams.get("martingaleMode");
             if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
+            const lt = url.searchParams.get("liveTradingEnabled");
+            if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
             opts.manualControls.updateSynthConfig(patch);
           }
           else if (path0 === "/api/control/reset-fast-paper") {
@@ -224,6 +226,8 @@ export function startHttpServer(opts: {
             if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
             const mm2 = url.searchParams.get("martingaleMode");
             if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
+            const lt = url.searchParams.get("liveTradingEnabled");
+            if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
             opts.manualControls.updateFast1Config(patch);
           }
           else if (path0 === "/api/control/reset-fast2-paper") {
@@ -254,6 +258,8 @@ export function startHttpServer(opts: {
             if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
             const mm2 = url.searchParams.get("martingaleMode");
             if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
+            const lt = url.searchParams.get("liveTradingEnabled");
+            if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
             opts.manualControls.updateFast2Config(patch);
           }
           else if (path0 === "/api/control/resubscribe") {
