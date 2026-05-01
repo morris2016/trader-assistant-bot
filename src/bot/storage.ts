@@ -36,6 +36,13 @@ export type FastSandboxConfig = {
    *  BUYs enter slightly higher, SELLs slightly lower — emulates Deriv's
    *  bid/ask spread on the multiplier order. */
   entrySpreadBps: number;
+  /** Adverse stop-loss slippage in basis points. On synthetic-index spikes,
+   *  Deriv's SL doesn't fill at the exact trigger price — the next-tick fill
+   *  is typically 5-15 bps past the stop. Paper models this so SL-hits cost
+   *  more than the geometry suggests. Defaults to 5 bps for BOOM/CRASH.
+   *  TP fills are NOT slipped (they trigger cleanly during normal price
+   *  fluctuation, not on volatile spikes). */
+  slSlippageBps: number;
   /** UI override: when true, the bot escalates the martingale ladder for
    *  EVERY strategy in the sandbox, regardless of the per-strategy
    *  `useMartingale` flag in the registry. Lets the operator force
@@ -73,6 +80,7 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   perTradeCap: 30,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
+  slSlippageBps: 5.0,
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
@@ -95,6 +103,7 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   perTradeCap: 30,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
+  slSlippageBps: 5.0,
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
@@ -140,6 +149,7 @@ export const DEFAULT_SYNTH_CONFIG: SynthConfig = {
   perTradeCap: 30,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
+  slSlippageBps: 5.0,
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",

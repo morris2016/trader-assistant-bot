@@ -32,10 +32,21 @@ export type PaperPosition = {
   /** Stake multiplier applied at open (from adaptive shift), recorded for transparency. */
   appliedShiftMultiplier: number;
   appliedShiftReasons: string;
-  /** Deriv-style commission charged at open, deducted from pnl at settle. */
+  /** Deriv-style commission charged at open, deducted from balance at open. */
   commission: number;
-  /** Adverse entry slippage applied to entryPrice at open (price units). */
+  /** Adverse entry slippage applied to entryPrice when finalized (price units). */
   entrySpread: number;
+  /** Configured SL slippage fraction at open time (e.g. 0.0005 = 5bps). Used
+   *  at settle to model adverse fills past the stop on synthetic spikes. */
+  slSlippageFrac: number;
+  /** When true, the entry price hasn't been finalized yet — paper is waiting
+   *  for the first new bar to use that bar's open as the realistic entry
+   *  (mirroring live: contract opens *after* signal-bar close). Once the
+   *  next bar arrives, entryPrice is updated and this flag flips false. */
+  entryFinalized: boolean;
+  /** Signal-time price hint, kept for telemetry comparison. The actual
+   *  entryPrice may differ once it gets finalized on the next bar's open. */
+  signalEntryPrice: number;
 };
 
 export type ClosedPaperPosition = PaperPosition & {
@@ -143,6 +154,11 @@ export class PaperEngine {
      *  and a SELL slightly lower — matching Deriv's bid/ask spread on the
      *  multiplier order. SL/TP and pnl are computed from the slipped entry. */
     entrySpreadFrac?: number;
+    /** Adverse SL fill slippage as a fraction of price (e.g. 0.0005 = 5bps).
+     *  When SL hits, exit_price is shifted past the stop by this fraction —
+     *  models Deriv's next-tick SL fill behavior on synthetic-index spikes
+     *  where SL doesn't fill at the trigger price. */
+    slSlippageFrac?: number;
   }): PaperPosition | null {
     if (!isFinite(opts.atr) || opts.atr <= 0) return null;
     if (!isFinite(opts.entryPrice) || opts.entryPrice <= 0) return null;
@@ -163,17 +179,28 @@ export class PaperEngine {
       reasons = shift.reasons;
       stake = Math.max(opts.minStake, Math.round(opts.baseStake * mult * 100) / 100);
     }
-    // Commission is recorded on the position and deducted from pnl at settle.
-    // Stake-affordability check applies to stake + commission so a thin balance
-    // can't open a trade whose fee alone exceeds available funds.
+    // Commission is recorded AND deducted from balance at open — matches
+    // Deriv's behavior where the commission is removed from contract value
+    // immediately on buy. Stake-affordability check applies to stake +
+    // commission so a thin balance can't open a trade whose fee alone
+    // exceeds available funds.
     const commissionPct = isFinite(opts.commissionPct ?? 0) && (opts.commissionPct ?? 0) >= 0 ? (opts.commissionPct ?? 0) : 0;
     const commission = round2(stake * commissionPct);
     if (stake + commission > this.state.balance) return null; // can't afford stake + fee
 
-    // Apply entry slippage adversely (BUY pays higher, SELL receives lower).
+    // Entry-time slippage: BUY adverse = higher fill, SELL adverse = lower
+    // fill. Provisionally compute a "signal entry" using the trigger-bar
+    // close — this is the level the strategy detector saw. The realistic
+    // entry price will be FINALIZED on the first new bar's open (mirroring
+    // live: the contract opens AFTER the signal-bar closes, on fresh ticks
+    // of the next bar). entryFinalized=false until that happens.
     const spreadFrac = isFinite(opts.entrySpreadFrac ?? 0) && (opts.entrySpreadFrac ?? 0) >= 0 ? (opts.entrySpreadFrac ?? 0) : 0;
-    const entrySpread = opts.entryPrice * spreadFrac;
-    const effectiveEntry = opts.side === "BUY" ? opts.entryPrice + entrySpread : opts.entryPrice - entrySpread;
+    const slipFrac = isFinite(opts.slSlippageFrac ?? 0) && (opts.slSlippageFrac ?? 0) >= 0 ? (opts.slSlippageFrac ?? 0) : 0;
+    const entrySpreadDistance = opts.entryPrice * spreadFrac;
+    // Provisional effective entry — used to compute SL/TP geometry from the
+    // signal's structural levels. Will be replaced with bar.open on the
+    // first new-bar candle event.
+    const effectiveEntry = opts.side === "BUY" ? opts.entryPrice + entrySpreadDistance : opts.entryPrice - entrySpreadDistance;
 
     const slDelta = opts.atr * opts.atrSlMult;
     const tpDelta = opts.atr * opts.atrTpMult;
@@ -224,6 +251,7 @@ export class PaperEngine {
       detector: opts.detector,
       stake,
       multiplier: opts.multiplier,
+      // Provisional entryPrice — finalized on first new-bar candle (see onCandle).
       entryPrice: effectiveEntry,
       stopPrice,
       takeProfitPrice: tpPrice,
@@ -233,8 +261,16 @@ export class PaperEngine {
       appliedShiftMultiplier: mult,
       appliedShiftReasons: reasons.join("+") || "100%",
       commission,
-      entrySpread: round2(entrySpread),
+      entrySpread: round2(entrySpreadDistance),
+      slSlippageFrac: slipFrac,
+      entryFinalized: false,
+      signalEntryPrice: opts.entryPrice,
     };
+    // Charge commission at OPEN (matches Deriv's contract pricing). Balance
+    // is reduced immediately so other systems (DD circuit, can-afford checks)
+    // see the realistic mid-trade balance.
+    this.state.balance = round2(this.state.balance - commission);
+    this.state.equity.push({ ts: opts.nowMs, balance: this.state.balance });
     this.state.open.push(pos);
     this.state.daily.tradesOpened++;
     this.emit();
@@ -259,6 +295,25 @@ export class PaperEngine {
       // opens AFTER the bar closes), so settling intra-bar artificially
       // inflates paper WR. Only check NEW bars.
       if (candle.epoch <= pos.openedAtCandleEpoch) { stillOpen.push(pos); continue; }
+      // Finalize entry on the first new-bar arrival. Live opens the contract
+      // AFTER the trigger bar closes — the realistic entry price is that
+      // first new bar's open (with adverse spread layered on top), not the
+      // detector's signal-time close. Recompute structural SL/TP relative
+      // to the new effective entry so geometry matches what live sees.
+      if (!pos.entryFinalized) {
+        const newEntry = pos.side === "BUY"
+          ? candle.open + (pos.entrySpread)
+          : candle.open - (pos.entrySpread);
+        // Shift SL/TP by the same delta so the geometry preserved at signal
+        // time (structural distance) carries over to the realistic entry.
+        const delta = newEntry - pos.entryPrice;
+        pos.entryPrice = newEntry;
+        pos.stopPrice += delta;
+        pos.takeProfitPrice += delta;
+        pos.entryFinalized = true;
+        // Same bar's high/low can still trigger TP/SL — this matches live,
+        // where the contract is alive within seconds of the bar starting.
+      }
       // Check for TP / SL hit. Conservative: if both touched in same bar, assume SL first.
       const slHit = pos.side === "BUY" ? candle.low <= pos.stopPrice : candle.high >= pos.stopPrice;
       const tpHit = pos.side === "BUY" ? candle.high >= pos.takeProfitPrice : candle.low <= pos.takeProfitPrice;
@@ -268,15 +323,22 @@ export class PaperEngine {
       }
       // If both hit in the same bar, conservative: SL takes precedence
       const wasWin = tpHit && !slHit;
-      const exitPrice = wasWin ? pos.takeProfitPrice : pos.stopPrice;
+      // SL slippage: when SL hits on synthetic spikes, Deriv fills past the
+      // stop on the next tick (typical 5-15bps). TP fills cleanly during
+      // normal price action so no slippage applied there.
+      const slipDistance = (pos.slSlippageFrac ?? 0) * pos.entryPrice;
+      const slFillPrice = pos.side === "BUY"
+        ? pos.stopPrice - slipDistance     // BUY SL fill below stop (worse for trader)
+        : pos.stopPrice + slipDistance;    // SELL SL fill above stop
+      const exitPrice = wasWin ? pos.takeProfitPrice : slFillPrice;
       const moveAmt = (exitPrice - pos.entryPrice) / pos.entryPrice;
       const sideSign = pos.side === "BUY" ? 1 : -1;
       const pnlPct = Math.max(-1, moveAmt * pos.multiplier * sideSign); // cap at -100% stake
       const grossPnl = pos.stake * pnlPct;
-      // Commission charged at open is deducted from final pnl. Net pnl is what
-      // hits balance — matches the real Deriv multiplier-contract settlement
-      // where the commission is removed from the contract value before payout.
-      const netPnl = grossPnl - (pos.commission ?? 0);
+      // Commission was charged at OPEN (deducted from balance there). Settle
+      // pnl is gross only — net to operator is gross now, plus the negative
+      // commission already reflected in balance earlier.
+      const netPnl = grossPnl;
       const rMultiple = pos.stake > 0 ? netPnl / pos.stake : 0;
       const closed: ClosedPaperPosition = {
         ...pos,

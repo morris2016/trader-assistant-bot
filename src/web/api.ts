@@ -155,6 +155,9 @@ export type FastSandboxConfig = {
   perTradeCap: number;
   commissionPct: number;
   entrySpreadBps: number;
+  /** Adverse SL fill slippage in bps. Models Deriv's next-tick SL fill on
+   *  synthetic spikes — a 5bps default means SL fills 0.05% past the stop. */
+  slSlippageBps: number;
   /** UI override: when true, every strategy in the sandbox runs the martingale
    *  ladder regardless of its per-strategy `useMartingale` flag in the registry. */
   forceMartingale: boolean;

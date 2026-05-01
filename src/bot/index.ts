@@ -366,6 +366,7 @@ async function main() {
         if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
+        if (!isFinite(next.slSlippageBps) || next.slSlippageBps < 0) next.slSlippageBps = before.slSlippageBps;
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
@@ -392,6 +393,7 @@ async function main() {
         if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
+        if (!isFinite(next.slSlippageBps) || next.slSlippageBps < 0) next.slSlippageBps = before.slSlippageBps;
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
@@ -418,6 +420,7 @@ async function main() {
         if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
         if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
         if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
+        if (!isFinite(next.slSlippageBps) || next.slSlippageBps < 0) next.slSlippageBps = before.slSlippageBps;
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
@@ -1100,6 +1103,7 @@ async function main() {
             stakeOverride: stake,
             commissionPct: fast1Config.commissionPct,
             entrySpreadFrac: fast1Config.entrySpreadBps / 10000,
+            slSlippageFrac: fast1Config.slSlippageBps / 10000,
           });
           if (pos) {
             log.info(`fastPaper opened ${pos.symbol} ${pos.side} strategy=${fastMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${fast1Config.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
@@ -1225,6 +1229,7 @@ async function main() {
               stakeOverride: stake,
               commissionPct: fast2Config.commissionPct,
               entrySpreadFrac: fast2Config.entrySpreadBps / 10000,
+              slSlippageFrac: fast2Config.slSlippageBps / 10000,
             });
             if (pos) {
               log.info(`fast2Paper opened ${pos.symbol} ${pos.side} strategy=${fast2Match.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${fast2Config.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
@@ -1295,6 +1300,7 @@ async function main() {
         stakeOverride: stake,
         commissionPct: synthConfig.commissionPct,
         entrySpreadFrac: synthConfig.entrySpreadBps / 10000,
+        slSlippageFrac: synthConfig.slSlippageBps / 10000,
       });
       if (pos) {
         log.info(`synthPaper opened ${pos.symbol} ${pos.side} strategy=${synthMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${synthConfig.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);

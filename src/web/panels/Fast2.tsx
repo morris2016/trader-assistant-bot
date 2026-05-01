@@ -76,6 +76,7 @@ export function Fast2Panel({ state, doAction, pending }: {
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.commissionPct !== paper.config.commissionPct ||
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
+    pendingCfg.slSlippageBps !== paper.config.slSlippageBps ||
     pendingCfg.forceMartingale !== paper.config.forceMartingale ||
     pendingCfg.sideFilter !== paper.config.sideFilter ||
     pendingCfg.martingaleMode !== paper.config.martingaleMode ||
@@ -272,6 +273,9 @@ export function Fast2Panel({ state, doAction, pending }: {
           </ConfigField>
           <ConfigField label="Entry Spread (bps adverse)">
             <input className="filter-input" type="number" step="0.1" min="0" max="50" value={cfg.entrySpreadBps} onChange={(e) => setCfg({ entrySpreadBps: Number(e.target.value) })} />
+          </ConfigField>
+          <ConfigField label="SL Slippage (bps past stop)">
+            <input className="filter-input" type="number" step="0.5" min="0" max="100" value={cfg.slSlippageBps} onChange={(e) => setCfg({ slSlippageBps: Number(e.target.value) })} />
           </ConfigField>
           <ConfigField label="Max ladder stake (computed)">
             <div className={`mono ${stakeFitsBalance ? "" : "neg"}`} style={{ paddingTop: 6 }}>
