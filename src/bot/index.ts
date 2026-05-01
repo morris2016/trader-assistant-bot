@@ -164,10 +164,20 @@ async function main() {
   // the user can swap C-7-style (200×/2.0×) and B-1.7-style (100×/1.7×) at
   // runtime without redeploying.
   const fast2Paper = new PaperEngine(persisted.fast2Paper);
-  const fast2Martingale: Record<string, MartingaleState> = { ...persisted.fast2Martingale };
+  // SPLIT MARTINGALE LADDERS: paper-mode and live-mode ladders are tracked
+  // separately so paper losses cannot influence live stake (and vice versa).
+  // Bug history: a single shared ladder caused a paper-trade loss before a
+  // mode switch to inflate the next live trade's stake from $5 to $11.
+  const fast2MartingalePaper: Record<string, MartingaleState> = { ...persisted.fast2MartingalePaper };
+  const fast2MartingaleLive: Record<string, MartingaleState> = { ...persisted.fast2MartingaleLive };
   for (const s of FAST2_STRATEGIES) {
-    if (!fast2Martingale[s.id]) fast2Martingale[s.id] = emptyMartingaleState();
+    if (!fast2MartingalePaper[s.id]) fast2MartingalePaper[s.id] = emptyMartingaleState();
+    if (!fast2MartingaleLive[s.id]) fast2MartingaleLive[s.id] = emptyMartingaleState();
   }
+  const fast2MartingaleFor = (mode: "paper" | "live"): Record<string, MartingaleState> =>
+    mode === "live" ? fast2MartingaleLive : fast2MartingalePaper;
+  const fast2ActiveMode = (): "paper" | "live" =>
+    fast2Config.liveTradingEnabled ? "live" : "paper";
   let fast2Config: Fast2Config = { ...DEFAULT_FAST2_CONFIG, ...persisted.fast2Config };
   // Build a MartingaleParams view from the live config — used at every trade
   // open / settle. Rebuilt on every config change.
@@ -181,7 +191,8 @@ async function main() {
     balance: fast2Paper.getState().balance,
     closed: fast2Paper.getState().closed.length,
     config: fast2Config,
-    martingale: Object.fromEntries(FAST2_STRATEGIES.map((s) => [s.id, fast2Martingale[s.id]])),
+    martingalePaper: Object.fromEntries(FAST2_STRATEGIES.map((s) => [s.id, fast2MartingalePaper[s.id]])),
+    martingaleLive: Object.fromEntries(FAST2_STRATEGIES.map((s) => [s.id, fast2MartingaleLive[s.id]])),
   });
 
   // Fast2 session-DD circuit state — hoisted here so resetFast2Paper can clear
@@ -280,7 +291,8 @@ async function main() {
       fastMartingale,
       fast1Config,
       fast2Paper: fast2Paper.getState(),
-      fast2Martingale,
+      fast2MartingalePaper,
+      fast2MartingaleLive,
       fast2Config,
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
@@ -298,28 +310,32 @@ async function main() {
     // purposes (positive = win, negative = loss). Ignore "real" sandbox
     // settles — they don't touch fast2 state.
     if (t.sandbox === "fast2" && t.sandboxStrategyId) {
+      // Live settle → ALWAYS updates the LIVE ladder, regardless of the
+      // current liveTradingEnabled flag. (A user who flips back to paper
+      // before a contract settles still gets the live ladder updated; it
+      // does not bleed into the paper ladder.)
       const fast2Strat = FAST2_STRATEGIES.find((s) => s.id === t.sandboxStrategyId);
-      const before = fast2Martingale[t.sandboxStrategyId] ?? emptyMartingaleState();
+      const before = fast2MartingaleLive[t.sandboxStrategyId] ?? emptyMartingaleState();
       const martingaleActive = (fast2Strat?.useMartingale ?? false) || fast2Config.forceMartingale;
       const pnl = t.profit ?? 0;
       if (martingaleActive) {
         const params = fast2MartingaleParams();
         const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, pnl, params, Date.now(), fast2Config.martingaleMode);
-        fast2Martingale[t.sandboxStrategyId] = nextLadder;
+        fast2MartingaleLive[t.sandboxStrategyId] = nextLadder;
         const modeTag = fast2Config.martingaleMode === "anti" ? " ANTI" : "";
         log.info(`fast2 LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag} contract=${t.contractId}${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
         if (circuitBreakerFired) {
           log.warn(`fast2 LIVE martingale circuit-breaker fired for ${t.sandboxStrategyId}: ladder reset after ${params.maxLevels} ${fast2Config.martingaleMode === "anti" ? "wins" : "losses"}`);
         }
       } else {
-        fast2Martingale[t.sandboxStrategyId] = {
+        fast2MartingaleLive[t.sandboxStrategyId] = {
           ...before,
           wins: before.wins + (pnl > 0 ? 1 : 0),
           losses: before.losses + (pnl > 0 ? 0 : 1),
           level: 0,
           cumulativeSinceReset: 0,
         };
-        log.info(`fast2 LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} W=${fast2Martingale[t.sandboxStrategyId].wins} L=${fast2Martingale[t.sandboxStrategyId].losses} (no martingale)`);
+        log.info(`fast2 LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} W=${fast2MartingaleLive[t.sandboxStrategyId].wins} L=${fast2MartingaleLive[t.sandboxStrategyId].losses} (no martingale)`);
       }
     }
     persist();
@@ -412,14 +428,18 @@ async function main() {
       resetFast2Paper: (balance?: number) => {
         const newBal = balance ?? 50;
         fast2Paper.reset(newBal);
-        for (const sId of Object.keys(fast2Martingale)) fast2Martingale[sId] = emptyMartingaleState();
+        // Reset BOTH ladders (paper + live) on a sandbox reset. The user is
+        // explicitly asking for a clean slate; preserving live ladder state
+        // across a paper reset would be surprising.
+        for (const sId of Object.keys(fast2MartingalePaper)) fast2MartingalePaper[sId] = emptyMartingaleState();
+        for (const sId of Object.keys(fast2MartingaleLive)) fast2MartingaleLive[sId] = emptyMartingaleState();
         // Reset the session-DD circuit too — peak was stale from the prior
         // balance, so without this the circuit would re-trip immediately on
         // a smaller new balance even though the user just reset.
         fast2SessionPeak = newBal;
         fast2DDPaused = false;
         persist();
-        log.warn(`fast2Paper reset via API to $${newBal.toFixed(2)} — all martingale ladders + session-DD circuit cleared`);
+        log.warn(`fast2Paper reset via API to $${newBal.toFixed(2)} — all martingale ladders (paper + live) + session-DD circuit cleared`);
       },
       updateFast2Config: (patch: Partial<Fast2Config>) => {
         const before = { ...fast2Config };
@@ -583,10 +603,15 @@ async function main() {
     getFast2PaperState: () => fast2Paper.getState(),
     getFast2PaperStats: () => fast2Paper.stats() as unknown as Record<string, number>,
     getFast2Martingale: () => {
+      // Surface the ladder of the *active* mode — that's what governs the
+      // next trade's stake. The dormant ladder is still tracked internally
+      // and persisted, but doesn't show up in the "current" view to keep
+      // the UI legible.
       const params = fast2MartingaleParams();
+      const activeMap = fast2MartingaleFor(fast2ActiveMode());
       return Object.fromEntries(
         FAST2_STRATEGIES.map((s) => {
-          const m = fast2Martingale[s.id] ?? emptyMartingaleState();
+          const m = activeMap[s.id] ?? emptyMartingaleState();
           return [s.id, {
             level: m.level,
             wins: m.wins,
@@ -933,12 +958,16 @@ async function main() {
     for (const c of settledFast2) {
       const fast2Strat = FAST2_STRATEGIES.find((s) => s.symbols.includes(c.symbol) && s.granularity === c.granularity);
       if (fast2Strat) {
-        const before = fast2Martingale[fast2Strat.id] ?? emptyMartingaleState();
+        // Paper settle → ALWAYS updates the PAPER ladder, regardless of the
+        // current liveTradingEnabled flag. (A paper position open before a
+        // mode switch still settles into the paper ladder; it does not bleed
+        // into the live ladder.)
+        const before = fast2MartingalePaper[fast2Strat.id] ?? emptyMartingaleState();
         const martingaleActive = fast2Strat.useMartingale || fast2Config.forceMartingale;
         if (martingaleActive) {
           const params = fast2MartingaleParams();
           const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), fast2Config.martingaleMode);
-          fast2Martingale[fast2Strat.id] = nextLadder;
+          fast2MartingalePaper[fast2Strat.id] = nextLadder;
           const forced = !fast2Strat.useMartingale && fast2Config.forceMartingale ? " FORCED" : "";
           const modeTag = fast2Config.martingaleMode === "anti" ? " ANTI" : "";
           log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${fast2Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
@@ -946,14 +975,14 @@ async function main() {
             log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} ${fast2Config.martingaleMode === "anti" ? "wins" : "losses"}`);
           }
         } else {
-          fast2Martingale[fast2Strat.id] = {
+          fast2MartingalePaper[fast2Strat.id] = {
             ...before,
             wins: before.wins + (c.pnl > 0 ? 1 : 0),
             losses: before.losses + (c.pnl > 0 ? 0 : 1),
             level: 0,
             cumulativeSinceReset: 0,
           };
-          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} W=${fast2Martingale[fast2Strat.id].wins} L=${fast2Martingale[fast2Strat.id].losses} (no martingale)`);
+          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} W=${fast2MartingalePaper[fast2Strat.id].wins} L=${fast2MartingalePaper[fast2Strat.id].losses} (no martingale)`);
         }
         persist();
       } else {
@@ -1153,12 +1182,21 @@ async function main() {
         log.info("fast2 signal blocked by session-DD circuit", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
         handledFast2 = true;
       } else {
-        const alreadyOpen = fast2Paper.getState().open.some((p) => p.symbol === sig.symbol);
+        // Dedupe must look at the path that will actually open the trade.
+        // In LIVE mode, look at real.open[] for an existing fast2-tagged
+        // position on this symbol. In PAPER mode, look at fast2Paper.open.
+        const isLiveMode = fast2Config.liveTradingEnabled;
+        const alreadyOpen = isLiveMode
+          ? real.state().open.some((t) => t.sandbox === "fast2" && t.symbol === sig.symbol)
+          : fast2Paper.getState().open.some((p) => p.symbol === sig.symbol);
         if (alreadyOpen) {
-          log.info("fast2 signal skipped — position already open", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
+          log.info("fast2 signal skipped — position already open", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id, mode: isLiveMode ? "live" : "paper" });
           handledFast2 = true;
         } else {
-          const ladder = fast2Martingale[fast2Match.id] ?? emptyMartingaleState();
+          // Stake is derived from the ladder of the *active* mode only —
+          // paper losses cannot influence live stake and vice versa.
+          const ladderMap = fast2MartingaleFor(fast2ActiveMode());
+          const ladder = ladderMap[fast2Match.id] ?? emptyMartingaleState();
           const params = fast2MartingaleParams();
           const martingaleActive = fast2Match.useMartingale || fast2Config.forceMartingale;
           const stake = martingaleActive
@@ -1578,9 +1616,18 @@ async function main() {
       fast2PaperBalance: fast2State.balance,
       fast2PaperOpenTrades: fast2State.open.length,
       fast2PaperClosedTrades: fast2State.closed.length,
+      // Surface the ACTIVE mode's ladder under the original key for backwards
+      // compatibility, plus break out paper/live for diagnostic clarity.
       fast2MartingaleLevel: Object.fromEntries(
-        FAST2_STRATEGIES.map((s) => [s.id, fast2Martingale[s.id]?.level ?? 0]),
+        FAST2_STRATEGIES.map((s) => [s.id, fast2MartingaleFor(fast2ActiveMode())[s.id]?.level ?? 0]),
       ),
+      fast2MartingaleLevelPaper: Object.fromEntries(
+        FAST2_STRATEGIES.map((s) => [s.id, fast2MartingalePaper[s.id]?.level ?? 0]),
+      ),
+      fast2MartingaleLevelLive: Object.fromEntries(
+        FAST2_STRATEGIES.map((s) => [s.id, fast2MartingaleLive[s.id]?.level ?? 0]),
+      ),
+      fast2ActiveMode: fast2ActiveMode(),
       fast2Config,
       consecLosses: real.getAdaptiveShift().consecLosses,
       paperConsecLosses: paperState.adaptiveShift.consecLosses,

@@ -189,7 +189,12 @@ export type BotState = {
    *  config. Hosts the validated 3-strategy stack with user-selectable
    *  martingale and trade leverage. */
   fast2Paper: PaperState;
-  fast2Martingale: Record<string, MartingaleState>;
+  /** Paper-mode martingale ladders. Advanced ONLY when fast2Paper settles a
+   *  position. Cannot influence live stake calculations. */
+  fast2MartingalePaper: Record<string, MartingaleState>;
+  /** Live-mode martingale ladders. Advanced ONLY when a real Deriv contract
+   *  tagged sandbox="fast2" settles. Cannot influence paper stake. */
+  fast2MartingaleLive: Record<string, MartingaleState>;
   fast2Config: Fast2Config;
 };
 
@@ -209,21 +214,68 @@ export function emptyBotState(): BotState {
     fastMartingale: {},
     fast1Config: { ...DEFAULT_FAST1_CONFIG },
     fast2Paper: emptyPaperState(50), // Fast2 sandbox sized to the validated $50 starting balance
-    fast2Martingale: {},
+    fast2MartingalePaper: {},
+    fast2MartingaleLive: {},
     fast2Config: { ...DEFAULT_FAST2_CONFIG },
   };
 }
 
+/** Apply FAST2_* environment variable overrides to a Fast2Config. Read at
+ *  every load() so a Railway redeploy that wipes the state file still ends
+ *  up with the user's preferred config — env vars are part of the service
+ *  definition and survive redeploys, container restarts, etc. */
+function applyFast2EnvOverrides(cfg: Fast2Config): Fast2Config {
+  const next = { ...cfg };
+  const num = (k: string): number | null => {
+    const v = process.env[k];
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const bool = (k: string): boolean | null => {
+    const v = process.env[k];
+    if (v == null || v === "") return null;
+    return v === "1" || v.toLowerCase() === "true";
+  };
+  const str = (k: string): string | null => {
+    const v = process.env[k];
+    return v == null || v === "" ? null : v;
+  };
+  const tm = num("FAST2_TRADE_MULT");           if (tm != null) next.tradeMultiplier = tm;
+  const mm = num("FAST2_MART_MULT");            if (mm != null) next.martingaleMultiplier = mm;
+  const bs = num("FAST2_BASE_STAKE");           if (bs != null) next.baseStake = bs;
+  const ml = num("FAST2_MAX_LEVELS");           if (ml != null) next.maxLevels = ml;
+  const cap = num("FAST2_PER_TRADE_CAP");       if (cap != null) next.perTradeCap = cap;
+  const cm = num("FAST2_COMMISSION_PCT");       if (cm != null) next.commissionPct = cm;
+  const sp = num("FAST2_ENTRY_SPREAD_BPS");     if (sp != null) next.entrySpreadBps = sp;
+  const slip = num("FAST2_SL_SLIPPAGE_BPS");    if (slip != null) next.slSlippageBps = slip;
+  const fm = bool("FAST2_FORCE_MARTINGALE");    if (fm != null) next.forceMartingale = fm;
+  const lt = bool("FAST2_LIVE_TRADING");        if (lt != null) next.liveTradingEnabled = lt;
+  const sf = str("FAST2_SIDE_FILTER");
+  if (sf === "both" || sf === "BUY" || sf === "SELL") next.sideFilter = sf;
+  const mode = str("FAST2_MARTINGALE_MODE");
+  if (mode === "classic" || mode === "anti") next.martingaleMode = mode;
+  return next;
+}
+
 export class BotStorage {
   private readonly file: string;
+  private readonly prefsFile: string;
   private writePromise: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string) {
     if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
     this.file = path.join(stateDir, "bot-state.json");
+    // Configs are also written to a separate "prefs" file. If the runtime
+    // state file is cleared (e.g. for a fresh paper sandbox) but the user
+    // wants to keep their stake/martingale tuning, the prefs file survives
+    // independently. Prefs takes precedence over state-embedded configs.
+    this.prefsFile = path.join(stateDir, "bot-prefs.json");
   }
 
   async load(): Promise<BotState> {
+    // Load prefs first (config-only). Env-var overrides apply on top.
+    const prefs = await this.loadPrefs();
     try {
       const raw = await fs.readFile(this.file, "utf8");
       const parsed = JSON.parse(raw) as Partial<BotState>;
@@ -235,16 +287,46 @@ export class BotStorage {
         paper: parsed.paper ?? emptyPaperState(),
         synthPaper: parsed.synthPaper ?? emptyPaperState(),
         synthMartingale: parsed.synthMartingale ?? {},
-        synthConfig: { ...DEFAULT_SYNTH_CONFIG, ...(parsed.synthConfig ?? {}) },
+        synthConfig: { ...DEFAULT_SYNTH_CONFIG, ...(parsed.synthConfig ?? {}), ...(prefs.synthConfig ?? {}) },
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
-        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}) },
+        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}), ...(prefs.fast1Config ?? {}) },
         fast2Paper: parsed.fast2Paper ?? emptyPaperState(50),
-        fast2Martingale: parsed.fast2Martingale ?? {},
-        fast2Config: { ...DEFAULT_FAST2_CONFIG, ...(parsed.fast2Config ?? {}) },
+        // Migrate from legacy single fast2Martingale → split paper/live.
+        // The legacy state is treated as the paper ladder (it was driven by
+        // the paper engine in the buggy "shared" implementation).
+        fast2MartingalePaper: parsed.fast2MartingalePaper
+          ?? (parsed as { fast2Martingale?: Record<string, MartingaleState> }).fast2Martingale
+          ?? {},
+        fast2MartingaleLive: parsed.fast2MartingaleLive ?? {},
+        fast2Config: applyFast2EnvOverrides({
+          ...DEFAULT_FAST2_CONFIG,
+          ...(parsed.fast2Config ?? {}),
+          ...(prefs.fast2Config ?? {}),
+        }),
       };
     } catch (e: any) {
-      if (e?.code === "ENOENT") return emptyBotState();
+      if (e?.code === "ENOENT") {
+        // No state file → start from defaults, but still apply prefs + env so
+        // a redeploy that wipes /state still honors the user's tuning.
+        const empty = emptyBotState();
+        return {
+          ...empty,
+          synthConfig: { ...empty.synthConfig, ...(prefs.synthConfig ?? {}) },
+          fast1Config: { ...empty.fast1Config, ...(prefs.fast1Config ?? {}) },
+          fast2Config: applyFast2EnvOverrides({ ...empty.fast2Config, ...(prefs.fast2Config ?? {}) }),
+        };
+      }
+      throw e;
+    }
+  }
+
+  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; synthConfig?: Partial<SynthConfig> }> {
+    try {
+      const raw = await fs.readFile(this.prefsFile, "utf8");
+      return JSON.parse(raw);
+    } catch (e: any) {
+      if (e?.code === "ENOENT") return {};
       throw e;
     }
   }
@@ -252,9 +334,14 @@ export class BotStorage {
   /**
    * Atomic save: write to .tmp, fsync, rename. Coalesces concurrent saves
    * so the latest state always wins and we never have overlapping writes.
+   * Also mirrors the user-tunable configs to a separate prefs sidecar so
+   * they survive resetFastPaper / resetSynthPaper / resetFast2Paper without
+   * the state-side wipe touching tuning state. The prefs file is also the
+   * thing a Railway volume mount should preserve across redeploys.
    */
   save(state: BotState): Promise<void> {
     const next = async () => {
+      // 1. Full state file (runtime + config).
       const tmp = this.file + ".tmp";
       const json = JSON.stringify(state, null, 2);
       const fh = await fs.open(tmp, "w");
@@ -265,6 +352,23 @@ export class BotStorage {
         await fh.close();
       }
       await fs.rename(tmp, this.file);
+
+      // 2. Prefs sidecar (config-only). Smaller, safer to keep.
+      const prefs = {
+        fast1Config: state.fast1Config,
+        fast2Config: state.fast2Config,
+        synthConfig: state.synthConfig,
+      };
+      const prefsTmp = this.prefsFile + ".tmp";
+      const prefsJson = JSON.stringify(prefs, null, 2);
+      const pfh = await fs.open(prefsTmp, "w");
+      try {
+        await pfh.writeFile(prefsJson, "utf8");
+        await pfh.sync();
+      } finally {
+        await pfh.close();
+      }
+      await fs.rename(prefsTmp, this.prefsFile);
     };
     this.writePromise = this.writePromise.then(next, next);
     return this.writePromise;
