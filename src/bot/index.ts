@@ -953,8 +953,12 @@ async function main() {
     let handledFast = false;
     if (fastMatch) {
       const passes = passesStrategyFilters(fastMatch);
+      const sideAllowed = fast1Config.sideFilter === "both" || fast1Config.sideFilter === sig.action;
       if (!passes) {
         log.info("fast signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, strategy: fastMatch.id });
+        handledFast = true;
+      } else if (!sideAllowed) {
+        log.info("fast signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, strategy: fastMatch.id, sideFilter: fast1Config.sideFilter });
         handledFast = true;
       } else {
         const alreadyOpen = fastPaper.getState().open.some((p) => p.symbol === sig.symbol);
@@ -1088,6 +1092,13 @@ async function main() {
         log.info("synth signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, detector: sig.detector, adx, candidates: synthCandidates.map((s) => s.id) });
         return;
       }
+      // Sandbox-level side filter — applies to every synth strategy regardless
+      // of the per-strategy buyOnly/sellOnly. Lets the operator disable a side
+      // from the UI without redeploying.
+      if (synthConfig.sideFilter !== "both" && synthConfig.sideFilter !== sig.action) {
+        log.info("synth signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, sideFilter: synthConfig.sideFilter, candidates: synthMatches.map((s) => s.id) });
+        return;
+      }
       // Don't pile on: validation used one-position-at-a-time. The FVG detector
       // can emit multiple signals on the same bar (stacked FVGs) and new bars
       // can fire while a prior position is still open — both would multiply
@@ -1129,6 +1140,8 @@ async function main() {
       });
       if (pos) {
         log.info(`synthPaper opened ${pos.symbol} ${pos.side} strategy=${synthMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${synthConfig.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
+      } else {
+        log.warn(`synthPaper open rejected ${sig.symbol} ${sig.action} strategy=${synthMatch.id} (atr=${atr}, balance=$${synthPaper.getState().balance.toFixed(2)}, stake=$${stake.toFixed(2)}, signalSL=${sig.stopPrice ?? "none"}, signalTP=${sig.targetPrice ?? "none"})`);
       }
       return;
     }
