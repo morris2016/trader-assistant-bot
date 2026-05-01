@@ -251,6 +251,14 @@ export class PaperEngine {
     const stillOpen: PaperPosition[] = [];
     for (const pos of this.state.open) {
       if (pos.symbol !== symbol) { stillOpen.push(pos); continue; }
+      // CRITICAL: skip the bar the position opened on. The detector signaled
+      // at bar-close, but the bar's high/low already include moves that
+      // happened BEFORE the signal — using them to settle would let paper
+      // "TP-instantly" on a level that was tagged earlier in the bar but
+      // wasn't reachable post-entry. Live can't replicate that (the contract
+      // opens AFTER the bar closes), so settling intra-bar artificially
+      // inflates paper WR. Only check NEW bars.
+      if (candle.epoch <= pos.openedAtCandleEpoch) { stillOpen.push(pos); continue; }
       // Check for TP / SL hit. Conservative: if both touched in same bar, assume SL first.
       const slHit = pos.side === "BUY" ? candle.low <= pos.stopPrice : candle.high >= pos.stopPrice;
       const tpHit = pos.side === "BUY" ? candle.high >= pos.takeProfitPrice : candle.low <= pos.takeProfitPrice;
