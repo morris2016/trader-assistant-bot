@@ -630,70 +630,95 @@ async function main() {
     return merged;
   }
 
-  // Subscribe to all (symbol, granularity) pairs from STRATEGIES.
-  // Tick subscriptions are deduped by symbol — Deriv allows multiple candle
-  // granularities per symbol but only ONE tick stream per symbol.
-  async function subscribeAll() {
+  // Compute the full set of (sym, gr) pairs the bot is supposed to be
+  // subscribed to, derived from every strategy registry. The single source of
+  // truth that subscribeAll, self-heal, and post-reconnect-heal all consult.
+  function expectedPairs(): Set<string> {
     const pairs = new Set<string>();
     for (const s of STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
-    // Also subscribe to synth-strategy pairs — they share the same engine map and
-    // candle pipeline; synth signals get routed to synthPaper in executeSignal.
     for (const s of SYNTH_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
-    // Fast-trade strategies (Boom/Crash drift-fade) — subscribed identically;
-    // signals route to fastPaper with martingale stake in executeSignal.
     for (const s of FAST_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
-    // Fast2 strategies (3-strategy spike+drift stack) — overlap with FAST on
-    // 1m BOOM/CRASH but add CRASH300N@5m for the drift-pullback. Pairs are a
-    // Set so duplicates dedupe naturally.
     for (const s of FAST2_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
-    const tickedSymbols = new Set<string>();
-    for (const key of pairs) {
-      if (subscribedKeys.has(key)) continue;
-      const [sym, grStr] = key.split("|");
-      const gr = Number(grStr);
-      let lastErr: Error | null = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const history = await deriv.subscribeCandles(sym as SymbolCode, gr, 1000);
-          // Per-(symbol, granularity) Engine — fresh detector state, no collision
-          // with another granularity of the same symbol. Detector configs are
-          // merged from every strategy (real + synth) that runs on this key so
-          // each strategy's validated params are applied, and any detector not
-          // claimed by some strategy stays disabled.
-          const detectorConfigs = buildEngineDetectorConfigs(sym, gr);
-          const eng = new Engine(detectorConfigs, { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
-          eng.seed(sym as SymbolCode, history);
-          engines.set(key, eng);
-          chartBuffers.set(key, [...history]);
-          if (!tickedSymbols.has(sym)) {
-            await deriv.subscribeTicks(sym as SymbolCode);
-            tickedSymbols.add(sym);
-          }
-          subscribedKeys.add(key);
-          log.info(`subscribed ${sym}@${gr}s (seeded=${history.length}, attempt=${attempt + 1})`);
-          lastErr = null;
-          break;
-        } catch (e) {
-          lastErr = e as Error;
-          log.warn(`subscribe attempt ${attempt + 1}/3 failed ${sym}@${gr}s: ${lastErr.message}`);
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    return pairs;
+  }
+
+  // Track ticked symbols across calls — Deriv only allows one tick stream per
+  // symbol but multiple candle granularities. self-heal calls subscribePair
+  // for individual pairs and must not re-subscribe ticks unnecessarily.
+  const tickedSymbols = new Set<string>();
+
+  // Subscribe a single (sym, gr) pair end-to-end: fetch history, build engine,
+  // seed chart buffer, optionally subscribe ticks, register in subscribedKeys.
+  // Returns true on success, false on permanent failure (3 retries exhausted).
+  async function subscribePair(sym: string, gr: number): Promise<boolean> {
+    const key = engKey(sym, gr);
+    if (subscribedKeys.has(key) && engines.has(key) && chartBuffers.has(key)) {
+      return true; // already fully wired
+    }
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const history = await deriv.subscribeCandles(sym as SymbolCode, gr as Granularity, 1000);
+        const detectorConfigs = buildEngineDetectorConfigs(sym, gr);
+        const eng = new Engine(detectorConfigs, { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
+        eng.seed(sym as SymbolCode, history);
+        engines.set(key, eng);
+        chartBuffers.set(key, [...history]);
+        if (!tickedSymbols.has(sym)) {
+          await deriv.subscribeTicks(sym as SymbolCode);
+          tickedSymbols.add(sym);
         }
+        subscribedKeys.add(key);
+        log.info(`subscribed ${sym}@${gr}s (seeded=${history.length}, attempt=${attempt + 1})`);
+        return true;
+      } catch (e) {
+        lastErr = e as Error;
+        log.warn(`subscribe attempt ${attempt + 1}/3 failed ${sym}@${gr}s: ${lastErr.message}`);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
       }
-      if (lastErr) {
-        log.error(`subscribe failed after 3 retries ${sym}@${gr}s: ${lastErr.message}`);
-      }
+    }
+    if (lastErr) log.error(`subscribe failed after 3 retries ${sym}@${gr}s: ${lastErr.message}`);
+    return false;
+  }
+
+  // Subscribe to every (sym, gr) the strategy registries expect. Idempotent —
+  // safe to call repeatedly; subscribePair short-circuits when already wired.
+  async function subscribeAll() {
+    const pairs = expectedPairs();
+    for (const key of pairs) {
+      const [sym, grStr] = key.split("|");
+      await subscribePair(sym, Number(grStr));
     }
   }
 
   // Candle handler — routes the candle to the (symbol, granularity)-specific
   // Engine and chart buffer. The granularity arg is the 4th positional emit
   // parameter from the deriv client (added so multi-granularity can route).
+  // Once-per-key warning for candles flowing to a stream the bot has no
+  // engine/chartBuffer for. Surfaces the silent-orphan failure mode where
+  // DerivClient's auto-resubscribe re-attaches a stream after reconnect but
+  // the bot's subscribeAll never seeded the bot-side state for it.
+  const orphanWarnedKeys = new Set<string>();
+
   deriv.on("candle", (symbol, candle, isNew, granularity?: number) => {
     if (granularity == null) return; // pre-emit-update legacy event — ignore
     const key = engKey(symbol, granularity);
     lastCandleAtByKey.set(key, Date.now());
     candlesSinceHeartbeat.set(key, (candlesSinceHeartbeat.get(key) ?? 0) + 1);
     totalCandlesByKey.set(key, (totalCandlesByKey.get(key) ?? 0) + 1);
+    // Orphan detection: candles arriving for a key we never wired up. Trigger
+    // a one-shot async fix (subscribePair re-seeds engine + chartBuffer).
+    if (!engines.has(key) || !chartBuffers.has(key)) {
+      if (!orphanWarnedKeys.has(key)) {
+        orphanWarnedKeys.add(key);
+        log.warn(`orphan candle stream ${key} — bot-side engine/chartBuffer missing, attempting on-the-fly subscribe`);
+        subscribePair(symbol, granularity).then((ok) => {
+          if (ok) log.info(`orphan ${key} healed via on-the-fly subscribe`);
+          else log.error(`orphan ${key} on-the-fly subscribe failed permanently`);
+        }).catch((e) => log.error(`orphan ${key} on-the-fly subscribe threw`, { err: (e as Error).message }));
+      }
+      return; // drop this tick — engine isn't ready yet
+    }
     // Update chart buffer using epoch-aware merge. Deriv's WS may emit ohlc
     // updates that alternate between the just-closed bar and the in-progress
     // bar within the same tick — trusting `isNew` causes duplicate pushes
@@ -1230,18 +1255,41 @@ async function main() {
   });
 
   // ──────── Resilience layer (heartbeat + self-heal + watchdog) ────────
-  // Self-heal: if 30s after authorize we have no subscriptions, force fresh resub.
+  // Self-heal: every 30s, scan expectedPairs vs subscribedKeys. Two cases:
+  //   1. subscribedKeys is empty (catastrophic) — full nuclear resub.
+  //   2. some expected pairs missing (partial failure) — targeted subscribe
+  //      for just the missing ones via subscribePair. Catches the case where
+  //      initial subscribeAll succeeded for some pairs but failed for others
+  //      (Deriv WS rate limit at boot, network hiccup), leaving the bot
+  //      permanently blind to those streams until manual intervention.
   safeInterval("self-heal-subs", async () => {
     if (shuttingDown || !wsConnected || !authorized) return;
-    if (subscribedKeys.size > 0) return;
-    log.warn("self-heal: subscribedKeys is empty, forcing resubscribe");
-    await deriv.forgetAll("candles").catch(() => undefined);
-    await deriv.forgetAll("ticks").catch(() => undefined);
-    engines.clear();
-    chartBuffers.clear();
-    subscribedKeys.clear();
-    await subscribeAll();
-    log.info(`self-heal complete: ${subscribedKeys.size} pairs subscribed`);
+    if (subscribedKeys.size === 0) {
+      log.warn("self-heal: subscribedKeys is empty, forcing full resubscribe");
+      await deriv.forgetAll("candles").catch(() => undefined);
+      await deriv.forgetAll("ticks").catch(() => undefined);
+      engines.clear();
+      chartBuffers.clear();
+      subscribedKeys.clear();
+      tickedSymbols.clear();
+      await subscribeAll();
+      log.info(`self-heal complete: ${subscribedKeys.size} pairs subscribed`);
+      return;
+    }
+    const expected = expectedPairs();
+    const missing: string[] = [];
+    for (const key of expected) {
+      if (!subscribedKeys.has(key) || !engines.has(key) || !chartBuffers.has(key)) {
+        missing.push(key);
+      }
+    }
+    if (missing.length === 0) return;
+    log.warn("self-heal: expected pairs missing from bot-side state, subscribing them now", { missing });
+    for (const key of missing) {
+      const [sym, grStr] = key.split("|");
+      await subscribePair(sym, Number(grStr));
+    }
+    log.info(`self-heal targeted subscribe complete: ${subscribedKeys.size}/${expected.size} expected pairs wired`);
   }, 30_000);
 
   // Heartbeat: structured ops snapshot every 60s. Updates lastHeartbeatMs which
@@ -1371,9 +1419,12 @@ async function main() {
   );
 
   // Post-reconnect heal: after the auto-resubscribe quiet period, scan every
-  // (sym,gr) we expected and force a fresh subscribe for any that haven't
-  // received a candle since the reconnect. Catches the case where Deriv
-  // accepts the resubscribe response but never starts emitting ohlc updates.
+  // EXPECTED (sym,gr) pair (not just `subscribedKeys`) and force a fresh
+  // subscribePair for any that haven't received a candle since the reconnect.
+  // Scanning `expectedPairs()` instead of `subscribedKeys` is critical — pairs
+  // that initial subscribeAll never wired up are still expected; they need
+  // post-reconnect rescue too. subscribePair re-seeds engine + chartBuffer, so
+  // candles flowing after the heal will properly trigger isNewBar + detector.
   let lastReconnectMs = 0;
   safeInterval("post-reconnect-heal", async () => {
     if (shuttingDown || !wsConnected || !authorized) return;
@@ -1381,24 +1432,21 @@ async function main() {
     const elapsed = Date.now() - lastReconnectMs;
     if (elapsed < 30_000 || elapsed > 120_000) return; // act in the 30-120s window after reconnect, then once
     const stalePairs: Array<{ sym: string; gr: number }> = [];
-    for (const key of subscribedKeys) {
+    for (const key of expectedPairs()) {
       const lastMs = lastCandleAtByKey.get(key) ?? 0;
-      // If lastMs predates the reconnect, no candle has arrived since reconnect.
-      if (lastMs < lastReconnectMs) {
+      const wired = subscribedKeys.has(key) && engines.has(key) && chartBuffers.has(key);
+      // Stale if no candle since reconnect, OR pair is unwired (engine missing).
+      if (lastMs < lastReconnectMs || !wired) {
         const [sym, grStr] = key.split("|");
         stalePairs.push({ sym, gr: Number(grStr) });
       }
     }
     if (stalePairs.length === 0) return;
-    log.warn("post-reconnect-heal: streams silent since reconnect, forcing fresh subscribe", { stalePairs });
+    log.warn("post-reconnect-heal: pairs silent or unwired, forcing fresh subscribe", { stalePairs });
     for (const { sym, gr } of stalePairs) {
-      try {
-        const history = await deriv.subscribeCandles(sym as SymbolCode, gr as Granularity, 100);
-        log.info(`post-reconnect re-subscribed ${sym}@${gr}s (history=${history.length})`);
-      } catch (e) {
-        log.error(`post-reconnect re-subscribe failed ${sym}@${gr}s`, { err: (e as Error).message });
-      }
+      await subscribePair(sym, gr);
     }
+    log.info(`post-reconnect-heal complete: ${subscribedKeys.size} pairs subscribed`);
     // Mark this reconnect as healed so we don't loop the action.
     lastReconnectMs = 0;
   }, 15_000);
