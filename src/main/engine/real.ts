@@ -58,6 +58,16 @@ export class RealEngine extends EventEmitter {
   private adaptiveShift: AdaptiveShiftState = emptyAdaptiveShiftState();
   /** Floor stake (e.g., $1) so post-modulation stake never goes below broker minimum. */
   private minBrokerStake = 1;
+  /** Max acceptable price slippage between signal-fire and contract-open as
+   *  a fraction of price (e.g. 0.0005 = 5 bps = ~0.05%). If the latest tick
+   *  has drifted further than this from the signal's expected entry, the
+   *  trade is aborted. Set to 0 to disable. Tunable via setPriceTolerance. */
+  private priceToleranceFrac = 0.0005;
+  /** Rolling buffer of recent open-latency samples (ms) — bot/index.ts uses
+   *  this for the "if avg latency over last N is high, pause trading"
+   *  circuit breaker. */
+  private recentOpenLatenciesMs: number[] = [];
+  private static readonly LATENCY_BUFFER_SIZE = 20;
 
   constructor(private readonly deriv: DerivClient) {
     super();
@@ -93,6 +103,55 @@ export class RealEngine extends EventEmitter {
   setCaps(perTradeMaxStake: number, dailyMaxLoss: number) {
     this.perTradeMaxStake = perTradeMaxStake;
     this.dailyMaxLoss = dailyMaxLoss;
+  }
+
+  /** Production safety: configure max acceptable price slippage (fraction of
+   *  price) between signal-fire and the latest tick. 0 disables. Typical
+   *  value for 1m synthetic strategies: 0.0005 (5bps ≈ 0.05%). */
+  setPriceTolerance(frac: number) {
+    this.priceToleranceFrac = Math.max(0, frac);
+  }
+
+  /** Push a new open-latency sample (ms). Bounded ring buffer kept short so
+   *  the rolling average reacts to recent regime, not stale history. */
+  private recordOpenLatency(ms: number) {
+    this.recentOpenLatenciesMs.push(ms);
+    if (this.recentOpenLatenciesMs.length > RealEngine.LATENCY_BUFFER_SIZE) {
+      this.recentOpenLatenciesMs.splice(0, this.recentOpenLatenciesMs.length - RealEngine.LATENCY_BUFFER_SIZE);
+    }
+  }
+
+  /** Average of the last N (≤ 20) open latencies in ms, or null if no
+   *  samples yet. Used by the latency-circuit breaker. */
+  averageOpenLatencyMs(): number | null {
+    if (this.recentOpenLatenciesMs.length === 0) return null;
+    const sum = this.recentOpenLatenciesMs.reduce((a, b) => a + b, 0);
+    return sum / this.recentOpenLatenciesMs.length;
+  }
+
+  /** Reconcile every open contract against Deriv after a WS reconnect.
+   *  Settlements that completed during the disconnect window are applied
+   *  via the same onContractUpdate path; positions that are still open get
+   *  re-attached via the contract update stream that placeMultiplier kicks
+   *  off (covered when the contract emits its next tick update). */
+  async reconcileOpenContracts(): Promise<{ reconciled: number; settled: number; errors: number }> {
+    let reconciled = 0;
+    let settled = 0;
+    let errors = 0;
+    const snapshot = this.open.slice();
+    for (const t of snapshot) {
+      try {
+        const info = await this.deriv.getOpenContract(t.contractId);
+        if (info) {
+          this.onContractUpdate(info as Parameters<typeof this.onContractUpdate>[0]);
+          reconciled++;
+          if (t.status !== "open") settled++;
+        }
+      } catch {
+        errors++;
+      }
+    }
+    return { reconciled, settled, errors };
   }
 
   private rollDayIfNeeded() {
@@ -136,20 +195,49 @@ export class RealEngine extends EventEmitter {
     signalStopPrice?: number;
     /** Structural TP price emitted by the detector. Overrides ATR-based TP. */
     signalTargetPrice?: number;
+    /** Wall-clock ms when the signal fired. Used for latency telemetry. */
+    signalFiredAt?: number;
+    /** Stake override (e.g., martingale-derived). Bypasses adaptive shift. */
+    stakeOverride?: number;
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
     if (!this.account) throw new Error("No account");
 
+    // Price-tolerance abort: if the latest tick has drifted too far from the
+    // signal's expected entry, skip the trade. Better to miss a setup than
+    // fill at a stale price after WS or processing latency. Only checks if
+    // we have both a signal entry hint and a recent tick.
+    if (this.priceToleranceFrac > 0 && params.entryPriceHint && params.entryPriceHint > 0) {
+      const tick = this.deriv.lastTickFor(params.symbol);
+      if (tick && tick.quote > 0) {
+        const drift = Math.abs(tick.quote - params.entryPriceHint) / params.entryPriceHint;
+        if (drift > this.priceToleranceFrac) {
+          throw new Error(`price-tolerance abort: tick ${tick.quote} drifted ${(drift * 10000).toFixed(1)}bps from signal entry ${params.entryPriceHint} (tolerance ${(this.priceToleranceFrac * 10000).toFixed(1)}bps)`);
+        }
+      }
+    }
+
+    // Stake selection: override (martingale ladder) wins over adaptive-shift.
     // Adaptive shift: modulate stake by recent loss-pattern + side-bias + metals burst.
-    const baseStake = this.perTradeMaxStake;
-    const { mult, reasons } = computeStakeMultiplier(this.adaptiveShift, params.side, params.symbol);
-    const modulated = Math.max(this.minBrokerStake, Math.round(baseStake * mult * 100) / 100);
-    const stake = modulated;
-    if (mult < 1) {
-      console.log(`[adaptive-shift] ${params.symbol} ${params.side} stake ${baseStake} → ${stake} (×${mult.toFixed(2)}: ${reasons.join("+")})`);
+    let stake: number;
+    let mult = 1;
+    let reasons: string[] = [];
+    if (params.stakeOverride != null && isFinite(params.stakeOverride) && params.stakeOverride > 0) {
+      stake = Math.max(this.minBrokerStake, Math.round(params.stakeOverride * 100) / 100);
+      reasons = ["override"];
+    } else {
+      const baseStake = this.perTradeMaxStake;
+      const shift = computeStakeMultiplier(this.adaptiveShift, params.side, params.symbol);
+      mult = shift.mult;
+      reasons = shift.reasons;
+      stake = Math.max(this.minBrokerStake, Math.round(baseStake * mult * 100) / 100);
+      if (mult < 1) {
+        console.log(`[adaptive-shift] ${params.symbol} ${params.side} stake ${baseStake} → ${stake} (×${mult.toFixed(2)}: ${reasons.join("+")})`);
+      }
     }
     let trade: RealTrade;
+    const signalFiredAt = params.signalFiredAt ?? null;
 
     if (params.family === "CALL_PUT") {
       const contractType = params.side === "BUY" ? "CALL" : "PUT";
@@ -162,6 +250,13 @@ export class RealEngine extends EventEmitter {
         duration: durationTicks,
         duration_unit: "t",
       });
+      const contractOpenedAt = Date.now();
+      const entrySpot = proposal.spot ?? null;
+      const slip = (entrySpot != null && params.entryPriceHint && params.entryPriceHint > 0)
+        ? (params.side === "BUY" ? entrySpot - params.entryPriceHint : params.entryPriceHint - entrySpot)
+        : null;
+      const latency = signalFiredAt != null ? contractOpenedAt - signalFiredAt : null;
+      if (latency != null) this.recordOpenLatency(latency);
       trade = {
         id: randomUUID(),
         contractId: buy.contract_id,
@@ -171,16 +266,21 @@ export class RealEngine extends EventEmitter {
         contractType,
         stake,
         currency: this.account.currency,
-        entrySpot: proposal.spot ?? null,
+        entrySpot,
         exitSpot: null,
         buyPrice: buy.buy_price,
         payout: proposal.payout ?? null,
         durationTicks,
-        openedAt: Date.now(),
+        openedAt: contractOpenedAt,
         closedAt: null,
         status: "open",
         profit: null,
         detector: params.detector,
+        signalFiredAt,
+        signalEntry: params.entryPriceHint ?? null,
+        contractOpenedAt,
+        entrySlippage: slip,
+        openLatencyMs: latency,
       };
     } else {
       const contractType = params.side === "BUY" ? "MULTUP" : "MULTDOWN";
@@ -244,6 +344,13 @@ export class RealEngine extends EventEmitter {
         takeProfit: tp,
         stopLoss: sl,
       });
+      const contractOpenedAt = Date.now();
+      const entrySpot = proposal.spot ?? null;
+      const slip = (entrySpot != null && params.entryPriceHint && params.entryPriceHint > 0)
+        ? (params.side === "BUY" ? entrySpot - params.entryPriceHint : params.entryPriceHint - entrySpot)
+        : null;
+      const latency = signalFiredAt != null ? contractOpenedAt - signalFiredAt : null;
+      if (latency != null) this.recordOpenLatency(latency);
       trade = {
         id: randomUUID(),
         contractId: buy.contract_id,
@@ -253,18 +360,23 @@ export class RealEngine extends EventEmitter {
         contractType,
         stake,
         currency: this.account.currency,
-        entrySpot: proposal.spot ?? null,
+        entrySpot,
         exitSpot: null,
         buyPrice: buy.buy_price,
         payout: null,
         multiplier,
         takeProfit: tp ?? null,
         stopLoss: sl ?? null,
-        openedAt: Date.now(),
+        openedAt: contractOpenedAt,
         closedAt: null,
         status: "open",
         profit: null,
         detector: params.detector,
+        signalFiredAt,
+        signalEntry: params.entryPriceHint ?? null,
+        contractOpenedAt,
+        entrySlippage: slip,
+        openLatencyMs: latency,
       };
     }
 

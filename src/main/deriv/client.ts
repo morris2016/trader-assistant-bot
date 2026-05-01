@@ -42,6 +42,11 @@ export class DerivClient extends EventEmitter {
   private reconnectAttempt = 0;
   private closedByUser = false;
   private lastCandleEpoch = new Map<string, number>();
+  /** Most-recent tick quote per symbol — populated from the live tick stream.
+   *  Used by RealEngine to do a price-tolerance check just before placing a
+   *  contract: if the latest tick has drifted too far from the signal's
+   *  expected entry, abort instead of fill at a bad price. */
+  private lastTickBySymbol = new Map<string, { quote: number; epoch: number; receivedAt: number }>();
   private appId: string = DEFAULT_APP_ID;
   private authToken: string | null = null;
 
@@ -214,6 +219,22 @@ export class DerivClient extends EventEmitter {
     return { proposal, buy };
   }
 
+  /** Latest tick quote received for `symbol`, or null if none seen this session.
+   *  Used by RealEngine for a price-tolerance check before contract open. */
+  lastTickFor(symbol: string): { quote: number; epoch: number; receivedAt: number } | null {
+    return this.lastTickBySymbol.get(symbol) ?? null;
+  }
+
+  /** One-shot proposal_open_contract fetch (no subscribe). Used at reconnect
+   *  time to reconcile bot-side state with whatever Deriv currently knows
+   *  about an open contract — settlement may have happened during the WS
+   *  disconnect window. */
+  async getOpenContract(contractId: number): Promise<unknown> {
+    if (!this.authToken) throw new Error("Not authorized");
+    const resp = await this.send({ proposal_open_contract: 1, contract_id: contractId });
+    return (resp as { proposal_open_contract?: unknown }).proposal_open_contract ?? null;
+  }
+
   async sellContract(contractId: number, price: number = 0): Promise<void> {
     if (!this.authToken) throw new Error("Not authorized");
     // `price: 0` = sell at market (Deriv convention)
@@ -370,6 +391,7 @@ export class DerivClient extends EventEmitter {
       case "tick": {
         const t = msg.tick as { symbol: string; epoch: number; quote: number } | undefined;
         if (t) {
+          this.lastTickBySymbol.set(t.symbol, { quote: t.quote, epoch: t.epoch, receivedAt: Date.now() });
           this.emit("tick", { symbol: t.symbol as SymbolCode, epoch: t.epoch, quote: t.quote });
         }
         break;

@@ -176,6 +176,21 @@ export type RealTrade = {
   status: "open" | "won" | "lost" | "cancelled";
   profit: number | null;        // in account currency
   detector: string;             // "manual" for user-initiated
+  // ── Production telemetry (paper-vs-live drift diagnostics) ────────────
+  /** Wall-clock ms when the signal fired (bar close). null for manual trades. */
+  signalFiredAt?: number | null;
+  /** Expected entry price as known at signal time (typically the close that
+   *  triggered the signal). Used with entrySpot to compute live slippage. */
+  signalEntry?: number | null;
+  /** Wall-clock ms when buy_price came back from Deriv (contract opened). */
+  contractOpenedAt?: number | null;
+  /** Signed slippage from signalEntry → entrySpot, in absolute price units.
+   *  Positive when the fill was adverse to the side (BUY filled higher,
+   *  SELL filled lower). Null until entry_spot arrives via the contract
+   *  update stream. */
+  entrySlippage?: number | null;
+  /** Total round-trip latency in ms from signalFiredAt to contractOpenedAt. */
+  openLatencyMs?: number | null;
 };
 
 export type RealState = {

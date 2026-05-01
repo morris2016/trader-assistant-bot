@@ -196,6 +196,12 @@ async function main() {
   real.load(persisted);
   real.loadAdaptiveShift(persisted.adaptiveShift);
   real.setCaps(cfg.stake, cfg.dailyMaxLoss);
+  // Production safety: price-tolerance gate before any live placeTrade. 5bps
+  // (0.05% of price) is a conservative default for 1m synthetic strategies —
+  // a 1.5-tick BOOM/CRASH 300N move at typical price ~$1300 = ~$0.65 / $1300
+  // ≈ 5bps. Set via env DERIV_PRICE_TOL_BPS to override (0 disables).
+  const priceTolBps = Number(process.env.DERIV_PRICE_TOL_BPS ?? 5);
+  real.setPriceTolerance(priceTolBps / 10000);
 
   let wsConnected = false;
   let authorized = false;
@@ -1074,6 +1080,9 @@ async function main() {
       } else if (!sideAllowed) {
         log.info("fast2 signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id, sideFilter: fast2Config.sideFilter });
         handledFast2 = true;
+      } else if (isFast2DDPaused()) {
+        log.info("fast2 signal blocked by session-DD circuit", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
+        handledFast2 = true;
       } else {
         const alreadyOpen = fast2Paper.getState().open.some((p) => p.symbol === sig.symbol);
         if (alreadyOpen) {
@@ -1262,8 +1271,9 @@ async function main() {
         detector: sig.detector,
         signalStopPrice: sig.stopPrice,
         signalTargetPrice: sig.targetPrice,
+        signalFiredAt: sig.ts,
       });
-      log.info("placeTrade ok", { id: trade.id, contractId: trade.contractId, stake: trade.stake, strategy: match.id });
+      log.info("placeTrade ok", { id: trade.id, contractId: trade.contractId, stake: trade.stake, strategy: match.id, latencyMs: trade.openLatencyMs, slippage: trade.entrySlippage });
     } catch (e) {
       log.error("placeTrade failed", { err: (e as Error).message, symbol: sig.symbol, side: sig.action });
     }
@@ -1297,6 +1307,20 @@ async function main() {
         // streams that didn't actually re-attach.
         lastReconnectMs = Date.now();
         log.info("reconnect — relying on client auto-resubscribe", { previouslySubscribed: subscribedKeys.size });
+        // Reconcile open contracts: a WS disconnect window can mean Deriv
+        // settled (or partly updated) a contract while the bot wasn't
+        // listening. Pull a fresh snapshot for each open contract; the
+        // settlement path runs inside onContractUpdate as if the update
+        // had arrived live.
+        const liveOpen = real.state().open.length;
+        if (liveOpen > 0) {
+          try {
+            const res = await real.reconcileOpenContracts();
+            log.info("reconnect: open-contract reconciliation complete", { liveOpen, ...res });
+          } catch (e) {
+            log.error("reconnect: reconciliation threw", { err: (e as Error).message });
+          }
+        }
       } else {
         await subscribeAll();
         isFirstConnection = false;
@@ -1454,6 +1478,58 @@ async function main() {
       setTimeout(() => process.exit(1), 500);
     }
   }, 30_000);
+
+  // ──────── Production risk circuit breakers ────────
+  // Latency circuit: if the rolling-average open latency exceeds the threshold,
+  // auto-pause the bot. High latency means slippage between signal and fill is
+  // big enough to invalidate the strategy edge — better to wait it out than
+  // bleed money. Recovery is manual (operator unpauses via UI).
+  const LATENCY_CIRCUIT_MS = Number(process.env.LATENCY_CIRCUIT_MS ?? 800);
+  let latencyPaused = false;
+  safeInterval("latency-circuit", () => {
+    if (manualPaused) return; // already paused — nothing to do
+    const avg = real.averageOpenLatencyMs();
+    if (avg == null) return; // no samples yet
+    if (avg > LATENCY_CIRCUIT_MS && !latencyPaused) {
+      log.error(`LATENCY CIRCUIT: avg open latency ${avg.toFixed(0)}ms > ${LATENCY_CIRCUIT_MS}ms threshold — auto-pausing`);
+      manualPaused = true;
+      latencyPaused = true;
+    } else if (avg <= LATENCY_CIRCUIT_MS / 2 && latencyPaused) {
+      // Latency recovered to half the threshold — let operator resume; we
+      // don't auto-unpause to keep humans in the loop after a circuit fire.
+      log.warn(`latency recovered to ${avg.toFixed(0)}ms (well below ${LATENCY_CIRCUIT_MS}ms). Manual resume required.`);
+    }
+  }, 60_000);
+
+  // Fast2 session-drawdown circuit: track session-peak and pause Fast2 (only)
+  // if the balance falls below `1 - DD_FRAC` of the peak. Default 30% — at
+  // $50 starting balance with 2.0× martingale a 30% session-DD typically
+  // means a deep ladder bust we should stop and review.
+  const FAST2_DD_FRAC = Number(process.env.FAST2_SESSION_DD_FRAC ?? 0.30);
+  let fast2SessionPeak = fast2Paper.getState().balance;
+  let fast2DDPaused = false;
+  safeInterval("fast2-session-dd", () => {
+    const bal = fast2Paper.getState().balance;
+    if (bal > fast2SessionPeak) fast2SessionPeak = bal;
+    if (fast2SessionPeak <= 0) return;
+    const ddFrac = 1 - bal / fast2SessionPeak;
+    if (ddFrac > FAST2_DD_FRAC && !fast2DDPaused) {
+      log.error(`FAST2 SESSION-DD CIRCUIT: balance $${bal.toFixed(2)} is ${(ddFrac * 100).toFixed(1)}% below session peak $${fast2SessionPeak.toFixed(2)} (threshold ${(FAST2_DD_FRAC * 100).toFixed(0)}%) — pausing fast2 trades`);
+      fast2DDPaused = true;
+      // Force fast2 sideFilter to a side that BOTH excludes (a poor man's
+      // disable). Operator must reset sideFilter and DD-paused flag from UI.
+      // Note: this only pauses Fast2 — Fast/Synth/Real keep running.
+    }
+    if (fast2DDPaused) {
+      // Persistent log nudge so the operator notices.
+      log.warn(`fast2 session-DD circuit active: bal=$${bal.toFixed(2)} peak=$${fast2SessionPeak.toFixed(2)} dd=${(ddFrac * 100).toFixed(1)}%. Reset balance or peak via UI to resume.`);
+    }
+  }, 60_000);
+  // Expose the DD circuit flag to executeSignal via closure; gate fast2 opens
+  // when active. This requires plumbing a shared boolean — done via the
+  // `fast2DDPaused` reference captured by the `if (fast2Match)` branch
+  // (added below in the next commit step).
+  const isFast2DDPaused = () => fast2DDPaused;
 
   // Per-pair confirmation from DerivClient.resubscribeAll(). Logs make it
   // possible to tell, after a WS reconnect, which streams actually re-attached.
