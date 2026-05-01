@@ -462,6 +462,91 @@ export function Fast2Panel({ state, doAction, pending }: {
         </table>
       </div>
 
+      {(() => {
+        const openRows = isLive
+          ? liveTrades.filter((t) => t.closedAt == null).map((t) => ({
+              id: t.id,
+              symbol: t.symbol,
+              side: t.side,
+              detector: t.detector,
+              stake: t.stake,
+              multiplier: t.multiplier,
+              entryPrice: t.entrySpot ?? 0,
+              stopPrice: t.stopLoss ?? null,
+              takeProfitPrice: t.takeProfit ?? null,
+              openedAt: t.openedAt,
+              contractId: t.contractId,
+            }))
+          : paper.open.map((p) => ({
+              id: p.id,
+              symbol: p.symbol,
+              side: p.side,
+              detector: p.detector,
+              stake: p.stake,
+              multiplier: p.multiplier,
+              entryPrice: p.entryPrice,
+              stopPrice: p.stopPrice,
+              takeProfitPrice: p.takeProfitPrice,
+              openedAt: p.openedAt,
+              contractId: undefined as number | undefined,
+            }));
+        return (
+          <>
+            <h3 className="section-title">
+              Open Positions <span className="muted" style={{ fontSize: 11 }}>{openRows.length} {isLive ? "live" : "paper"}</span>
+            </h3>
+            <div className="card table-card" style={{ marginBottom: 16 }}>
+              {openRows.length === 0 ? (
+                <div className="empty" style={{ padding: 16, textAlign: "center" }}>
+                  No open positions — Fast2 is flat.
+                </div>
+              ) : (
+                <table className="trades-table">
+                  <thead>
+                    <tr>
+                      <th>Opened</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Detector</th>
+                      <th style={{ textAlign: "right" }}>Stake</th>
+                      <th style={{ textAlign: "right" }}>MULT</th>
+                      <th style={{ textAlign: "right" }}>Entry</th>
+                      <th style={{ textAlign: "right" }}>SL</th>
+                      <th style={{ textAlign: "right" }}>TP</th>
+                      {isLive && <th style={{ textAlign: "right" }}>Contract</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {openRows.map((r) => {
+                      const ageMs = Date.now() - r.openedAt;
+                      const ageStr = ageMs < 60_000
+                        ? `${Math.floor(ageMs / 1000)}s`
+                        : ageMs < 3_600_000
+                          ? `${Math.floor(ageMs / 60_000)}m`
+                          : `${(ageMs / 3_600_000).toFixed(1)}h`;
+                      return (
+                        <tr key={r.id}>
+                          <td>{fmtTime(r.openedAt)} <span className="muted" style={{ fontSize: 10 }}>({ageStr})</span></td>
+                          <td>{r.symbol}</td>
+                          <td className={r.side === "BUY" ? "tone-pos" : "tone-neg"}>{r.side}</td>
+                          <td className="muted" style={{ fontSize: 11 }}>{r.detector}</td>
+                          <td style={{ textAlign: "right" }}>${r.stake.toFixed(2)}</td>
+                          <td style={{ textAlign: "right" }}>{r.multiplier ? `${r.multiplier}×` : "—"}</td>
+                          <td style={{ textAlign: "right" }}>{r.entryPrice ? r.entryPrice.toFixed(5) : "—"}</td>
+                          <td style={{ textAlign: "right" }}>{r.stopPrice ? r.stopPrice.toFixed(5) : "—"}</td>
+                          <td style={{ textAlign: "right" }}>{r.takeProfitPrice ? r.takeProfitPrice.toFixed(5) : "—"}</td>
+                          {isLive && <td style={{ textAlign: "right", fontSize: 11 }} className="muted">{r.contractId ?? "—"}</td>}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        );
+      })()}
+
       <h3 className="section-title">Equity Curve <span className="muted" style={{ fontSize: 11 }}>{equity.length} samples</span></h3>
       <EquityChart points={equity} />
 

@@ -1718,10 +1718,34 @@ async function main() {
   deriv.on("error", (err) => log.error("deriv error", { err: err.message ?? String(err) }));
   deriv.on("balance", (b) => {
     if (account) {
+      const prev = account.balance;
       account = { ...account, balance: b.balance ?? account.balance, currency: b.currency ?? account.currency };
+      // Plumb the fresh balance through to the real engine — otherwise its
+      // cached this.account.balance stays stuck at auth-time, silently
+      // diverging from reality whenever a contract settles externally
+      // (other Deriv app, prior bot session, manual trade, etc.).
+      real.setAccount(account);
+      const delta = (b.balance ?? prev) - prev;
+      // Promote balance pushes to INFO so operators can actually see the
+      // account move in production logs. They were debug-only before, which
+      // made it impossible to tell whether the subscription was alive.
+      if (Math.abs(delta) >= 0.01) {
+        log.info("balance updated", { balance: b.balance, currency: b.currency, delta: Number(delta.toFixed(2)) });
+      } else {
+        log.debug("balance heartbeat", { balance: b.balance, currency: b.currency });
+      }
     }
-    log.debug("balance", { balance: b.balance, currency: b.currency });
   });
+
+  // Polling fallback: even when the WS balance subscription is alive, Deriv
+  // can drop pushes silently after long-lived connections, network blips, or
+  // server-side prunes. Every 60s we send a non-subscribe `balance:1` to
+  // re-sync against the truth on Deriv's side. The handler above will fire
+  // on the response just like a push event.
+  safeInterval("balance-refresh", () => {
+    if (!authorized) return;
+    deriv.send({ balance: 1 }).catch((e) => log.warn("balance poll failed", { err: (e as Error).message }));
+  }, 60_000);
 
   // Graceful shutdown
   const shutdown = async (sig: string) => {
