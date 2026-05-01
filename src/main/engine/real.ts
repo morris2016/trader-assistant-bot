@@ -167,11 +167,16 @@ export class RealEngine extends EventEmitter {
         this.byContractId.set(contractId, trade);
         openImported++;
         // Re-attach to the contract update stream so settlement flows in
-        // exactly as it does for trades opened by the bot itself.
+        // exactly as it does for trades opened by the bot itself. Without
+        // the subscribe call, the snapshot below is the only update we'd
+        // ever see — a still-open contract would never settle in the bot.
         try {
           const live = await this.deriv.getOpenContract(contractId);
           if (live) this.onContractUpdate(live as Parameters<typeof this.onContractUpdate>[0]);
         } catch { /* ignore — best-effort hydration */ }
+        if (this.open.find((o) => o.contractId === contractId)) {
+          this.deriv.subscribeOpenContract(contractId);
+        }
       }
     } catch (e) {
       // Don't throw — startup must continue even if portfolio fetch fails.
@@ -224,6 +229,13 @@ export class RealEngine extends EventEmitter {
     const isMultiplier = contractType.startsWith("MULT");
     const family: ContractFamily = isMultiplier ? "MULTIPLIER" : "CALL_PUT";
     const side: RealTradeSide = (contractType === "MULTUP" || contractType === "CALL") ? "BUY" : "SELL";
+    // Narrow to RealTrade["contractType"] union. Anything outside the set
+    // (unexpected from Deriv) maps to a side-derived default so we never
+    // store an arbitrary string.
+    const ct: RealTrade["contractType"] =
+      contractType === "CALL" || contractType === "PUT" || contractType === "MULTUP" || contractType === "MULTDOWN"
+        ? contractType
+        : (isMultiplier ? (side === "BUY" ? "MULTUP" : "MULTDOWN") : (side === "BUY" ? "CALL" : "PUT"));
     const buyPrice = Number(info.buy_price ?? 0);
     const sellPrice = info.sell_price != null ? Number(info.sell_price) : null;
     const stake = Number(info.buy_price ?? info.stake ?? 0);
@@ -242,8 +254,9 @@ export class RealEngine extends EventEmitter {
     const openedAt = Number(info.purchase_time ?? info.date_start ?? 0) * 1000;
     const closedAt = isOpen ? null : Number(info.sell_time ?? info.transaction_time ?? 0) * 1000;
     // Status: only call it "won" when we actually know profit > 0. If profit
-    // is null (couldn't compute), mark as "unknown" so the UI doesn't lie.
-    const status = isOpen ? "open" : (profit == null ? "unknown" : profit > 0 ? "won" : "lost");
+    // is null (couldn't compute), mark as "cancelled" — it's the closest of
+    // the four allowed states and signals "settled but P/L unknown" to the UI.
+    const status: RealTrade["status"] = isOpen ? "open" : (profit == null ? "cancelled" : profit > 0 ? "won" : "lost");
     const multiplier = info.multiplier != null ? Number(info.multiplier) : undefined;
     const takeProfit = info.take_profit != null ? Number((info.take_profit as { order_amount?: number })?.order_amount ?? info.take_profit) : null;
     const stopLoss = info.stop_loss != null ? Number((info.stop_loss as { order_amount?: number })?.order_amount ?? info.stop_loss) : null;
@@ -258,7 +271,7 @@ export class RealEngine extends EventEmitter {
       symbol: symbol as SymbolCode,
       side,
       family,
-      contractType,
+      contractType: ct,
       stake,
       currency: this.account?.currency ?? "USD",
       entrySpot,
@@ -282,14 +295,22 @@ export class RealEngine extends EventEmitter {
     };
   }
 
-  /** Reconcile every open contract against Deriv after a WS reconnect.
-   *  Settlements that completed during the disconnect window are applied
-   *  via the same onContractUpdate path; positions that are still open get
-   *  re-attached via the contract update stream that placeMultiplier kicks
-   *  off (covered when the contract emits its next tick update). */
-  async reconcileOpenContracts(): Promise<{ reconciled: number; settled: number; errors: number }> {
+  /** Reconcile every open contract against Deriv. Used post-WS-reconnect and
+   *  available as a manual /api/control/reconcile-contracts trigger.
+   *
+   *  For each locally-open trade:
+   *    1. Pull a one-shot snapshot via proposal_open_contract.
+   *    2. Pipe it through onContractUpdate — settles trades that finalised
+   *       during the disconnect window.
+   *    3. If still open after that, RE-SUBSCRIBE so future updates arrive.
+   *       Without step 3, the prior reconcile path was a snapshot-only fix:
+   *       it picked up settlements that happened before reconcile ran but
+   *       left the trade with no live stream, so subsequent settlement was
+   *       silently dropped → trade stuck "open" forever. */
+  async reconcileOpenContracts(): Promise<{ reconciled: number; settled: number; resubscribed: number; errors: number }> {
     let reconciled = 0;
     let settled = 0;
+    let resubscribed = 0;
     let errors = 0;
     const snapshot = this.open.slice();
     for (const t of snapshot) {
@@ -298,13 +319,22 @@ export class RealEngine extends EventEmitter {
         if (info) {
           this.onContractUpdate(info as Parameters<typeof this.onContractUpdate>[0]);
           reconciled++;
-          if (t.status !== "open") settled++;
+          // Trade finalised during the disconnect — onContractUpdate moved it
+          // to closed already; nothing more to wire up.
+          if (!this.byContractId.get(t.contractId) || !this.open.find((o) => o.contractId === t.contractId)) {
+            settled++;
+            continue;
+          }
         }
+        // Still open: re-attach the live stream so the next settlement update
+        // arrives through the normal onContractUpdate path.
+        this.deriv.subscribeOpenContract(t.contractId);
+        resubscribed++;
       } catch {
         errors++;
       }
     }
-    return { reconciled, settled, errors };
+    return { reconciled, settled, resubscribed, errors };
   }
 
   private rollDayIfNeeded() {

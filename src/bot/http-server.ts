@@ -44,6 +44,10 @@ export type ManualControls = {
   updateFast2Config: (patch: Partial<Fast2Config>) => void;
   /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
   forceResubscribe: () => Promise<void>;
+  /** Reconcile open Real contracts with Deriv: snapshot each, settle any that
+   *  finalised during a WS gap, re-subscribe live streams for ones still open.
+   *  Recovers trades that lost their contract subscription on a reconnect. */
+  reconcileContracts: () => Promise<void>;
 };
 
 export type StrategyStats = {
@@ -161,7 +165,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/update-synth-config" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/update-synth-config" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -270,6 +274,9 @@ export function startHttpServer(opts: {
           }
           else if (path0 === "/api/control/resubscribe") {
             opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));
+          }
+          else if (path0 === "/api/control/reconcile-contracts") {
+            opts.manualControls.reconcileContracts().catch((e) => opts.logger.error("reconcileContracts failed", { err: (e as Error).message }));
           }
           opts.logger.info("manual control invoked", { route: path0 });
           json(res, 200, { ok: true });

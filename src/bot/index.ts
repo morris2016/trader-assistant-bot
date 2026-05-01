@@ -52,7 +52,7 @@ async function main() {
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, forceResubscribe: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -489,6 +489,19 @@ async function main() {
         subscribedKeys.clear();
         await subscribeAll();
         log.info(`force-resubscribe complete: ${subscribedKeys.size} pairs subscribed`);
+      },
+      reconcileContracts: async () => {
+        const before = real.state().open.length;
+        log.warn("manual contract reconciliation initiated via API", { openBefore: before });
+        try {
+          const res = await real.reconcileOpenContracts();
+          const after = real.state().open.length;
+          log.info("manual contract reconciliation complete", { openBefore: before, openAfter: after, ...res });
+          if (res.settled > 0) persist();
+        } catch (e) {
+          log.error("manual contract reconciliation threw", { err: (e as Error).message });
+          throw e;
+        }
       },
     },
     getCandles: (sym, gr, limit) => (chartBuffers.get(engKey(sym, gr)) ?? []).slice(-limit),

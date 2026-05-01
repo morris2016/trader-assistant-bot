@@ -38,6 +38,12 @@ export class DerivClient extends EventEmitter {
   private reqId = 1;
   private pending = new Map<number, Pending>();
   private subscriptions = new Map<string, { kind: "ticks"; symbol: SymbolCode } | { kind: "candles"; symbol: SymbolCode; granularity: Granularity }>();
+  /** Contract ids with an active proposal_open_contract subscription. Tracked
+   *  so a WS reconnect can replay them — without this, settlement updates for
+   *  any contract opened before the disconnect are silently dropped on the
+   *  Deriv side and the bot believes the trade is forever "open". Entries are
+   *  removed when the contract reports is_sold or status in {sold,won,lost}. */
+  private openContractIds = new Set<number>();
   private pingTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
   private closedByUser = false;
@@ -261,7 +267,13 @@ export class DerivClient extends EventEmitter {
     return pt?.transactions ?? [];
   }
 
-  private subscribeOpenContract(contractId: number) {
+  /** Subscribe to live updates for an open contract. Tracked in
+   *  `openContractIds` so a WS reconnect re-attaches the stream — see
+   *  resubscribeAll. Public so RealEngine can re-subscribe after a portfolio
+   *  hydrate or a manual reconcile finds a trade with no live stream. */
+  subscribeOpenContract(contractId: number): void {
+    this.openContractIds.add(contractId);
+    if (!this.isOpen()) return; // resubscribeAll will pick it up on connect
     this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 })
       .catch((e) => this.emit("error", e instanceof Error ? e : new Error(String(e))));
   }
@@ -394,6 +406,14 @@ export class DerivClient extends EventEmitter {
           .catch((e) => this.emit("resubscribeError", { kind: "candles", symbol: sub.symbol, granularity: sub.granularity, error: e instanceof Error ? e : new Error(String(e)) }));
       }
     }
+    // Replay open-contract streams. Without this, contracts opened before a
+    // disconnect lose their proposal_open_contract subscription on the Deriv
+    // side and never settle in the bot — the trade hangs "open" forever.
+    for (const contractId of this.openContractIds) {
+      this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 })
+        .then(() => this.emit("resubscribed", { kind: "contract", contractId }))
+        .catch((e) => this.emit("resubscribeError", { kind: "contract", contractId, error: e instanceof Error ? e : new Error(String(e)) }));
+    }
   }
 
   private handleMessage(msg: DerivResponse) {
@@ -428,7 +448,14 @@ export class DerivClient extends EventEmitter {
       }
       case "proposal_open_contract": {
         const c = msg.proposal_open_contract as OpenContractInfo | undefined;
-        if (c) this.emit("contract", c);
+        if (c) {
+          // Stop tracking once Deriv reports the contract has finalised.
+          // Deriv ends the subscription server-side at that point too.
+          if (c.is_sold === 1 || c.status === "sold" || c.status === "won" || c.status === "lost") {
+            this.openContractIds.delete(c.contract_id);
+          }
+          this.emit("contract", c);
+        }
         break;
       }
       case "ohlc": {

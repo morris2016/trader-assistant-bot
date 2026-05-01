@@ -47,6 +47,8 @@ export type DerivRequest = {
   | { balance: 1; subscribe?: 1 }
   | { proposal_open_contract: 1; contract_id?: number; subscribe?: 1 }
   | { active_symbols: "brief" | "full"; product_type?: "basic" }
+  | { portfolio: 1 }
+  | { profit_table: 1; description?: 0 | 1; limit?: number; offset?: number; sort?: "ASC" | "DESC" }
 );
 
 export type DerivResponse = {
