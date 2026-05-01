@@ -132,24 +132,34 @@ export function Fast2Panel({ state, doAction, pending }: {
   const tradeRows: Array<{
     id: string; closedAt: number | null; symbol: string; side: "BUY" | "SELL"; detector: string;
     stake: number; multiplier?: number; commission: number; entryPrice: number; exitPrice: number;
-    rMultiple: number; pnl: number; result: "won" | "lost"; latencyMs?: number | null;
+    rMultiple: number; pnl: number; result: "won" | "lost" | "unknown"; latencyMs?: number | null;
   }> = isLive
-    ? liveClosed.map((t) => ({
-        id: t.id,
-        closedAt: t.closedAt,
-        symbol: t.symbol,
-        side: t.side,
-        detector: t.detector,
-        stake: t.stake,
-        multiplier: t.multiplier,
-        commission: 0,
-        entryPrice: t.entrySpot ?? 0,
-        exitPrice: t.exitSpot ?? 0,
-        rMultiple: t.stake > 0 ? (t.profit ?? 0) / t.stake : 0,
-        pnl: t.profit ?? 0,
-        result: (t.profit ?? 0) > 0 ? "won" : "lost",
-        latencyMs: t.openLatencyMs,
-      }))
+    ? liveClosed.map((t) => {
+        // Restored-from-Deriv trades have detector="restored" and may have
+        // profit:null when sell_price was missing. Render as "unknown" so the
+        // UI doesn't lie by showing every restored trade as a $0 loss.
+        const isRestored = t.detector === "restored";
+        const knownProfit = t.profit != null;
+        const result: "won" | "lost" | "unknown" = !knownProfit && isRestored
+          ? "unknown"
+          : (t.profit ?? 0) > 0 ? "won" : "lost";
+        return {
+          id: t.id,
+          closedAt: t.closedAt,
+          symbol: t.symbol,
+          side: t.side,
+          detector: t.detector,
+          stake: t.stake,
+          multiplier: t.multiplier,
+          commission: 0,
+          entryPrice: t.entrySpot ?? 0,
+          exitPrice: t.exitSpot ?? 0,
+          rMultiple: t.stake > 0 && knownProfit ? (t.profit ?? 0) / t.stake : 0,
+          pnl: t.profit ?? 0,
+          result,
+          latencyMs: t.openLatencyMs,
+        };
+      })
     : paperTrades.map((t) => ({
         id: t.id,
         closedAt: t.closedAt,
@@ -585,11 +595,11 @@ export function Fast2Panel({ state, doAction, pending }: {
                   <td className="mono faint">{t.multiplier ?? "—"}×</td>
                   {!isLive && <td className="mono faint">${t.commission.toFixed(2)}</td>}
                   {isLive && <td className="mono faint">{t.latencyMs != null ? `${t.latencyMs}ms` : "—"}</td>}
-                  <td className="mono">{t.entryPrice.toFixed(5)}</td>
-                  <td className="mono">{t.exitPrice.toFixed(5)}</td>
-                  <td className={`mono ${t.rMultiple > 0 ? "pos" : "neg"}`}>{t.rMultiple.toFixed(2)}R</td>
-                  <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`}>{t.pnl >= 0 ? "+" : ""}${t.pnl.toFixed(2)}</td>
-                  <td><span className={`pill ${t.result === "won" ? "pill-green" : "pill-red"}`}>{t.result}</span></td>
+                  <td className="mono">{t.entryPrice ? t.entryPrice.toFixed(5) : "—"}</td>
+                  <td className="mono">{t.exitPrice ? t.exitPrice.toFixed(5) : "—"}</td>
+                  <td className={`mono ${t.result === "unknown" ? "muted" : t.rMultiple > 0 ? "pos" : "neg"}`}>{t.result === "unknown" ? "—" : `${t.rMultiple.toFixed(2)}R`}</td>
+                  <td className={`mono ${t.result === "unknown" ? "muted" : t.pnl > 0 ? "pos" : "neg"}`}>{t.result === "unknown" ? "—" : `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)}`}</td>
+                  <td><span className={`pill ${t.result === "won" ? "pill-green" : t.result === "lost" ? "pill-red" : "pill-muted"}`}>{t.result === "unknown" ? "—" : t.result}</span></td>
                 </tr>
               ))}
             </tbody>

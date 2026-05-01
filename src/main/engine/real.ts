@@ -202,22 +202,41 @@ export class RealEngine extends EventEmitter {
   private contractToTrade(info: Record<string, unknown>, isOpen: boolean): RealTrade | null {
     const contractId = Number(info.contract_id ?? 0);
     if (!contractId) return null;
-    const symbol = String(info.symbol ?? info.underlying_symbol ?? "") as SymbolCode;
+    // profit_table responses use `shortcode` (e.g. "MULTUP_BOOM300N_5.00_100_…")
+    // rather than top-level symbol/contract_type fields, so derive everything
+    // from shortcode when those fields are absent.
+    const shortcode = String(info.shortcode ?? "");
+    let contractType = String(info.contract_type ?? "");
+    let symbol = String(info.symbol ?? info.underlying_symbol ?? "");
+    if ((!contractType || !symbol) && shortcode) {
+      const parts = shortcode.split("_");
+      if (!contractType && parts[0]) contractType = parts[0];
+      if (!symbol && parts[1]) symbol = parts[1];
+    }
     if (!symbol) return null;
-    const contractType = String(info.contract_type ?? "");
-    // Multiplier contracts are "MULTUP"/"MULTDOWN"; Rise/Fall are "CALL"/"PUT".
     const isMultiplier = contractType.startsWith("MULT");
     const family: ContractFamily = isMultiplier ? "MULTIPLIER" : "CALL_PUT";
     const side: RealTradeSide = (contractType === "MULTUP" || contractType === "CALL") ? "BUY" : "SELL";
+    const buyPrice = Number(info.buy_price ?? 0);
+    const sellPrice = info.sell_price != null ? Number(info.sell_price) : null;
     const stake = Number(info.buy_price ?? info.stake ?? 0);
-    const buyPrice = Number(info.buy_price ?? stake);
     const payout = info.payout != null ? Number(info.payout) : null;
-    const profit = info.profit != null ? Number(info.profit) : null;
+    // profit_table doesn't include a top-level `profit` field — compute it
+    // from sell_price - buy_price (Deriv's convention for closed contracts).
+    // For currently-open contracts (portfolio), profit may still be present
+    // as a "current floating P/L" — pass it through.
+    const profit = info.profit != null
+      ? Number(info.profit)
+      : (sellPrice != null && Number.isFinite(buyPrice))
+        ? Number((sellPrice - buyPrice).toFixed(2))
+        : null;
     const entrySpot = info.entry_spot != null ? Number(info.entry_spot) : (info.entry_tick != null ? Number(info.entry_tick) : null);
     const exitSpot = info.exit_spot != null ? Number(info.exit_spot) : (info.exit_tick != null ? Number(info.exit_tick) : null);
     const openedAt = Number(info.purchase_time ?? info.date_start ?? 0) * 1000;
     const closedAt = isOpen ? null : Number(info.sell_time ?? info.transaction_time ?? 0) * 1000;
-    const status = isOpen ? "open" : (profit != null && profit > 0 ? "won" : "lost");
+    // Status: only call it "won" when we actually know profit > 0. If profit
+    // is null (couldn't compute), mark as "unknown" so the UI doesn't lie.
+    const status = isOpen ? "open" : (profit == null ? "unknown" : profit > 0 ? "won" : "lost");
     const multiplier = info.multiplier != null ? Number(info.multiplier) : undefined;
     const takeProfit = info.take_profit != null ? Number((info.take_profit as { order_amount?: number })?.order_amount ?? info.take_profit) : null;
     const stopLoss = info.stop_loss != null ? Number((info.stop_loss as { order_amount?: number })?.order_amount ?? info.stop_loss) : null;
@@ -229,7 +248,7 @@ export class RealEngine extends EventEmitter {
     return {
       id: randomUUID(),
       contractId,
-      symbol,
+      symbol: symbol as SymbolCode,
       side,
       family,
       contractType,
