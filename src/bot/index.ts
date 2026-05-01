@@ -184,6 +184,13 @@ async function main() {
     martingale: Object.fromEntries(FAST2_STRATEGIES.map((s) => [s.id, fast2Martingale[s.id]])),
   });
 
+  // Fast2 session-DD circuit state — hoisted here so resetFast2Paper can clear
+  // the session peak (otherwise the peak from the prior session balance keeps
+  // tripping the circuit even after the user explicitly resets to a lower
+  // balance via the UI).
+  let fast2SessionPeak = fast2Paper.getState().balance;
+  let fast2DDPaused = false;
+
   const deriv = new DerivClient({ appId: cfg.derivAppId });
   // One Engine instance per (symbol, granularity). Engine state (detector pools,
   // ATR/ADX windows, recent signals) is symbol-keyed internally — running two
@@ -406,8 +413,13 @@ async function main() {
         const newBal = balance ?? 50;
         fast2Paper.reset(newBal);
         for (const sId of Object.keys(fast2Martingale)) fast2Martingale[sId] = emptyMartingaleState();
+        // Reset the session-DD circuit too — peak was stale from the prior
+        // balance, so without this the circuit would re-trip immediately on
+        // a smaller new balance even though the user just reset.
+        fast2SessionPeak = newBal;
+        fast2DDPaused = false;
         persist();
-        log.warn(`fast2Paper reset via API to $${newBal.toFixed(2)} — all martingale ladders cleared`);
+        log.warn(`fast2Paper reset via API to $${newBal.toFixed(2)} — all martingale ladders + session-DD circuit cleared`);
       },
       updateFast2Config: (patch: Partial<Fast2Config>) => {
         const before = { ...fast2Config };
@@ -1619,8 +1631,8 @@ async function main() {
   // $50 starting balance with 2.0× martingale a 30% session-DD typically
   // means a deep ladder bust we should stop and review.
   const FAST2_DD_FRAC = Number(process.env.FAST2_SESSION_DD_FRAC ?? 0.30);
-  let fast2SessionPeak = fast2Paper.getState().balance;
-  let fast2DDPaused = false;
+  // fast2SessionPeak / fast2DDPaused are hoisted alongside fast2Paper init so
+  // resetFast2Paper can clear them (see comment near declaration).
   safeInterval("fast2-session-dd", () => {
     const bal = fast2Paper.getState().balance;
     if (bal > fast2SessionPeak) fast2SessionPeak = bal;
