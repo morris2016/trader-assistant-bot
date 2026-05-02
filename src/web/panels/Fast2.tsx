@@ -472,6 +472,91 @@ export function Fast2Panel({ state, doAction, pending }: {
         </table>
       </div>
 
+      <h3 className="section-title">Per-Strategy Overrides</h3>
+      <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
+        Each strategy can override side / base stake / martingale / cap. Empty fields fall back to the general config above.
+      </div>
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        {strategies.map((s) => {
+          const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
+          return (
+            <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1.4fr 0.9fr 0.7fr 0.9fr 0.9fr 0.7fr 0.7fr", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: "1px solid #2a2f44" }}>
+              <div>
+                <div className="bold" style={{ fontSize: 12 }}>{s.id}</div>
+                <div className="muted" style={{ fontSize: 10 }}>{s.symbols.join(",")} · {s.granularity}s</div>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 10 }}>side</div>
+                <select
+                  className="filter-select"
+                  defaultValue={ov.sideFilter ?? ""}
+                  onChange={(e) => api.updateFast2StrategyConfig(s.id, { sideFilter: (e.target.value || undefined) as any })}
+                >
+                  <option value="">— general —</option>
+                  <option value="both">both</option>
+                  <option value="BUY">BUY only</option>
+                  <option value="SELL">SELL only</option>
+                </select>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 10 }}>base $</div>
+                <input className="filter-input" type="number" step="0.5" min={1} placeholder="—"
+                  defaultValue={ov.baseStake ?? ""}
+                  onBlur={(e) => {
+                    const v = e.target.value === "" ? null : Number(e.target.value);
+                    if (v == null) return;
+                    if (isFinite(v) && v >= 1) api.updateFast2StrategyConfig(s.id, { baseStake: v });
+                  }}
+                  style={{ width: "100%" }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 10 }}>mart×</div>
+                <input className="filter-input" type="number" step="0.1" min={1.0} max={3.0} placeholder="—"
+                  defaultValue={ov.martingaleMultiplier ?? ""}
+                  onBlur={(e) => {
+                    const v = e.target.value === "" ? null : Number(e.target.value);
+                    if (v == null) return;
+                    if (isFinite(v) && v > 1) api.updateFast2StrategyConfig(s.id, { martingaleMultiplier: v });
+                  }}
+                  style={{ width: "100%" }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 10 }}>cap $</div>
+                <input className="filter-input" type="number" step="1" min={1} placeholder="—"
+                  defaultValue={ov.perTradeCap ?? ""}
+                  onBlur={(e) => {
+                    const v = e.target.value === "" ? null : Number(e.target.value);
+                    if (v == null) return;
+                    if (isFinite(v) && v >= 1) api.updateFast2StrategyConfig(s.id, { perTradeCap: v });
+                  }}
+                  style={{ width: "100%" }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 10 }}>levels</div>
+                <input className="filter-input" type="number" step="1" min={1} max={10} placeholder="—"
+                  defaultValue={ov.maxLevels ?? ""}
+                  onBlur={(e) => {
+                    const v = e.target.value === "" ? null : Number(e.target.value);
+                    if (v == null) return;
+                    if (isFinite(v) && v >= 1) api.updateFast2StrategyConfig(s.id, { maxLevels: v });
+                  }}
+                  style={{ width: "100%" }} />
+              </div>
+              <div>
+                <button
+                  className="btn btn-warn btn-sm"
+                  disabled={Object.keys(ov).length === 0}
+                  onClick={() => api.updateFast2StrategyConfig(s.id, null)}
+                  title="Clear all overrides for this strategy — falls back to general config"
+                >
+                  clear
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       {(() => {
         const openRows = isLive
           ? liveTrades.filter((t) => t.closedAt == null).map((t) => ({

@@ -42,6 +42,10 @@ export type ManualControls = {
   resetFast2Paper: (balance?: number) => void;
   /** Patch Fast2 runtime config (tradeMultiplier, martingaleMultiplier, etc.). */
   updateFast2Config: (patch: Partial<Fast2Config>) => void;
+  /** Patch a per-strategy override under fast2Config.perStrategy[strategyId].
+   *  If `patch` is null, the override entry is removed (strategy falls back
+   *  to the general config). */
+  updateFast2StrategyConfig: (strategyId: string, patch: Partial<Fast2Config> | null) => void;
   /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
   forceResubscribe: () => Promise<void>;
   /** Reconcile open Real contracts with Deriv: snapshot each, settle any that
@@ -245,6 +249,11 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/update-fast2-config") {
             // All knobs are passed as query params — kept consistent with the other
             // POST controls. Only fields that arrive non-empty are forwarded.
+            // If `strategyId` is present, the patch goes into perStrategy[id]
+            // (per-asset override). If `clear=1` along with strategyId, the
+            // override for that strategy is cleared (falls back to general).
+            const strategyId = url.searchParams.get("strategyId") ?? undefined;
+            const clear = url.searchParams.get("clear") === "1";
             const patch: Partial<Fast2Config> = {};
             const tm = url.searchParams.get("tradeMultiplier");
             if (tm) patch.tradeMultiplier = Number(tm);
@@ -270,7 +279,11 @@ export function startHttpServer(opts: {
             if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
             const lt = url.searchParams.get("liveTradingEnabled");
             if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
-            opts.manualControls.updateFast2Config(patch);
+            if (strategyId) {
+              opts.manualControls.updateFast2StrategyConfig(strategyId, clear ? null : patch);
+            } else {
+              opts.manualControls.updateFast2Config(patch);
+            }
           }
           else if (path0 === "/api/control/resubscribe") {
             opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));

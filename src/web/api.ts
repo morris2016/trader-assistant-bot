@@ -265,9 +265,27 @@ export const api = {
   updateFast2Config: (patch: Partial<Fast2Config>) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
+      if (k === "perStrategy") continue; // handled separately
       if (typeof v === "boolean") p.set(k, String(v));
       else if (typeof v === "string") p.set(k, v);
       else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
+  },
+  /** Update or clear a per-strategy override under fast2Config.perStrategy.
+   *  Pass `clear: true` to remove the override (strategy falls back to general). */
+  updateFast2StrategyConfig: (strategyId: string, patch: Partial<Fast2Config> | null) => {
+    const p = new URLSearchParams();
+    p.set("strategyId", strategyId);
+    if (patch === null) {
+      p.set("clear", "1");
+    } else {
+      for (const [k, v] of Object.entries(patch)) {
+        if (k === "perStrategy" || k === "liveTradingEnabled") continue;
+        if (typeof v === "boolean") p.set(k, String(v));
+        else if (typeof v === "string") p.set(k, v);
+        else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+      }
     }
     return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
   },

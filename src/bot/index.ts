@@ -23,7 +23,7 @@ import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_SYNTH_CONFIG, DERIV_BOOMCRASH_MULTIPLIERS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, type Fast1Config, type Fast2Config, type SynthConfig } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_SYNTH_CONFIG, DERIV_BOOMCRASH_MULTIPLIERS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type SynthConfig } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -52,7 +52,7 @@ async function main() {
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -179,14 +179,23 @@ async function main() {
   const fast2ActiveMode = (): "paper" | "live" =>
     fast2Config.liveTradingEnabled ? "live" : "paper";
   let fast2Config: Fast2Config = { ...DEFAULT_FAST2_CONFIG, ...persisted.fast2Config };
-  // Build a MartingaleParams view from the live config — used at every trade
-  // open / settle. Rebuilt on every config change.
-  const fast2MartingaleParams = (): MartingaleParams => ({
-    baseStake: fast2Config.baseStake,
-    multiplier: fast2Config.martingaleMultiplier,
-    maxLevels: fast2Config.maxLevels,
-    perTradeCap: fast2Config.perTradeCap,
-  });
+  // Per-strategy resolver: overlays fast2Config.perStrategy[strategyId] on top
+  // of the general fast2Config so each strategy can have its own stake/mart/
+  // sideFilter without affecting the rest of the stack. Unset fields fall
+  // back to the general config.
+  const fast2ConfigFor = (strategyId: string): Fast2Config =>
+    resolveFastConfig(fast2Config, strategyId);
+  // Build a MartingaleParams view for a specific strategy — used at every
+  // trade open / settle. Reflects per-strategy overrides if present.
+  const fast2MartingaleParams = (strategyId?: string): MartingaleParams => {
+    const cfg = strategyId ? fast2ConfigFor(strategyId) : fast2Config;
+    return {
+      baseStake: cfg.baseStake,
+      multiplier: cfg.martingaleMultiplier,
+      maxLevels: cfg.maxLevels,
+      perTradeCap: cfg.perTradeCap,
+    };
+  };
   log.info("fast2Paper: state loaded", {
     balance: fast2Paper.getState().balance,
     closed: fast2Paper.getState().closed.length,
@@ -316,16 +325,17 @@ async function main() {
       // does not bleed into the paper ladder.)
       const fast2Strat = FAST2_STRATEGIES.find((s) => s.id === t.sandboxStrategyId);
       const before = fast2MartingaleLive[t.sandboxStrategyId] ?? emptyMartingaleState();
-      const martingaleActive = (fast2Strat?.useMartingale ?? false) || fast2Config.forceMartingale;
+      const sCfgLive = fast2ConfigFor(t.sandboxStrategyId);
+      const martingaleActive = (fast2Strat?.useMartingale ?? false) || sCfgLive.forceMartingale;
       const pnl = t.profit ?? 0;
       if (martingaleActive) {
-        const params = fast2MartingaleParams();
-        const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, pnl, params, Date.now(), fast2Config.martingaleMode);
+        const params = fast2MartingaleParams(t.sandboxStrategyId);
+        const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
         fast2MartingaleLive[t.sandboxStrategyId] = nextLadder;
-        const modeTag = fast2Config.martingaleMode === "anti" ? " ANTI" : "";
+        const modeTag = sCfgLive.martingaleMode === "anti" ? " ANTI" : "";
         log.info(`fast2 LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag} contract=${t.contractId}${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
         if (circuitBreakerFired) {
-          log.warn(`fast2 LIVE martingale circuit-breaker fired for ${t.sandboxStrategyId}: ladder reset after ${params.maxLevels} ${fast2Config.martingaleMode === "anti" ? "wins" : "losses"}`);
+          log.warn(`fast2 LIVE martingale circuit-breaker fired for ${t.sandboxStrategyId}: ladder reset after ${params.maxLevels} ${sCfgLive.martingaleMode === "anti" ? "wins" : "losses"}`);
         }
       } else {
         fast2MartingaleLive[t.sandboxStrategyId] = {
@@ -479,6 +489,58 @@ async function main() {
         fast2Config = next;
         persist();
         log.warn("fast2Config updated via API", { before, after: next });
+      },
+      updateFast2StrategyConfig: (strategyId: string, patch: Partial<Fast2Config> | null) => {
+        const beforePerStrat = { ...(fast2Config.perStrategy ?? {}) };
+        if (patch === null) {
+          // Clear the override entirely — strategy falls back to general config.
+          if (beforePerStrat[strategyId]) delete beforePerStrat[strategyId];
+          fast2Config = { ...fast2Config, perStrategy: beforePerStrat };
+          persist();
+          log.warn("fast2 per-strategy override cleared", { strategyId });
+          return;
+        }
+        // Validate the patch before merging — prevents one bad field from
+        // poisoning the override (we just drop invalid fields).
+        const cleaned: Partial<Fast2Config> = {};
+        if (patch.tradeMultiplier != null && isFinite(patch.tradeMultiplier) && patch.tradeMultiplier > 0) {
+          cleaned.tradeMultiplier = clampDerivMultiplier(patch.tradeMultiplier);
+        }
+        if (patch.martingaleMultiplier != null && isFinite(patch.martingaleMultiplier) && patch.martingaleMultiplier > 1) {
+          cleaned.martingaleMultiplier = patch.martingaleMultiplier;
+        }
+        if (patch.baseStake != null && isFinite(patch.baseStake) && patch.baseStake >= DERIV_MIN_STAKE_USD) {
+          cleaned.baseStake = patch.baseStake;
+        }
+        if (patch.maxLevels != null && isFinite(patch.maxLevels) && patch.maxLevels >= 1) {
+          cleaned.maxLevels = Math.round(patch.maxLevels);
+        }
+        if (patch.perTradeCap != null && isFinite(patch.perTradeCap) && patch.perTradeCap >= DERIV_MIN_STAKE_USD) {
+          cleaned.perTradeCap = Math.min(patch.perTradeCap, DERIV_MAX_STAKE_USD);
+        }
+        if (patch.commissionPct != null && isFinite(patch.commissionPct) && patch.commissionPct >= 0) {
+          cleaned.commissionPct = patch.commissionPct;
+        }
+        if (patch.entrySpreadBps != null && isFinite(patch.entrySpreadBps) && patch.entrySpreadBps >= 0) {
+          cleaned.entrySpreadBps = patch.entrySpreadBps;
+        }
+        if (patch.slSlippageBps != null && isFinite(patch.slSlippageBps) && patch.slSlippageBps >= 0) {
+          cleaned.slSlippageBps = patch.slSlippageBps;
+        }
+        if (typeof patch.forceMartingale === "boolean") cleaned.forceMartingale = patch.forceMartingale;
+        if (patch.sideFilter === "both" || patch.sideFilter === "BUY" || patch.sideFilter === "SELL") {
+          cleaned.sideFilter = patch.sideFilter;
+        }
+        if (patch.martingaleMode === "classic" || patch.martingaleMode === "anti") {
+          cleaned.martingaleMode = patch.martingaleMode;
+        }
+        // Note: liveTradingEnabled is NOT applied per-strategy — it's a
+        // sandbox-wide safety knob. Use the general updateFast2Config to flip.
+        const merged: Partial<Fast2Config> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
+        beforePerStrat[strategyId] = merged;
+        fast2Config = { ...fast2Config, perStrategy: beforePerStrat };
+        persist();
+        log.warn("fast2 per-strategy override updated", { strategyId, patch: cleaned, merged });
       },
       forceResubscribe: async () => {
         log.warn("force-resubscribe initiated via API");
@@ -976,16 +1038,17 @@ async function main() {
         // mode switch still settles into the paper ladder; it does not bleed
         // into the live ladder.)
         const before = fast2MartingalePaper[fast2Strat.id] ?? emptyMartingaleState();
-        const martingaleActive = fast2Strat.useMartingale || fast2Config.forceMartingale;
+        const sCfgPaper = fast2ConfigFor(fast2Strat.id);
+        const martingaleActive = fast2Strat.useMartingale || sCfgPaper.forceMartingale;
         if (martingaleActive) {
-          const params = fast2MartingaleParams();
-          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), fast2Config.martingaleMode);
+          const params = fast2MartingaleParams(fast2Strat.id);
+          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), sCfgPaper.martingaleMode);
           fast2MartingalePaper[fast2Strat.id] = nextLadder;
-          const forced = !fast2Strat.useMartingale && fast2Config.forceMartingale ? " FORCED" : "";
-          const modeTag = fast2Config.martingaleMode === "anti" ? " ANTI" : "";
-          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${fast2Config.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+          const forced = !fast2Strat.useMartingale && sCfgPaper.forceMartingale ? " FORCED" : "";
+          const modeTag = sCfgPaper.martingaleMode === "anti" ? " ANTI" : "";
+          log.info(`fast2Paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${fast2Paper.getState().balance.toFixed(2)} strategy=${fast2Strat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${sCfgPaper.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
           if (circuitBreakerFired) {
-            log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} ${fast2Config.martingaleMode === "anti" ? "wins" : "losses"}`);
+            log.warn(`fast2 martingale circuit-breaker fired for ${fast2Strat.id}: ladder reset after ${params.maxLevels} ${sCfgPaper.martingaleMode === "anti" ? "wins" : "losses"}`);
           }
         } else {
           fast2MartingalePaper[fast2Strat.id] = {
@@ -1180,16 +1243,19 @@ async function main() {
     );
     let handledFast2 = false;
     if (fast2Match) {
+      // Effective config for THIS strategy — overlays per-strategy overrides
+      // on top of the general fast2Config. Lets the operator tune buy/sell,
+      // stake, mart per asset without affecting the rest of the stack.
+      const sCfg = fast2ConfigFor(fast2Match.id);
       const passes = passesStrategyFilters(fast2Match);
-      // Sandbox-level side filter — set via UI (sideFilter dropdown). Drops
-      // signals on the disabled direction without changing the per-strategy
-      // descriptor. "both" lets every signal through.
-      const sideAllowed = fast2Config.sideFilter === "both" || fast2Config.sideFilter === sig.action;
+      // Per-strategy side filter (falls back to general). Drops signals on
+      // the disabled direction. "both" lets every signal through.
+      const sideAllowed = sCfg.sideFilter === "both" || sCfg.sideFilter === sig.action;
       if (!passes) {
         log.info("fast2 signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
         handledFast2 = true;
       } else if (!sideAllowed) {
-        log.info("fast2 signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id, sideFilter: fast2Config.sideFilter });
+        log.info("fast2 signal blocked by sideFilter", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id, sideFilter: sCfg.sideFilter });
         handledFast2 = true;
       } else if (isFast2DDPaused()) {
         log.info("fast2 signal blocked by session-DD circuit", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
@@ -1198,7 +1264,7 @@ async function main() {
         // Dedupe must look at the path that will actually open the trade.
         // In LIVE mode, look at real.open[] for an existing fast2-tagged
         // position on this symbol. In PAPER mode, look at fast2Paper.open.
-        const isLiveMode = fast2Config.liveTradingEnabled;
+        const isLiveMode = sCfg.liveTradingEnabled;
         const alreadyOpen = isLiveMode
           ? real.state().open.some((t) => t.sandbox === "fast2" && t.symbol === sig.symbol)
           : fast2Paper.getState().open.some((p) => p.symbol === sig.symbol);
@@ -1210,13 +1276,13 @@ async function main() {
           // paper losses cannot influence live stake and vice versa.
           const ladderMap = fast2MartingaleFor(fast2ActiveMode());
           const ladder = ladderMap[fast2Match.id] ?? emptyMartingaleState();
-          const params = fast2MartingaleParams();
-          const martingaleActive = fast2Match.useMartingale || fast2Config.forceMartingale;
+          const params = fast2MartingaleParams(fast2Match.id);
+          const martingaleActive = fast2Match.useMartingale || sCfg.forceMartingale;
           const stake = martingaleActive
             ? fastNextStake(ladder, params)
             : params.baseStake;
 
-          if (fast2Config.liveTradingEnabled) {
+          if (sCfg.liveTradingEnabled) {
             // ── LIVE PATH: route to real.placeTrade with sandbox tag. ─────
             // All latency hardening from the prior commit applies here:
             //   • lastTickFor() price-tolerance abort before the buy
@@ -1233,10 +1299,10 @@ async function main() {
               // Final-mile clamps before sending to Deriv. The validator on
               // updateFast2Config already snaps these; this is a belt-and-
               // braces guard against persisted-state from older deploys.
-              const liveMult = clampDerivMultiplier(fast2Config.tradeMultiplier);
+              const liveMult = clampDerivMultiplier(sCfg.tradeMultiplier);
               const liveStake = Math.min(DERIV_MAX_STAKE_USD, Math.max(DERIV_MIN_STAKE_USD, stake));
-              if (liveMult !== fast2Config.tradeMultiplier) {
-                log.warn(`fast2 LIVE: tradeMultiplier ${fast2Config.tradeMultiplier}× → ${liveMult}× (Deriv-valid clamp before placeTrade)`);
+              if (liveMult !== sCfg.tradeMultiplier) {
+                log.warn(`fast2 LIVE: tradeMultiplier ${sCfg.tradeMultiplier}× → ${liveMult}× (Deriv-valid clamp before placeTrade)`);
               }
               if (liveStake !== stake) {
                 log.warn(`fast2 LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD})`);
@@ -1277,10 +1343,10 @@ async function main() {
               atr,
               atrTpMult: fast2Match.atrTpMult,
               atrSlMult: fast2Match.atrSlMult,
-              // Fast2 uses the user-selected leverage from fast2Config rather
-              // than the bot-wide cfg.multiplier. This is the knob the UI
-              // exposes (100/200/300/400/500).
-              multiplier: fast2Config.tradeMultiplier,
+              // Fast2 uses the per-strategy leverage from sCfg (overlay of
+              // general fast2Config + perStrategy override). UI exposes the
+              // general value (100/200/300/400/500) plus per-strategy tweaks.
+              multiplier: sCfg.tradeMultiplier,
               granularity,
               candleEpoch: candle.epoch,
               baseStake: params.baseStake,
@@ -1289,12 +1355,12 @@ async function main() {
               signalStopPrice: sig.stopPrice,
               signalTargetPrice: sig.targetPrice,
               stakeOverride: stake,
-              commissionPct: fast2Config.commissionPct,
-              entrySpreadFrac: fast2Config.entrySpreadBps / 10000,
-              slSlippageFrac: fast2Config.slSlippageBps / 10000,
+              commissionPct: sCfg.commissionPct,
+              entrySpreadFrac: sCfg.entrySpreadBps / 10000,
+              slSlippageFrac: sCfg.slSlippageBps / 10000,
             });
             if (pos) {
-              log.info(`fast2Paper opened ${pos.symbol} ${pos.side} strategy=${fast2Match.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${fast2Config.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
+              log.info(`fast2Paper opened ${pos.symbol} ${pos.side} strategy=${fast2Match.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${sCfg.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
             } else {
               log.warn(`fast2Paper open rejected ${sig.symbol} ${sig.action} (atr=${atr}, balance=$${fast2Paper.getState().balance.toFixed(2)}, stake=$${stake})`);
             }

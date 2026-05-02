@@ -67,7 +67,26 @@ export type FastSandboxConfig = {
    *  on the real-engine side. All circuits (price-tolerance, latency,
    *  session-DD) remain enforced. */
   liveTradingEnabled: boolean;
+  /** Per-strategy overrides: any subset of the above fields, keyed by
+   *  strategyId. When a strategy is dispatched, the effective config is
+   *  computed by spreading the general config and then overlaying the
+   *  strategy-specific override. Unset fields fall back to the general
+   *  config. Example:
+   *    perStrategy: { fast2_rdbear_meanrev: { sideFilter: "SELL", baseStake: 30 } }
+   *  Lets the operator tune a single asset (martingale, side, stake) without
+   *  affecting the rest of the stack. */
+  perStrategy?: Record<string, Partial<Omit<FastSandboxConfig, "perStrategy" | "liveTradingEnabled">>>;
 };
+
+/** Resolve the effective per-strategy config: spread `general`, overlay any
+ *  matching `perStrategy[strategyId]` overrides. liveTradingEnabled is always
+ *  taken from the general config (per-strategy overrides cannot toggle live
+ *  mode — that's a sandbox-wide safety knob). */
+export function resolveFastConfig(general: FastSandboxConfig, strategyId: string): FastSandboxConfig {
+  const override = general.perStrategy?.[strategyId];
+  if (!override) return general;
+  return { ...general, ...override, liveTradingEnabled: general.liveTradingEnabled };
+}
 
 /** Fast (sandbox 1) — defaults targeted at the existing 30× / 2.2× / 5L config
  *  that has been making real money on paper. Fees baked in for realistic P&L. */
