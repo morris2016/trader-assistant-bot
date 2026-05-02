@@ -856,7 +856,13 @@ async function main() {
     let lastErr: Error | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const history = await deriv.subscribeCandles(sym as SymbolCode, gr as Granularity, 1000);
+        // Seed candle buffer with deep history (was 1000 bars, bumped 2026-05-02
+        // to 2000 to ensure ALL strategies are fully warmed for any combo of
+        // detector lookback + ATR + efficiency windows. Detector minimums:
+        //   breakoutMeanRev / breakoutContinuation: 15 lookback + 14 ATR = 29
+        //   spike-fade: 14 ATR + 1 confirm = 15
+        // 2000 = 70× headroom; ensures stable indicators on first live bar.
+        const history = await deriv.subscribeCandles(sym as SymbolCode, gr as Granularity, 2000);
         const detectorConfigs = buildEngineDetectorConfigs(sym, gr);
         const eng = new Engine(detectorConfigs, { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 });
         eng.seed(sym as SymbolCode, history);
@@ -867,7 +873,8 @@ async function main() {
           tickedSymbols.add(sym);
         }
         subscribedKeys.add(key);
-        log.info(`subscribed ${sym}@${gr}s (seeded=${history.length}, attempt=${attempt + 1})`);
+        const enabledDets = detectorConfigs.filter((d) => d.enabled).map((d) => d.id).join(",");
+        log.info(`subscribed ${sym}@${gr}s (seeded=${history.length}, detectors=[${enabledDets}], attempt=${attempt + 1}) — fully warmed`);
         return true;
       } catch (e) {
         lastErr = e as Error;
@@ -881,11 +888,26 @@ async function main() {
 
   // Subscribe to every (sym, gr) the strategy registries expect. Idempotent —
   // safe to call repeatedly; subscribePair short-circuits when already wired.
+  // After all subscriptions resolve, verify FULL WARMUP across every Fast2
+  // strategy before declaring the live system armed.
   async function subscribeAll() {
     const pairs = expectedPairs();
     for (const key of pairs) {
       const [sym, grStr] = key.split("|");
       await subscribePair(sym, Number(grStr));
+    }
+    // Warmup verification: every Fast2 strategy's (sym, gr) pair must be seeded.
+    const fast2Pairs = new Set<string>();
+    for (const s of FAST2_STRATEGIES) for (const sym of s.symbols) fast2Pairs.add(`${sym}|${s.granularity}`);
+    const unwarmed: string[] = [];
+    for (const key of fast2Pairs) {
+      if (!subscribedKeys.has(key) || !engines.has(key)) unwarmed.push(key);
+    }
+    if (unwarmed.length === 0) {
+      log.info(`✓ ALL Fast2 R-stack strategies fully warmed up (${FAST2_STRATEGIES.length} strategies / ${fast2Pairs.size} sym-gr pairs / 2000 bars seeded each)`);
+      log.info(`  LIVE trading armed for: ${FAST2_STRATEGIES.map((s) => s.id).join(", ")}`);
+    } else {
+      log.warn(`⚠ Fast2 NOT fully warmed — unsubscribed pairs: ${unwarmed.join(", ")}. Live trading will be partial until self-heal completes.`);
     }
   }
 

@@ -1,108 +1,59 @@
-// Fast-trade synth sandbox. Completely separate from STRATEGIES (real-asset)
-// and SYNTH_STRATEGIES (validated SMC synths). High-frequency 1m spike-fade
-// scalps on Deriv's Boom 300N + Crash 300N synthetics.
+// Fast1 sandbox — PAPER-ONLY shadow of Fast2.
+// Runs the same R-stack (RDBEAR + RDBULL × fade + drift) but in paper mode
+// so we can compare paper-vs-live performance side by side. Useful for
+// detecting live-execution drag (slippage, latency, fill quality).
 //
-// Edge: Boom 300N is spec'd with rare large up-spikes (~1 per 300 ticks);
-// Crash 300N has rare down-spikes. After a spike the price reliably reverts
-// at least partially. We detect a 1m bar whose range ≥ 3 × ATR(prior bar),
-// wait one bar to confirm the spike has ended (confirmation bar closes inside
-// the spike's range), then fade in the opposite direction with stop just past
-// the spike high/low and target at 0.5 × spike_range.
+// Replaced 2026-05-02 — old BOOM/CRASH 300N spike-fade descriptors deleted
+// (those strategies migrated to Fast2 in earlier session, then removed entirely
+// when user opted to focus on R-stack only).
 //
-// Validated 2026-04-30 via 17.4-day historical Deriv backtest:
-//   • BOOM300N 1m: 1670 trades / 17.4d, WR 56%, expR +0.36, +$749 / 96.2 trades/day
-//   • CRASH300N 1m: 1687 trades / 17.4d, WR 56%, expR +0.39, +$849 / 97.2 trades/day
-// Both stable across both halves of the data window.
+// Each strategy is a clone of its Fast2 sibling with a "fast1_" id prefix so
+// the dispatch router and per-strategy ladder/balance state stay distinct.
 
-import { defaultDetectorConfigs } from "./runner";
+import {
+  fast2RdbearMeanRev,
+  fast2RdbullMeanRev,
+  fast2RdbearDrift,
+  fast2RdbullDrift,
+} from "./fast2-strategies";
 import type { StrategyDescriptor } from "./strategies/types";
 
-const SPIKE_FADE_PARAMS = {
-  atrPeriod: 14,
-  spikeNAtr: 3.0,
-  bufferAtrMul: 0.2,
-  tpFracOfSpike: 0.5,
-  requireConfirmation: 1,
-};
-
-/**
- * BOOM300N spike-fade — sell after a confirmed up-spike.
- */
-export const boom300nSpike: StrategyDescriptor = {
-  id: "boom300n_spike",
-  name: "BOOM 300N spike-fade",
+export const fast1RdbearMeanRev: StrategyDescriptor = {
+  ...fast2RdbearMeanRev,
+  id: "fast1_rdbear_meanrev",
+  name: "Fast1 RDBEAR mean-rev fade (paper shadow)",
   description:
-    "Detects a 1m bar with range ≥ 3×ATR (a spike). On the next bar that closes " +
-    "back inside the spike's range, fade in the opposite direction. Stop just past " +
-    "the spike's high/low + 0.2×ATR; target at 50% of the spike's range.",
-  symbols: ["BOOM300N"],
-  granularity: 60,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    enabled: d.id === "spikeFade",
-    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
-  })),
-  // ATR fallbacks — never used since spikeFade emits structural levels.
-  atrSlMult: 1.0,
-  atrTpMult: 1.0,
-  costBps: 5.0,
-  validation: {
-    validatedAt: "2026-04-30",
-    sampleDays: 17.4,
-    trades: 1670,
-    winRate: 0.56,
-    expectancyR: 0.36,
-    pnlUsd: 749,
-    stake: 50,
-    multiplier: 30,
-    notes: [
-      "Historical edge: rare up-spikes on BOOM300N revert reliably ~half the spike size before drift resumes.",
-      "Tested 17.4 days × 25,000 1m bars on Deriv. Half-A +$399 / half-B +$350 — STABLE.",
-      "Drawdown $29 over 1670 trades at $50/30× — extremely benign.",
-      "Martingale NOT recommended: per-trade expR=+0.36 is positive without it; martingale would burn the edge on rare 5-loss streaks.",
-    ],
-  },
+    "Paper-only shadow of fast2_rdbear_meanrev. Identical detector params; runs " +
+    "in the Fast1 sandbox for paper-vs-live comparison.",
 };
 
-/**
- * CRASH300N spike-fade — buy after a confirmed down-spike. Mirror of BOOM300N.
- */
-export const crash300nSpike: StrategyDescriptor = {
-  id: "crash300n_spike",
-  name: "CRASH 300N spike-fade",
-  description:
-    "Mirror of boom300n_spike on CRASH300N. Detects a 1m bar with range ≥ 3×ATR, " +
-    "waits one bar to confirm spike-end, then BUYs (fading the down-spike). " +
-    "Stop just past spike low − 0.2×ATR; target at 50% of spike range.",
-  symbols: ["CRASH300N"],
-  granularity: 60,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    enabled: d.id === "spikeFade",
-    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
-  })),
-  atrSlMult: 1.0,
-  atrTpMult: 1.0,
-  costBps: 5.0,
-  validation: {
-    validatedAt: "2026-04-30",
-    sampleDays: 17.4,
-    trades: 1687,
-    winRate: 0.56,
-    expectancyR: 0.39,
-    pnlUsd: 849,
-    stake: 50,
-    multiplier: 30,
-    notes: [
-      "Historical edge: rare down-spikes on CRASH300N revert reliably.",
-      "Tested 17.4 days × 25,000 1m bars on Deriv. Half-A +$454 / half-B +$395 — STABLE.",
-      "Slightly higher edge than BOOM300N variant (+0.39R vs +0.36R) — Crash drift is up so post-spike recovery is reinforced by drift direction.",
-      "Drawdown $37 over 1687 trades at $50/30× — extremely benign.",
-    ],
-  },
+export const fast1RdbullMeanRev: StrategyDescriptor = {
+  ...fast2RdbullMeanRev,
+  id: "fast1_rdbull_meanrev",
+  name: "Fast1 RDBULL mean-rev fade (paper shadow)",
+  description: "Paper-only shadow of fast2_rdbull_meanrev.",
 };
 
-export const FAST_STRATEGIES: StrategyDescriptor[] = [boom300nSpike, crash300nSpike];
+export const fast1RdbearDrift: StrategyDescriptor = {
+  ...fast2RdbearDrift,
+  id: "fast1_rdbear_drift",
+  name: "Fast1 RDBEAR drift-follow (paper shadow)",
+  description: "Paper-only shadow of fast2_rdbear_drift.",
+};
+
+export const fast1RdbullDrift: StrategyDescriptor = {
+  ...fast2RdbullDrift,
+  id: "fast1_rdbull_drift",
+  name: "Fast1 RDBULL drift-follow (paper shadow)",
+  description: "Paper-only shadow of fast2_rdbull_drift.",
+};
+
+export const FAST_STRATEGIES: StrategyDescriptor[] = [
+  fast1RdbearMeanRev,
+  fast1RdbullMeanRev,
+  fast1RdbearDrift,
+  fast1RdbullDrift,
+];
 
 export function fastStrategiesForSymbol(symbol: string): StrategyDescriptor[] {
   return FAST_STRATEGIES.filter((s) => s.symbols.includes(symbol));

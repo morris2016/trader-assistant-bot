@@ -130,7 +130,10 @@ export const rdbullBreakout: StrategyDescriptor = {
   },
 };
 
-export const SYNTH_STRATEGIES: StrategyDescriptor[] = [boom300nDrift, rdbullBreakout];
+// rdbullBreakout SUPERSEDED 2026-05-02 by fast2_rdbull_drift (same detector,
+// kAtr=2.5 instead of 2.0, validated on 9 months at 60.9% WR). Removed from
+// active list to prevent silent param collision on RDBULL@5m breakoutContinuation.
+export const SYNTH_STRATEGIES: StrategyDescriptor[] = [boom300nDrift];
 
 export function synthStrategiesForSymbol(symbol: string): StrategyDescriptor[] {
   return SYNTH_STRATEGIES.filter((s) => s.symbols.includes(symbol));

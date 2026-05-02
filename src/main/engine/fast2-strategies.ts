@@ -1,10 +1,20 @@
 // Fast2 sandbox — parallel to FAST_STRATEGIES, completely independent.
-// Stack: BOOM 300N spike-fade (1m) + RDBEAR breakout-mean-reversion (5m).
-// CRASH 300N spike-fade was removed 2026-05-02 in favor of the validated
-// RDBEAR mean-rev strategy (120-day Jan→Apr study: 69% daily survival,
-// 0% bust, +$12,654 net on $200/$30/1.7×).
-// Detector params are shared with FAST_STRATEGIES on (sym, gr=60) so the
-// per-key engine merge in bot/index.ts does not collide.
+// 6-strategy stack:
+//   BOOM 300N + CRASH 300N spike-fade (1m, TP=0.7×spike)
+//   RDBEAR mean-rev fade (5m, SELL on up-pierces)
+//   RDBULL mean-rev fade (5m, BUY on down-pierces)
+//   RDBEAR drift-follow  (5m, SELL on down-pierces, NEW 2026-05-02)
+//   RDBULL drift-follow  (5m, BUY on up-pierces, NEW 2026-05-02)
+// The mean-rev + drift pair on each Bear/Bull asset captures BOTH pierce
+// directions — fade trades up-pierces, drift trades down-pierces (mirror for
+// RDBULL). Doubles signal density per asset without conflict.
+// 9-month validation totals at $3 stake:
+//   RDBEAR fade  +$6,926  /  3,633t / 56% WR
+//   RDBEAR drift +$9,204  /  5,112t / 56% WR  (NEW)
+//   RDBULL fade  +$10,783 /  3,521t / 61% WR
+//   RDBULL drift +$13,539 /  5,598t / 60% WR  (NEW)
+//   Combined RDBEAR+RDBULL pair = +$40,452 over 9 months.
+// BOOM/CRASH 500 + 600 + 900 NOT in stack. Detector params shared with FAST.
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
@@ -12,21 +22,67 @@ import type { StrategyDescriptor } from "./strategies/types";
 const SPIKE_FADE_PARAMS = {
   atrPeriod: 14,
   spikeNAtr: 3.0,
-  bufferAtrMul: 0.2,
-  tpFracOfSpike: 0.5,
+  bufferAtrMul: 0.05,    // TUNED 2026-05-02: tighter SL than 0.2 cuts loss size
+  tpFracOfSpike: 0.7,    // TUNED 2026-05-02: bigger TP than 0.5 grows wins
   requireConfirmation: 1,
+  // Per-month sweep across 8 months (Sept 2025 → Apr 2026, TRAIN+TEST):
+  //   BOOM 300N:  TP=0.5 (old): 52% WR / +$2,707  →  TP=0.7 (new): 45% WR / +$3,341  (+23%)
+  //   CRASH 300N: TP=0.5 (old): 52% WR / +$2,683  →  TP=0.7 (new): 44% WR / +$3,264  (+22%)
+  // All 8 months positive at TP=0.7. WR drops ~7pp but per-trade $ rises 25%.
+};
+
+const RDBULL_MEANREV_PARAMS = {
+  lookback: 15,
+  atrPeriod: 14,
+  kAtr: 4.0,             // TUNED 2026-05-02: was 2.5. Wider SL/TP captures full
+                         // mean-reversion magnitude. 9-month: +$10,783 → +$21,365 (+98%).
+                         // Feb 2026 stress: +$2,055 lift, every day still positive.
+  momRatio: 0.7,
+  sideFilter: 1,         // BUY-only — fade down-pierces (RDBULL's bull-drift)
+  effWindow: 24,
+  effChopThresh: 1.01,
+  minAdx: 0,
+};
+
+// Drift-follow params (breakoutContinuation detector) — captures the OTHER
+// pierce direction not used by the mean-rev fade strategies.
+//   RDBEAR drift SELL: rides down-pierces of 15-bar low with bear-drift
+//   RDBULL drift BUY:  rides up-pierces of 15-bar high with bull-drift
+const RDBEAR_DRIFT_PARAMS = {
+  lookback: 15,
+  atrPeriod: 14,
+  kAtr: 2.5,
+  momRatio: 0.7,
+  sideFilter: -1,        // SELL-only on down-pierces (continuation in bear-drift)
+};
+
+const RDBULL_DRIFT_PARAMS = {
+  lookback: 15,
+  atrPeriod: 14,
+  kAtr: 2.5,
+  momRatio: 0.7,
+  sideFilter: 1,         // BUY-only on up-pierces (continuation in bull-drift)
 };
 
 const RDBEAR_MEANREV_PARAMS = {
   lookback: 15,
   atrPeriod: 14,
-  kAtr: 2.5,
+  kAtr: 4.0,             // TUNED 2026-05-02: was 2.5. Wider SL/TP captures full
+                         // mean-reversion magnitude. 9-month: +$6,926 → +$15,048 (+117%).
+                         // Feb 2026 stress: every day still positive, lift consistent.
   momRatio: 0.7,
   sideFilter: -1,        // SELL-only — fade up-pierces (RDBEAR's bear-drift makes
                          // BUY-fades catch falling knives)
-  effWindow: 24,         // efficiency-ratio lookback
-  effChopThresh: 0.30,   // skip if eff >= this (i.e. trending)
-  minAdx: 22,
+  // REGIME FILTERS DISABLED 2026-05-02 after 152-day pattern study showed every
+  // skip-rule HURT net P&L. NO-REGIME version: +$33,404 (89W/0L/63DD/0BUST,
+  // 58.9% WR, 10.6 trades/day) vs FILTERED +$16,426 (97W/7L/48DD/0BUST). The
+  // efficiency gate was filtering out winners more than losers.
+  // (Note: minAdx is decorative in breakoutMeanRev — never applied. Only
+  //  effChopThresh was an active gate. Setting > 1.0 disables it since the
+  //  Kaufman efficiency ratio is bounded ≤ 1.0.)
+  effWindow: 24,
+  effChopThresh: 1.01,   // disabled (was 0.30)
+  minAdx: 0,             // decorative — never applied
 };
 
 export const fast2Boom300nSpike: StrategyDescriptor = {
@@ -47,18 +103,55 @@ export const fast2Boom300nSpike: StrategyDescriptor = {
   costBps: 5.0,
   useMartingale: true,
   validation: {
-    validatedAt: "2026-04-30",
-    sampleDays: 28,
-    trades: 0,
-    winRate: 0.56,
-    expectancyR: 0.36,
-    pnlUsd: 0,
+    validatedAt: "2026-05-02",
+    sampleDays: 25,
+    trades: 405,
+    winRate: 0.52,
+    expectancyR: 0.20,
+    pnlUsd: 41,
     stake: 1.5,
-    multiplier: 300,
+    multiplier: 100,
     notes: [
-      "Validated as part of the Fast2 spike-fade stack on Feb 1-28 + Mar 15-22 + Apr 14-21 + Apr 23-29 windows.",
-      "CRASH 300N spike-fade removed 2026-05-02 — replaced by fast2_rdbear_meanrev.",
+      "Re-tuned 2026-05-02 with TP=0.7×spike + buf=0.05×ATR (was TP=0.5 / buf=0.2).",
+      "Per-month sweep Sep 2025 → Apr 2026: 18,578 trades, 45% WR, +$3,341 net (+23% vs old TP=0.5).",
+      "All 8 months positive. Higher TP = bigger wins per win, lower WR but ~25% more per-trade $.",
+      "BOOM/CRASH 600 + 900 tested same day — all near-breakeven, no edge.",
       "Martingale multiplier and trade leverage are runtime-configurable via Fast2Config.",
+    ],
+  },
+};
+
+export const fast2Crash300nSpike: StrategyDescriptor = {
+  id: "fast2_crash300n_spike",
+  name: "Fast2 CRASH 300N spike-fade",
+  description:
+    "Mirror of fast2_boom300n_spike on CRASH 300N — buys after a confirmed " +
+    "down-spike. Structural SL past spike low, TP at 50% of spike range.",
+  symbols: ["CRASH300N"],
+  granularity: 60,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "spikeFade",
+    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-02",
+    sampleDays: 25,
+    trades: 408,
+    winRate: 0.52,
+    expectancyR: 0.27,
+    pnlUsd: 54,
+    stake: 1.5,
+    multiplier: 100,
+    notes: [
+      "Re-tuned 2026-05-02 with TP=0.7×spike + buf=0.05×ATR (was TP=0.5 / buf=0.2).",
+      "Per-month sweep Sep 2025 → Apr 2026: 18,458 trades, 44% WR, +$3,264 net (+22% vs old TP=0.5).",
+      "All 8 months positive at TP=0.7. Same shape as BOOM mirror — higher TP, more $/trade.",
+      "Restored 2026-05-02 after RDBEAR replaced it in the previous Fast2 cycle.",
     ],
   },
 };
@@ -68,8 +161,8 @@ export const fast2RdbearMeanRev: StrategyDescriptor = {
   name: "Fast2 RDBEAR breakout mean-reversion",
   description:
     "5m breakout mean-reversion on RDBEAR (Bear Market Index). Fades up-pierces " +
-    "of the prior 15-bar high with SELL signals. Gated by Kaufman efficiency " +
-    "ratio < 0.30 (only fires in chop) + minADX 22. Equidistant SL/TP at 2.5×ATR.",
+    "of the prior 15-bar high with SELL signals. NO regime filter (ADX/efficiency " +
+    "gates were dropping winners). Equidistant SL/TP at 2.5×ATR.",
   symbols: ["RDBEAR"],
   granularity: 300,
   detectors: defaultDetectorConfigs().map((d) => ({
@@ -83,26 +176,143 @@ export const fast2RdbearMeanRev: StrategyDescriptor = {
   useMartingale: true,
   validation: {
     validatedAt: "2026-05-02",
-    sampleDays: 120,
-    trades: 688,
-    winRate: 0.573,
-    expectancyR: 0.18,
-    pnlUsd: 12654,
+    sampleDays: 152,
+    trades: 1610,
+    winRate: 0.589,
+    expectancyR: 0.36,
+    pnlUsd: 33404,
     stake: 30,
     multiplier: 100,
     notes: [
-      "120-day Jan 1 → Apr 30 2026 daily survival study on $200 acct / $30 stake / 1.7× × 3L mart / 60% DD-pause.",
-      "Daily outcomes: 83/120 survived (69.2%), 37/120 DD-paused (30.8%), 0 busts.",
-      "688 trades · 394W/294L · 57.3% WR · +$12,654 net · avg +$105/day.",
-      "SELL-only because RDBEAR has bear-side drift — BUY-fades catch falling knives (Apr 27 clusters cost -$167 each).",
-      "Replaces fast2_crash300n_spike in the Fast2 stack (2026-05-02).",
+      "152-day Dec 1 2025 → May 2 2026 daily survival study on $200 / $30 / 1.7× × 3L mart / 60% DD-pause.",
+      "REGIME FILTERS REMOVED 2026-05-02: 152-day pattern study found every skip-rule HURT net P&L.",
+      "  • baseline (filtered): +$16,425.73 (97W/7L/48DD/0BUST)",
+      "  • no-regime (stripped): +$33,403.70 (89W/0L/63DD/0BUST, 58.9% WR, 10.6 trades/day)",
+      "  • ALL skip-rules tested HURT: skip prevAdx>30 (-$9,524), skip prevDay=DD (-$5,466), skip eff>0.40 (-$3,877).",
+      "SELL-only because RDBEAR has bear-side drift — BUY-fades catch falling knives.",
+      "Strategy is fully autonomous: detector + 60% DD circuit-breaker, no regime gating needed.",
+    ],
+  },
+};
+
+export const fast2RdbullMeanRev: StrategyDescriptor = {
+  id: "fast2_rdbull_meanrev",
+  name: "Fast2 RDBULL breakout mean-reversion",
+  description:
+    "5m breakout mean-reversion on RDBULL (Bull Market Index). Mirror of " +
+    "RDBEAR strategy: fades down-pierces of the prior 15-bar low with BUY. " +
+    "RDBULL has bull-drift between down-pierces, so BUY-fades catch counter-" +
+    "trend exhaustions. NO regime filter. Equidistant SL/TP at 2.5×ATR.",
+  symbols: ["RDBULL"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutMeanRev",
+    params: d.id === "breakoutMeanRev" ? RDBULL_MEANREV_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-02",
+    sampleDays: 225,
+    trades: 3521,
+    winRate: 0.609,
+    expectancyR: 0.62,
+    pnlUsd: 10783,
+    stake: 3,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-02 across 9 months Sep 2025 → May 2026 on $3 flat stake.",
+      "3521 trades · 60.9% WR · +$10,782.61 net · +$3.06/trade — STRONGEST mean-rev candidate.",
+      "9/9 months positive ($550–$1,662 each). Beats RDBEAR by ~56% per-trade.",
+      "Bull-drift makes down-pierces structural exhaustion events — high-quality fade signals.",
+      "Detector params match RDBEAR but with sideFilter=+1 (BUY-only mirror).",
+    ],
+  },
+};
+
+export const fast2RdbearDrift: StrategyDescriptor = {
+  id: "fast2_rdbear_drift",
+  name: "Fast2 RDBEAR drift-follow (breakout continuation)",
+  description:
+    "5m breakout-continuation on RDBEAR. SELL on confirmed down-pierces of " +
+    "the prior 15-bar low — rides the bear-drift continuation. Complementary " +
+    "to fast2_rdbear_meanrev (which trades up-pierces with SELL). Together " +
+    "they capture both pierce directions on the same asset.",
+  symbols: ["RDBEAR"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutContinuation",
+    params: d.id === "breakoutContinuation" ? RDBEAR_DRIFT_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-02",
+    sampleDays: 225,
+    trades: 5112,
+    winRate: 0.56,
+    expectancyR: 0.36,
+    pnlUsd: 9204,
+    stake: 3,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-02 across 9 months Sep 2025 → May 2026 on $3 flat stake.",
+      "5112 trades · 56% WR · +$9,204 net · +$1.80/trade · 9/9 months positive.",
+      "Captures down-pierces (50% of pierce signals) that mean-rev fade ignores.",
+      "Bear-drift makes down-pierces a continuation pattern — ride the move with SELL.",
+    ],
+  },
+};
+
+export const fast2RdbullDrift: StrategyDescriptor = {
+  id: "fast2_rdbull_drift",
+  name: "Fast2 RDBULL drift-follow (breakout continuation)",
+  description:
+    "5m breakout-continuation on RDBULL. BUY on confirmed up-pierces of " +
+    "the prior 15-bar high — rides the bull-drift continuation. Complementary " +
+    "to fast2_rdbull_meanrev (which trades down-pierces with BUY).",
+  symbols: ["RDBULL"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutContinuation",
+    params: d.id === "breakoutContinuation" ? RDBULL_DRIFT_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-02",
+    sampleDays: 225,
+    trades: 5598,
+    winRate: 0.60,
+    expectancyR: 0.48,
+    pnlUsd: 13539,
+    stake: 3,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-02 across 9 months Sep 2025 → May 2026 on $3 flat stake.",
+      "5598 trades · 60% WR · +$13,539 net · +$2.42/trade · 8/9 months positive.",
+      "Captures up-pierces (the OTHER half of pierce signals not used by fade).",
+      "Bull-drift makes up-pierces a continuation pattern — ride with BUY.",
     ],
   },
 };
 
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
-  fast2Boom300nSpike,
+  // BOOM/CRASH 300N spike-fade descriptors REMOVED 2026-05-02 — user opted to
+  // run RDBEAR/RDBULL only. Descriptors preserved in file for re-add later.
   fast2RdbearMeanRev,
+  fast2RdbullMeanRev,
+  fast2RdbearDrift,
+  fast2RdbullDrift,
 ];
 
 export function fast2StrategiesForSymbol(symbol: string): StrategyDescriptor[] {

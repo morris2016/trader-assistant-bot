@@ -92,18 +92,21 @@ export function resolveFastConfig(general: FastSandboxConfig, strategyId: string
  *  that has been making real money on paper. Fees baked in for realistic P&L. */
 export type Fast1Config = FastSandboxConfig;
 export const DEFAULT_FAST1_CONFIG: Fast1Config = {
-  tradeMultiplier: 30,
-  martingaleMultiplier: 2.2,
-  baseStake: 0.5,
-  maxLevels: 5,
-  perTradeCap: 30,
+  // Fast1 paper shadow of the R-stack — same params as Fast2 to enable a clean
+  // paper-vs-live comparison. liveTradingEnabled stays false here so all
+  // Fast1 trades land in the paper account.
+  tradeMultiplier: 100,
+  martingaleMultiplier: 1.0,
+  baseStake: 3,
+  maxLevels: 1,
+  perTradeCap: 100,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
   slSlippageBps: 5.0,
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
-  liveTradingEnabled: false,
+  liveTradingEnabled: false,    // PAPER ONLY — Fast1 is the paper shadow sandbox
 };
 
 /** Fast2 — same shape as Fast1. Defaults aligned to Deriv's actual contract
@@ -115,18 +118,22 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
  *  staying within the live-tradable range. */
 export type Fast2Config = FastSandboxConfig;
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
+  // R-stack live config — flat-stake $3, no martingale (validated config from
+  // 9-month sweep: mart was destroying edge; flat compounds linearly to +$94k/yr
+  // on $3 stake). User can re-enable mart via UI for higher growth at higher
+  // bust risk, but defaults are the safe validated path.
   tradeMultiplier: 100,
-  martingaleMultiplier: 1.7,
-  baseStake: 1.5,
-  maxLevels: 5,
-  perTradeCap: 30,
+  martingaleMultiplier: 1.0,    // flat stake — no mart
+  baseStake: 3,
+  maxLevels: 1,                  // no laddering
+  perTradeCap: 100,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
   slSlippageBps: 5.0,
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
-  liveTradingEnabled: false,
+  liveTradingEnabled: true,      // SHIPPED LIVE 2026-05-02 with validated R-stack
 };
 
 /** Deriv-valid multiplier values for BOOM/CRASH 300N MULTIPLIER contracts.
