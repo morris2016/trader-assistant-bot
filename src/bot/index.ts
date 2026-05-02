@@ -222,6 +222,10 @@ async function main() {
   const candlesSinceHeartbeat = new Map<string, number>();
   const newBarsSinceHeartbeat = new Map<string, number>();
   // Cumulative since startup — surfaced in /api/diag and Strategies panel.
+  // totalNewBarsByKey is primed with the seed-history length when subscribePair
+  // wires a stream, then incremented per closed bar. So `barsSeen` in the UI
+  // reflects the engine's full context (seeded + live), not just the bars
+  // that closed since boot.
   const totalCandlesByKey = new Map<string, number>();
   const totalNewBarsByKey = new Map<string, number>();
   // Per-strategy "I saw a bar from one of my symbols at this time" — fills the
@@ -745,6 +749,14 @@ async function main() {
         eng.seed(sym as SymbolCode, history);
         engines.set(key, eng);
         chartBuffers.set(key, [...history]);
+        // Prime the cumulative bars-seen counter with the seeded history so
+        // the Strategies UI reflects the engine's actual context, not just
+        // the bars that closed since boot. Without this, a 2-hour-old bot
+        // shows "bars seen: 25" on a 5m stream when the detector actually
+        // has 2025 bars of context (2000 seeded + 25 new). Use max() so a
+        // self-heal re-subscribe (which re-seeds the buffer) doesn't double
+        // the count or roll it backward.
+        totalNewBarsByKey.set(key, Math.max(totalNewBarsByKey.get(key) ?? 0, history.length));
         if (!tickedSymbols.has(sym)) {
           await deriv.subscribeTicks(sym as SymbolCode);
           tickedSymbols.add(sym);
