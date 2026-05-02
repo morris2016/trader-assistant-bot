@@ -7,10 +7,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
 import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast1Config, type FastMartingaleSnapshot, type FastPaperResp, type Signal, type StrategyStats } from "../api";
 
-// Deriv only accepts these multipliers for BOOM/CRASH 300N contracts.
-// Other values trigger ContractBuyValidationError on live trades. The
-// validated paper configs (30×) won't be reachable here anymore — closest
-// live-valid option is 20× or 40×.
+// Deriv only accepts these multipliers for synthetic-index multiplier
+// contracts. Other values trigger ContractBuyValidationError on live trades.
+// Validated paper configs at 30× snap to the closest live-valid option (20×
+// or 40×) when promoted live.
 const TRADE_MULT_OPTIONS = [20, 40, 60, 80, 100];
 const MART_MULT_OPTIONS = [1.5, 1.7, 2.0, 2.2, 2.5];
 const COMMISSION_OPTIONS = [

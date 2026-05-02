@@ -5,12 +5,12 @@ import { latestAtr } from "../indicators";
 /**
  * Trend Continuation detector — fires on bar close when the last `lookback`
  * closes are monotonically in the configured direction. Used by the fast-trade
- * sandbox to scalp drift on Boom/Crash synthetics where the underlying
- * synthetic spec has a deterministic drift between rare spikes.
+ * sandbox to scalp drift on synthetics with a deterministic drift between
+ * rare spikes.
  *
  * Params:
- *   • direction: 1 = BUY-only (drift up, e.g. CRASH500N), -1 = SELL-only
- *     (drift down, e.g. BOOM300N), 0 = both directions enabled
+ *   • direction: 1 = BUY-only (drift up), -1 = SELL-only (drift down),
+ *     0 = both directions enabled
  *   • lookback: number of consecutive same-direction closes required (default 1)
  *   • atrPeriod: ATR window (default 14)
  *   • atrTpMul: TP distance in ATR multiples (default 0.3 — tight TP since drift

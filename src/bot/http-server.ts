@@ -6,7 +6,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { BotState, Fast1Config, Fast2Config, SynthConfig } from "./storage";
+import type { BotState, Fast1Config, Fast2Config } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
@@ -30,10 +30,6 @@ export type ManualControls = {
   resetDaily: () => void;
   /** Reset paper trading state to a fresh balance. */
   resetPaper: (balance?: number) => void;
-  /** Reset SYNTH paper trading state (separate sandbox). */
-  resetSynthPaper: (balance?: number) => void;
-  /** Patch Synth runtime config (tradeMultiplier, martingaleMultiplier, fees, etc.). */
-  updateSynthConfig: (patch: Partial<SynthConfig>) => void;
   /** Reset fast-trade paper sandbox AND clear all per-strategy martingale ladders. */
   resetFastPaper: (balance?: number) => void;
   /** Patch Fast (sandbox 1) runtime config (tradeMultiplier, martingaleMultiplier, fees, etc.). */
@@ -112,7 +108,6 @@ export function startHttpServer(opts: {
    *  sandbox's strategy registry (sym + gr + detector). Lets the UI surface
    *  signals isolated per tab so an empty list = definitively no signal. */
   getRealRecentSignals: () => Signal[];
-  getSynthRecentSignals: () => Signal[];
   getFastRecentSignals: () => Signal[];
   getFast2RecentSignals: () => Signal[];
   getAdaptiveShiftDescription: () => string;
@@ -128,22 +123,13 @@ export function startHttpServer(opts: {
   /** Paper trading state + stats. */
   getPaperState: () => PaperState;
   getPaperStats: () => Record<string, number>;
-  /** Synth paper trading state + stats (separate sandbox). */
-  getSynthPaperState: () => PaperState;
-  getSynthPaperStats: () => Record<string, number>;
-  /** Per-strategy martingale ladder snapshot for the Synth sandbox. */
-  getSynthMartingale: () => Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }>;
-  /** Synth runtime config — leverage + martingale + fees. */
-  getSynthConfig: () => SynthConfig;
   /** Fast-trade sandbox paper state — own balance/trades/equity, isolated from
-   *  real-asset paper and synth-paper. Stake comes from per-strategy martingale
-   *  ladder rather than adaptive shift. */
+   *  real-asset paper. Stake comes from per-strategy martingale ladder rather
+   *  than adaptive shift. */
   getFastPaperState: () => PaperState;
   getFastPaperStats: () => Record<string, number>;
   /** Per-strategy martingale ladder snapshot, keyed by strategy id. */
   getFastMartingale: () => Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }>;
-  /** Per-strategy live stats for synth strategies. */
-  getSynthStrategyStats: () => StrategyStats[];
   /** Per-strategy live stats for fast-trade strategies. */
   getFastStrategyStats: () => StrategyStats[];
   /** Fast (sandbox 1) runtime config — leverage + martingale + fees. */
@@ -169,7 +155,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-synth-paper" || path0 === "/api/control/update-synth-config" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -177,38 +163,6 @@ export function startHttpServer(opts: {
           else if (path0 === "/api/control/reset-paper") {
             const balance = url.searchParams.get("balance");
             opts.manualControls.resetPaper(balance ? Number(balance) : undefined);
-          }
-          else if (path0 === "/api/control/reset-synth-paper") {
-            const balance = url.searchParams.get("balance");
-            opts.manualControls.resetSynthPaper(balance ? Number(balance) : undefined);
-          }
-          else if (path0 === "/api/control/update-synth-config") {
-            const patch: Partial<SynthConfig> = {};
-            const tm = url.searchParams.get("tradeMultiplier");
-            if (tm) patch.tradeMultiplier = Number(tm);
-            const mm = url.searchParams.get("martingaleMultiplier");
-            if (mm) patch.martingaleMultiplier = Number(mm);
-            const bs = url.searchParams.get("baseStake");
-            if (bs) patch.baseStake = Number(bs);
-            const ml = url.searchParams.get("maxLevels");
-            if (ml) patch.maxLevels = Number(ml);
-            const cap = url.searchParams.get("perTradeCap");
-            if (cap) patch.perTradeCap = Number(cap);
-            const cm = url.searchParams.get("commissionPct");
-            if (cm) patch.commissionPct = Number(cm);
-            const sp = url.searchParams.get("entrySpreadBps");
-            if (sp) patch.entrySpreadBps = Number(sp);
-            const slp = url.searchParams.get("slSlippageBps");
-            if (slp) patch.slSlippageBps = Number(slp);
-            const fm = url.searchParams.get("forceMartingale");
-            if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
-            const sf = url.searchParams.get("sideFilter");
-            if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
-            const mm2 = url.searchParams.get("martingaleMode");
-            if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
-            const lt = url.searchParams.get("liveTradingEnabled");
-            if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
-            opts.manualControls.updateSynthConfig(patch);
           }
           else if (path0 === "/api/control/reset-fast-paper") {
             const balance = url.searchParams.get("balance");
@@ -340,8 +294,8 @@ export function startHttpServer(opts: {
         if (path0 === "/api/signals") {
           // Real-strategy signals only. Per-sandbox isolation: this route
           // returns ONLY signals that matched a real-strategy registry entry
-          // (silver/gold/plat/pall/etc). Synth/fast/fast2 each have their
-          // own routes consulting their own buffers.
+          // (silver/gold/plat/pall/etc). Fast/fast2 each have their own
+          // routes consulting their own buffers.
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
           const sigs = opts.getRealRecentSignals().slice(-limit).reverse();
           json(res, 200, { signals: sigs });
@@ -403,52 +357,7 @@ export function startHttpServer(opts: {
           json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
           return;
         }
-        // ── Synth paper sandbox endpoints (RDBULL / JD100 / BOOM300N) ────
-        if (path0 === "/api/synth-paper") {
-          const ps = opts.getSynthPaperState();
-          const stats = opts.getSynthPaperStats();
-          json(res, 200, {
-            stats,
-            startingBalance: ps.startingBalance,
-            balance: ps.balance,
-            daily: ps.daily,
-            open: ps.open,
-            adaptiveShift: ps.adaptiveShift,
-            martingale: opts.getSynthMartingale(),
-            config: opts.getSynthConfig(),
-          });
-          return;
-        }
-        if (path0 === "/api/synth-config") {
-          json(res, 200, { config: opts.getSynthConfig() });
-          return;
-        }
-        if (path0 === "/api/synth-paper/trades") {
-          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 1000);
-          const ps = opts.getSynthPaperState();
-          json(res, 200, { trades: ps.closed.slice(0, limit) });
-          return;
-        }
-        if (path0 === "/api/synth-paper/equity") {
-          const ps = opts.getSynthPaperState();
-          json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
-          return;
-        }
-        if (path0 === "/api/synth-strategies") {
-          json(res, 200, {
-            strategies: opts.getSynthStrategyStats(),
-            martingale: opts.getSynthMartingale(),
-            config: opts.getSynthConfig(),
-          });
-          return;
-        }
-        if (path0 === "/api/synth-signals") {
-          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
-          const sigs = opts.getSynthRecentSignals().slice(-limit).reverse();
-          json(res, 200, { signals: sigs });
-          return;
-        }
-        // ── Fast-trade sandbox endpoints (CRASH500N + BOOM300N drift-fade) ──
+        // ── Fast-trade sandbox endpoints ─────────────────────────────────
         if (path0 === "/api/fast-paper") {
           const ps = opts.getFastPaperState();
           const stats = opts.getFastPaperStats();

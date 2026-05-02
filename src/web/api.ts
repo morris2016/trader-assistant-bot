@@ -42,8 +42,8 @@ export type RealTrade = {
   status: string;
   profit: number | null;
   detector: string;
-  /** Origin sandbox: "real" (default), "fast", "fast2", or "synth". */
-  sandbox?: "real" | "fast" | "fast2" | "synth";
+  /** Origin sandbox: "real" (default), "fast", or "fast2". */
+  sandbox?: "real" | "fast" | "fast2";
   sandboxStrategyId?: string;
   signalFiredAt?: number | null;
   signalEntry?: number | null;
@@ -169,17 +169,11 @@ export type FastSandboxConfig = {
   martingaleMode: "classic" | "anti";
   /** When true, this sandbox routes signals to LIVE trading (real money on
    *  Deriv) instead of paper. Sandbox-scoped — flipping Fast2 live keeps
-   *  Fast/Synth on paper. */
+   *  Fast on paper. */
   liveTradingEnabled: boolean;
 };
 export type Fast1Config = FastSandboxConfig;
 export type Fast2Config = FastSandboxConfig;
-export type SynthConfig = FastSandboxConfig;
-
-export type SynthPaperResp = PaperResp & {
-  martingale: Record<string, FastMartingaleSnapshot>;
-  config: SynthConfig;
-};
 
 export type FastPaperResp = {
   stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;
@@ -217,25 +211,8 @@ export const api = {
   paper: () => get<PaperResp>("/api/paper"),
   paperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/paper/trades?limit=${limit}`),
   paperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/paper/equity"),
-  // Synth sandbox — completely isolated paper-trading for the synth strategies.
-  // Now config-driven (leverage / martingale / fees) like Fast and Fast2.
-  synthPaper: () => get<SynthPaperResp>("/api/synth-paper"),
-  synthPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/synth-paper/trades?limit=${limit}`),
-  synthPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/synth-paper/equity"),
-  synthStrategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot>; config: SynthConfig }>("/api/synth-strategies"),
-  synthSignals: (limit = 100) => get<{ signals: Signal[] }>(`/api/synth-signals?limit=${limit}`),
-  synthConfig: () => get<{ config: SynthConfig }>("/api/synth-config"),
-  updateSynthConfig: (patch: Partial<SynthConfig>) => {
-    const p = new URLSearchParams();
-    for (const [k, v] of Object.entries(patch)) {
-      if (typeof v === "boolean") p.set(k, String(v));
-      else if (typeof v === "string") p.set(k, v);
-      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
-    }
-    return post<{ ok: boolean }>(`/api/control/update-synth-config?${p.toString()}`);
-  },
   // Fast-trade sandbox — own paper account, own martingale ladders, own
-  // strategy registry (CRASH500N + BOOM300N drift-fade scalping).
+  // strategy registry.
   fastPaper: () => get<FastPaperResp>("/api/fast-paper"),
   fastPaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/fast-paper/trades?limit=${limit}`),
   fastPaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/fast-paper/equity"),
@@ -303,7 +280,6 @@ export const api = {
   resetAdaptive: () => post<{ ok: boolean }>("/api/control/reset-adaptive"),
   resetDaily: () => post<{ ok: boolean }>("/api/control/reset-daily"),
   resetPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-paper${balance ? `?balance=${balance}` : ""}`),
-  resetSynthPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-synth-paper${balance ? `?balance=${balance}` : ""}`),
 };
 
 export function fmtTime(ms: number | null): string {

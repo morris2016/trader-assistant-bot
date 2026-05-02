@@ -5,10 +5,10 @@ import { latestAtr } from "../indicators";
 /**
  * Drift-Pullback detector — high-WR mean-reversion designed for martingale.
  *
- * Pattern: on assets with structural drift (BOOM = down-drift, CRASH = up-drift,
- * RDBULL = up-drift), a pullback against drift is a buying opportunity into
- * the dominant direction. After `consec` consecutive bars closing AGAINST
- * drift, fade back INTO drift direction.
+ * Pattern: on assets with structural drift (CRASH = up-drift, RDBULL =
+ * up-drift, RDBEAR = down-drift), a pullback against drift is a buying
+ * opportunity into the dominant direction. After `consec` consecutive bars
+ * closing AGAINST drift, fade back INTO drift direction.
  *
  * Levels are EQUIDISTANT at K × ATR around entry — TP and SL the same
  * distance from close. This is intentional: martingale doubling on each
@@ -18,17 +18,15 @@ import { latestAtr } from "../indicators";
  *
  * Validated 2026-04-30 via 31-day historical Deriv backtest, scored by
  * martingale-cycle expectancy:
- *   • BOOM300N 5m (consec=3, kAtr=1.0): 431 trades / 31.2d, WR 60%, RR 1.00,
- *     bust 1.04%, cycle EV +$0.28, daily EV +$2.30 at $0.50 base stake.
  *   • CRASH300N 5m (consec=3, kAtr=1.0, drift=up): 454 trades / 31.2d, WR 59%,
  *     RR 1.00, bust 1.19%, cycle EV +$0.24, daily EV +$2.11.
- * Both stable across both halves of the 31-day window.
+ * Stable across both halves of the 31-day window.
  */
 export const driftPullback: Detector = {
   id: "driftPullback",
   label: "Drift Pullback",
   defaultParams: {
-    driftDirection: 0,    // 1 = up-drift (CRASH/RDBULL), -1 = down-drift (BOOM)
+    driftDirection: 0,    // 1 = up-drift (CRASH/RDBULL), -1 = down-drift (RDBEAR)
     consec: 3,            // require this many consecutive against-drift closes
     atrPeriod: 14,
     kAtr: 1.0,            // equidistant SL/TP at K × ATR (R:R = 1:1)

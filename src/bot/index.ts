@@ -15,7 +15,6 @@ import { Engine, defaultDetectorConfigs } from "../main/engine/runner";
 import { RealEngine } from "../main/engine/real";
 import { STRATEGIES } from "../main/engine/strategies";
 import { strategiesForSymbol } from "../main/engine/strategies";
-import { SYNTH_STRATEGIES, isSynthSymbol, synthStrategiesForSymbol } from "../main/engine/synth-strategies";
 import { FAST_STRATEGIES, isFastSymbol, fastStrategiesForSymbol } from "../main/engine/fast-strategies";
 import { FAST2_STRATEGIES } from "../main/engine/fast2-strategies";
 import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
@@ -23,7 +22,7 @@ import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_SYNTH_CONFIG, DERIV_BOOMCRASH_MULTIPLIERS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type SynthConfig } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -48,22 +47,16 @@ async function main() {
       getAccount: () => null,
       getRecentSignals: () => [],
       getRealRecentSignals: () => [],
-      getSynthRecentSignals: () => [],
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetSynthPaper: () => {}, updateSynthConfig: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
       getSubscriptions: () => [],
       getPaperState: () => emptyPaperState(),
       getPaperStats: () => ({}),
-      getSynthPaperState: () => emptyPaperState(),
-      getSynthPaperStats: () => ({}),
-      getSynthMartingale: () => ({}),
-      getSynthConfig: () => ({ ...DEFAULT_SYNTH_CONFIG }),
-      getSynthStrategyStats: () => [],
       getFastPaperState: () => emptyPaperState(),
       getFastPaperStats: () => ({}),
       getFastMartingale: () => ({}),
@@ -85,7 +78,6 @@ async function main() {
   log.info("bot starting", {
     config: describeConfig(cfg),
     strategies: STRATEGIES.map((s) => s.id),
-    synthStrategies: SYNTH_STRATEGIES.map((s) => s.id),
     fastStrategies: FAST_STRATEGIES.map((s) => s.id),
     fast2Strategies: FAST2_STRATEGIES.map((s) => s.id),
   });
@@ -100,35 +92,6 @@ async function main() {
     persisted.paper = emptyPaperState(cfg.paperStartingBalance);
   }
   const paper = new PaperEngine(persisted.paper);
-
-  // Synth-strategies sandbox — completely isolated from real-asset paper. Same
-  // PaperEngine class, distinct PaperState. Lets us live-paper RDBULL/JD100/BOOM300N
-  // before deciding whether to wire them into RealEngine.
-  if (persisted.synthPaper.startingBalance !== cfg.paperStartingBalance && persisted.synthPaper.closed.length === 0 && persisted.synthPaper.open.length === 0) {
-    log.info("synthPaper: seeding fresh state", { startingBalance: cfg.paperStartingBalance });
-    persisted.synthPaper = emptyPaperState(cfg.paperStartingBalance);
-  }
-  const synthPaper = new PaperEngine(persisted.synthPaper);
-  // Synth runtime config — same shape as Fast/Fast2, replaces the previous
-  // hardcoded use of cfg.stake / cfg.multiplier in the synth path. Drives
-  // leverage, optional martingale ladder, base stake, and Deriv-fee model.
-  const synthMartingale: Record<string, MartingaleState> = { ...persisted.synthMartingale };
-  for (const s of SYNTH_STRATEGIES) {
-    if (!synthMartingale[s.id]) synthMartingale[s.id] = emptyMartingaleState();
-  }
-  let synthConfig: SynthConfig = { ...DEFAULT_SYNTH_CONFIG, ...persisted.synthConfig };
-  const synthMartingaleParams = (): MartingaleParams => ({
-    baseStake: synthConfig.baseStake,
-    multiplier: synthConfig.martingaleMultiplier,
-    maxLevels: synthConfig.maxLevels,
-    perTradeCap: synthConfig.perTradeCap,
-  });
-  log.info("synthPaper: state loaded", {
-    balance: synthPaper.getState().balance,
-    closed: synthPaper.getState().closed.length,
-    config: synthConfig,
-    martingale: Object.fromEntries(SYNTH_STRATEGIES.map((s) => [s.id, synthMartingale[s.id]])),
-  });
 
   // Fast-trade sandbox — own paper account ($200 starting, smaller because
   // martingale needs less headroom). Stake comes from per-strategy martingale
@@ -224,9 +187,8 @@ async function main() {
   real.loadAdaptiveShift(persisted.adaptiveShift);
   real.setCaps(cfg.stake, cfg.dailyMaxLoss);
   // Production safety: price-tolerance gate before any live placeTrade. 5bps
-  // (0.05% of price) is a conservative default for 1m synthetic strategies —
-  // a 1.5-tick BOOM/CRASH 300N move at typical price ~$1300 = ~$0.65 / $1300
-  // ≈ 5bps. Set via env DERIV_PRICE_TOL_BPS to override (0 disables).
+  // (0.05% of price) is a conservative default for 1m synthetic strategies.
+  // Set via env DERIV_PRICE_TOL_BPS to override (0 disables).
   const priceTolBps = Number(process.env.DERIV_PRICE_TOL_BPS ?? 5);
   real.setPriceTolerance(priceTolBps / 10000);
 
@@ -242,13 +204,10 @@ async function main() {
   const SIGNAL_HISTORY = 200;
   // Per-sandbox signal buffers — each only gets signals that matched a
   // strategy in THAT sandbox's registry (by sym + gr + detector tuple). Lets
-  // the UI show "what signals would have routed here?" definitively, so an
-  // empty list in the Synth tab means "no synth signal fired", not "synth
-  // fired but got filtered out as a fast/real signal." A single signal can
-  // appear in multiple buffers if multiple sandboxes share its (sym,gr,det)
-  // tuple — e.g. spike-fade on BOOM300N@60 routes to both Fast and Fast2.
+  // the UI show "what signals would have routed here?" definitively. A
+  // single signal can appear in multiple buffers if multiple sandboxes
+  // share its (sym,gr,det) tuple.
   const realRecentSignals: Signal[] = [];
-  const synthRecentSignals: Signal[] = [];
   const fastRecentSignals: Signal[] = [];
   const fast2RecentSignals: Signal[] = [];
   const pushBounded = (buf: Signal[], sig: Signal) => {
@@ -293,9 +252,6 @@ async function main() {
       daily: s.daily,
       adaptiveShift: real.getAdaptiveShift(),
       paper: paper.getState(),
-      synthPaper: synthPaper.getState(),
-      synthMartingale,
-      synthConfig,
       fastPaper: fastPaper.getState(),
       fastMartingale,
       fast1Config,
@@ -306,7 +262,6 @@ async function main() {
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
   paper.onChange(() => persist());
-  synthPaper.onChange(() => persist());
   fastPaper.onChange(() => persist());
   fast2Paper.onChange(() => persist());
 
@@ -372,7 +327,6 @@ async function main() {
     getAccount: () => account,
     getRecentSignals: () => recentSignals,
     getRealRecentSignals: () => realRecentSignals,
-    getSynthRecentSignals: () => synthRecentSignals,
     getFastRecentSignals: () => fastRecentSignals,
     getFast2RecentSignals: () => fast2RecentSignals,
     getAdaptiveShiftDescription: () => real.describeAdaptiveShift(),
@@ -382,32 +336,6 @@ async function main() {
       resetAdaptiveShift: () => { real.loadAdaptiveShift(emptyAdaptiveShiftState()); persist(); log.warn("adaptive shift state reset via API"); },
       resetDaily: () => { real.resetDaily(); persist(); log.warn("daily P&L reset via API"); },
       resetPaper: (balance?: number) => { paper.reset(balance ?? cfg.paperStartingBalance); log.warn(`paper reset via API to $${(balance ?? cfg.paperStartingBalance).toFixed(2)}`); },
-      resetSynthPaper: (balance?: number) => {
-        const newBal = balance ?? cfg.paperStartingBalance;
-        synthPaper.reset(newBal);
-        for (const sId of Object.keys(synthMartingale)) synthMartingale[sId] = emptyMartingaleState();
-        persist();
-        log.warn(`synthPaper reset via API to $${newBal.toFixed(2)} — all martingale ladders cleared`);
-      },
-      updateSynthConfig: (patch: Partial<SynthConfig>) => {
-        const before = { ...synthConfig };
-        const next: SynthConfig = { ...synthConfig, ...patch };
-        if (!isFinite(next.tradeMultiplier) || next.tradeMultiplier <= 0) next.tradeMultiplier = before.tradeMultiplier;
-        if (!isFinite(next.martingaleMultiplier) || next.martingaleMultiplier <= 1) next.martingaleMultiplier = before.martingaleMultiplier;
-        if (!isFinite(next.baseStake) || next.baseStake <= 0) next.baseStake = before.baseStake;
-        if (!isFinite(next.maxLevels) || next.maxLevels < 1) next.maxLevels = before.maxLevels;
-        if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
-        if (!isFinite(next.commissionPct) || next.commissionPct < 0) next.commissionPct = before.commissionPct;
-        if (!isFinite(next.entrySpreadBps) || next.entrySpreadBps < 0) next.entrySpreadBps = before.entrySpreadBps;
-        if (!isFinite(next.slSlippageBps) || next.slSlippageBps < 0) next.slSlippageBps = before.slSlippageBps;
-        if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
-        if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
-        if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
-        if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
-        synthConfig = next;
-        persist();
-        log.warn("synthConfig updated via API", { before, after: next });
-      },
       resetFastPaper: (balance?: number) => {
         const newBal = balance ?? 200;
         fastPaper.reset(newBal);
@@ -472,7 +400,7 @@ async function main() {
         // valid Deriv-accepted values so live placeTrade can never reject.
         const clampedMult = clampDerivMultiplier(next.tradeMultiplier);
         if (clampedMult !== next.tradeMultiplier) {
-          log.warn(`fast2Config tradeMultiplier ${next.tradeMultiplier}× snapped to Deriv-valid ${clampedMult}× (accepts: ${DERIV_BOOMCRASH_MULTIPLIERS.join(",")})`);
+          log.warn(`fast2Config tradeMultiplier ${next.tradeMultiplier}× snapped to Deriv-valid ${clampedMult}× (accepts: ${DERIV_MULTIPLIER_OPTIONS.join(",")})`);
           next.tradeMultiplier = clampedMult;
         }
         if (next.baseStake < DERIV_MIN_STAKE_USD) {
@@ -637,25 +565,6 @@ async function main() {
     }),
     getPaperState: () => paper.getState(),
     getPaperStats: () => paper.stats() as unknown as Record<string, number>,
-    getSynthPaperState: () => synthPaper.getState(),
-    getSynthPaperStats: () => synthPaper.stats() as unknown as Record<string, number>,
-    getSynthMartingale: () => {
-      const params = synthMartingaleParams();
-      return Object.fromEntries(
-        SYNTH_STRATEGIES.map((s) => {
-          const m = synthMartingale[s.id] ?? emptyMartingaleState();
-          return [s.id, {
-            level: m.level,
-            wins: m.wins,
-            losses: m.losses,
-            circuitBreakers: m.circuitBreakers,
-            lastCircuitBreakerAt: m.lastCircuitBreakerAt,
-            nextStake: fastNextStake(m, params),
-          }];
-        }),
-      );
-    },
-    getSynthConfig: () => ({ ...synthConfig }),
     getFastPaperState: () => fastPaper.getState(),
     getFastPaperStats: () => fastPaper.stats() as unknown as Record<string, number>,
     getFastMartingale: () => {
@@ -710,41 +619,11 @@ async function main() {
         engine: eng.diagnose(sym as SymbolCode),
       };
     }),
-    getSynthStrategyStats: () => {
-      const sigs = recentSignals;
-      return SYNTH_STRATEGIES.map((s) => {
-        const detIds = s.detectors.filter((d) => d.enabled).map((d) => d.id);
-        const sSyms = new Set(s.symbols);
-        const sigsForStrat = sigs.filter((sg) => sSyms.has(sg.symbol) && detIds.includes(sg.detector));
-        const closed = synthPaper.getState().closed;
-        const tradesForStrat = closed.filter((t) => sSyms.has(t.symbol) && detIds.includes(t.detector));
-        const wins = tradesForStrat.filter((t) => t.pnl > 0).length;
-        const pnl = tradesForStrat.reduce((acc, t) => acc + t.pnl, 0);
-        let barsSeen = 0;
-        for (const sym of s.symbols) {
-          barsSeen += totalNewBarsByKey.get(`${sym}|${s.granularity}`) ?? 0;
-        }
-        return {
-          id: s.id, name: s.name, description: s.description, symbols: s.symbols, granularity: s.granularity,
-          validation: { expectancyR: s.validation?.expectancyR, winRate: s.validation?.winRate, pnlUsd: s.validation?.pnlUsd, trades: s.validation?.trades },
-          live: {
-            signals: sigsForStrat.length, trades: tradesForStrat.length, wins, losses: tradesForStrat.length - wins,
-            pnlUsd: pnl, winRate: tradesForStrat.length ? wins / tradesForStrat.length : 0, expectancyR: 0,
-            lastSignalAt: sigsForStrat.length ? Math.max(...sigsForStrat.map((sg) => sg.ts)) : null,
-            lastTradeAt: tradesForStrat.length ? Math.max(...tradesForStrat.map((t) => t.closedAt ?? 0)) : null,
-            barsSeen,
-            lastBarSeenAt: strategyLastBarSeenAt.get(s.id) ?? null,
-          },
-        };
-      });
-    },
     getFastStrategyStats: () => {
       const sigs = recentSignals;
       return FAST_STRATEGIES.map((s) => {
         const detIds = s.detectors.filter((d) => d.enabled).map((d) => d.id);
         const sSyms = new Set(s.symbols);
-        // Match BOTH symbol and granularity to disambiguate from SYNTH_STRATEGIES
-        // (BOOM300N is in both registries on different timeframes).
         const sigsForStrat = sigs.filter((sg) => sSyms.has(sg.symbol) && detIds.includes(sg.detector));
         const closed = fastPaper.getState().closed.filter((t) => sSyms.has(t.symbol) && t.granularity === s.granularity && detIds.includes(t.detector));
         const wins = closed.filter((t) => t.pnl > 0).length;
@@ -798,7 +677,7 @@ async function main() {
   });
 
   // Build the per-(sym, gr) engine detector config by merging every strategy
-  // (real + synth) that runs on this key. Each detector starts disabled with
+  // (real + fast + fast2) that runs on this key. Each detector starts disabled with
   // default params; for each matching strategy, any detector that strategy
   // enables is copied in with that strategy's validated params and flipped on.
   // Handles the gold_ob + gold_fvg case where two strategies share
@@ -809,7 +688,6 @@ async function main() {
     const merged = defaultDetectorConfigs().map((d) => ({ ...d, enabled: false }));
     const matches = [
       ...STRATEGIES.filter((s) => s.symbols.includes(sym as SymbolCode) && s.granularity === gr),
-      ...SYNTH_STRATEGIES.filter((s) => s.symbols.includes(sym) && s.granularity === gr),
       ...FAST_STRATEGIES.filter((s) => s.symbols.includes(sym) && s.granularity === gr),
       ...FAST2_STRATEGIES.filter((s) => s.symbols.includes(sym) && s.granularity === gr),
     ];
@@ -834,7 +712,6 @@ async function main() {
   function expectedPairs(): Set<string> {
     const pairs = new Set<string>();
     for (const s of STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
-    for (const s of SYNTH_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
     for (const s of FAST_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
     for (const s of FAST2_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
     return pairs;
@@ -976,38 +853,6 @@ async function main() {
     for (const c of settled) {
       log.info(`paper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${paper.getState().balance.toFixed(2)}`);
     }
-    // Settle synth paper positions (separate sandbox).
-    const settledSynth = synthPaper.onCandle(symbol, granularity, candle);
-    for (const c of settledSynth) {
-      const synthStrat = SYNTH_STRATEGIES.find((s) => s.symbols.includes(c.symbol) && s.granularity === c.granularity);
-      if (synthStrat) {
-        const before = synthMartingale[synthStrat.id] ?? emptyMartingaleState();
-        const martingaleActive = synthStrat.useMartingale || synthConfig.forceMartingale;
-        if (martingaleActive) {
-          const params = synthMartingaleParams();
-          const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, c.pnl, params, Date.now(), synthConfig.martingaleMode);
-          synthMartingale[synthStrat.id] = nextLadder;
-          const forced = !synthStrat.useMartingale && synthConfig.forceMartingale ? " FORCED" : "";
-          const modeTag = synthConfig.martingaleMode === "anti" ? " ANTI" : "";
-          log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)} strategy=${synthStrat.id} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag}${forced} MULT=${synthConfig.tradeMultiplier}×${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
-          if (circuitBreakerFired) {
-            log.warn(`synth martingale circuit-breaker fired for ${synthStrat.id}: ladder reset after ${params.maxLevels} ${synthConfig.martingaleMode === "anti" ? "wins" : "losses"}`);
-          }
-        } else {
-          synthMartingale[synthStrat.id] = {
-            ...before,
-            wins: before.wins + (c.pnl > 0 ? 1 : 0),
-            losses: before.losses + (c.pnl > 0 ? 0 : 1),
-            level: 0,
-            cumulativeSinceReset: 0,
-          };
-          log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)} strategy=${synthStrat.id} W=${synthMartingale[synthStrat.id].wins} L=${synthMartingale[synthStrat.id].losses} (no martingale)`);
-        }
-        persist();
-      } else {
-        log.info(`synthPaper settled ${c.symbol} ${c.side} ${c.result} pnl=$${c.pnl.toFixed(2)} R=${c.rMultiple.toFixed(2)} balance=$${synthPaper.getState().balance.toFixed(2)} (no matching synth strategy)`);
-      }
-    }
     // Settle fast-trade paper positions and advance the martingale ladder for
     // each settled position. The martingale state is per-strategy keyed off
     // the FAST_STRATEGIES (sym, gr) match; if a settled position can't be
@@ -1101,11 +946,6 @@ async function main() {
           strategyLastBarSeenAt.set(s.id, now);
         }
       }
-      for (const s of SYNTH_STRATEGIES) {
-        if (s.symbols.includes(symbol) && s.granularity === granularity) {
-          strategyLastBarSeenAt.set(s.id, now);
-        }
-      }
       for (const s of FAST_STRATEGIES) {
         if (s.symbols.includes(symbol) && s.granularity === granularity) {
           strategyLastBarSeenAt.set(s.id, now);
@@ -1141,20 +981,17 @@ async function main() {
       if (recentSignals.length > SIGNAL_HISTORY) recentSignals.splice(0, recentSignals.length - SIGNAL_HISTORY);
       // Per-sandbox routing: push the signal into every sandbox's buffer
       // whose strategy registry contains a matching (sym, gr, detector)
-      // tuple. A signal can land in multiple buffers (e.g. spike-fade on
-      // BOOM300N@60 → Fast AND Fast2 both consume it), and zero buffers if
+      // tuple. A signal can land in multiple buffers, and zero buffers if
       // it's an orphan — useful diagnostic in itself.
       const sym = sig.symbol;
       const det = sig.detector;
       const matchedReal  = STRATEGIES.some((s) => s.symbols.includes(sym as SymbolCode) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
-      const matchedSynth = SYNTH_STRATEGIES.some((s) => s.symbols.includes(sym) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
       const matchedFast  = FAST_STRATEGIES.some((s) => s.symbols.includes(sym) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
       const matchedFast2 = FAST2_STRATEGIES.some((s) => s.symbols.includes(sym) && s.granularity === granularity && s.detectors.some((d) => d.id === det && d.enabled));
       if (matchedReal)  pushBounded(realRecentSignals, sig);
-      if (matchedSynth) pushBounded(synthRecentSignals, sig);
       if (matchedFast)  pushBounded(fastRecentSignals, sig);
       if (matchedFast2) pushBounded(fast2RecentSignals, sig);
-      if (!matchedReal && !matchedSynth && !matchedFast && !matchedFast2) {
+      if (!matchedReal && !matchedFast && !matchedFast2) {
         log.warn("signal landed in no sandbox buffer", { symbol: sym, granularity, detector: det, action: sig.action });
       }
       executeSignal(sig, candle, key, granularity).catch((e) => log.error("execute failed", { err: (e as Error).message }));
@@ -1185,9 +1022,7 @@ async function main() {
 
     // Fast-trade sandbox: signals from the trendContinuation detector on
     // FAST_STRATEGIES (sym, gr) pairs are routed to fastPaper with martingale
-    // stake. Disambiguate from SYNTH_STRATEGIES by matching BOTH symbol and
-    // granularity — BOOM300N is in both registries (1h synth, 1m fast), only
-    // the (sym, gr) tuple is unique.
+    // stake.
     const fastMatch = FAST_STRATEGIES.find((s) =>
       s.symbols.includes(sig.symbol) &&
       s.granularity === granularity &&
@@ -1394,72 +1229,6 @@ async function main() {
 
     if (handledFast || handledFast2) return;
 
-    // Synth signals always paper-trade via synthPaper (never live, never via real bot).
-    if (isSynthSymbol(sig.symbol)) {
-      const synthCandidates = synthStrategiesForSymbol(sig.symbol)
-        .filter((s) => s.detectors.some((d) => d.id === sig.detector && d.enabled));
-      const synthMatches = synthCandidates.filter(passesStrategyFilters);
-      if (synthMatches.length === 0) {
-        // Promote to info so operators can see why a synth signal didn't trade
-        // without enabling debug logging.
-        log.info("synth signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, detector: sig.detector, adx, candidates: synthCandidates.map((s) => s.id) });
-        return;
-      }
-      // Sandbox-level side filter — applies to every synth strategy regardless
-      // of the per-strategy buyOnly/sellOnly. Lets the operator disable a side
-      // from the UI without redeploying.
-      if (synthConfig.sideFilter !== "both" && synthConfig.sideFilter !== sig.action) {
-        log.info("synth signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, sideFilter: synthConfig.sideFilter, candidates: synthMatches.map((s) => s.id) });
-        return;
-      }
-      // Don't pile on: validation used one-position-at-a-time. The FVG detector
-      // can emit multiple signals on the same bar (stacked FVGs) and new bars
-      // can fire while a prior position is still open — both would multiply
-      // exposure 3-10x vs the validated config.
-      const synthAlreadyOpen = synthPaper.getState().open.some((p) => p.symbol === sig.symbol && p.side === sig.action);
-      if (synthAlreadyOpen) {
-        log.info("synth signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action });
-        return;
-      }
-      const synthMatch = synthMatches[0];
-      const ladder = synthMartingale[synthMatch.id] ?? emptyMartingaleState();
-      const params = synthMartingaleParams();
-      const martingaleActive = synthMatch.useMartingale || synthConfig.forceMartingale;
-      const stake = martingaleActive
-        ? fastNextStake(ladder, params)
-        : params.baseStake;
-      const pos = synthPaper.openPosition({
-        signalId: sig.id,
-        symbol: sig.symbol,
-        side: sig.action,
-        detector: sig.detector,
-        entryPrice: entryPriceHint,
-        atr,
-        atrTpMult: synthMatch.atrTpMult,
-        atrSlMult: synthMatch.atrSlMult,
-        // Synth uses the user-selected leverage from synthConfig rather than
-        // the bot-wide cfg.multiplier — same pattern as Fast/Fast2.
-        multiplier: synthConfig.tradeMultiplier,
-        granularity,
-        candleEpoch: candle.epoch,
-        baseStake: params.baseStake,
-        minStake: 0.5,
-        nowMs: Date.now(),
-        signalStopPrice: sig.stopPrice,
-        signalTargetPrice: sig.targetPrice,
-        stakeOverride: stake,
-        commissionPct: synthConfig.commissionPct,
-        entrySpreadFrac: synthConfig.entrySpreadBps / 10000,
-        slSlippageFrac: synthConfig.slSlippageBps / 10000,
-      });
-      if (pos) {
-        log.info(`synthPaper opened ${pos.symbol} ${pos.side} strategy=${synthMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${synthConfig.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
-      } else {
-        log.warn(`synthPaper open rejected ${sig.symbol} ${sig.action} strategy=${synthMatch.id} (atr=${atr}, balance=$${synthPaper.getState().balance.toFixed(2)}, stake=$${stake.toFixed(2)}, signalSL=${sig.stopPrice ?? "none"}, signalTP=${sig.targetPrice ?? "none"})`);
-      }
-      return;
-    }
-
     // Match signal to a registered strategy on this symbol — only those gate trades.
     // Apply strategy descriptor filters too (buyOnly/sellOnly/minAdx/maxAdx).
     const candidates = strategiesForSymbol(sig.symbol)
@@ -1591,8 +1360,7 @@ async function main() {
         // Hydrate open + closed contract history from Deriv. Local persistence
         // is wiped on Railway redeploys (ephemeral state dir), so without
         // this the Fast2 panel would show empty history after every push.
-        // BOOM/CRASH 300N MULTIPLIER contracts are tagged sandbox="fast2"
-        // since that's the only path the bot uses for those symbols.
+        // CRASH 300N MULTIPLIER contracts are tagged sandbox="fast2".
         try {
           const res = await real.restoreFromDeriv(100);
           if (res.openImported > 0 || res.closedImported > 0) {
@@ -1654,7 +1422,6 @@ async function main() {
     lastHeartbeatMs = Date.now();
     const realState = real.state();
     const paperState = paper.getState();
-    const synthState = synthPaper.getState();
     const fastState = fastPaper.getState();
     const fast2State = fast2Paper.getState();
     const realBalance = account?.balance ?? 0;
@@ -1700,13 +1467,6 @@ async function main() {
       paperBalance: paperState.balance,
       paperOpenTrades: paperState.open.length,
       paperClosedTrades: paperState.closed.length,
-      synthPaperBalance: synthState.balance,
-      synthPaperOpenTrades: synthState.open.length,
-      synthPaperClosedTrades: synthState.closed.length,
-      synthMartingaleLevel: Object.fromEntries(
-        SYNTH_STRATEGIES.map((s) => [s.id, synthMartingale[s.id]?.level ?? 0]),
-      ),
-      synthConfig,
       fastPaperBalance: fastState.balance,
       fastPaperOpenTrades: fastState.open.length,
       fastPaperClosedTrades: fastState.closed.length,
@@ -1818,7 +1578,7 @@ async function main() {
       fast2DDPaused = true;
       // Force fast2 sideFilter to a side that BOTH excludes (a poor man's
       // disable). Operator must reset sideFilter and DD-paused flag from UI.
-      // Note: this only pauses Fast2 — Fast/Synth/Real keep running.
+      // Note: this only pauses Fast2 — Fast/Real keep running.
     }
     if (fast2DDPaused) {
       // Persistent log nudge so the operator notices.

@@ -6,9 +6,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
 import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast2Config, type Fast2PaperResp, type FastMartingaleSnapshot, type RealTrade, type Signal, type StateResp, type StrategyStats } from "../api";
 
-// Deriv contract constraints for BOOM/CRASH 300N MULTIPLIER contracts.
-// Source: Deriv contracts_for API response. Anything outside these ranges
-// is rejected by the live buy endpoint with ContractBuyValidationError.
+// Deriv multiplier contract constraints. Source: Deriv contracts_for API
+// response. Anything outside these ranges is rejected by the live buy
+// endpoint with ContractBuyValidationError.
 const TRADE_MULT_OPTIONS = [20, 40, 60, 80, 100];
 const DERIV_MIN_STAKE = 1;       // USD — minimum stake per multiplier contract
 const DERIV_MAX_STAKE = 2000;    // USD — maximum stake (Deriv default ceiling)
@@ -223,7 +223,7 @@ export function Fast2Panel({ state, doAction, pending }: {
         </div>
       )}
       <div className="banner" style={{ marginBottom: 12 }}>
-        <strong>Fast2 Sandbox</strong> — {paper.config.liveTradingEnabled ? "live mode (real Deriv multipliers)" : "paper-only"}. 3-strategy stack: BOOM 300N spike-fade (1m) + CRASH 300N spike-fade (1m) + CRASH 300N drift-pullback (5m).
+        <strong>Fast2 Sandbox</strong> — {paper.config.liveTradingEnabled ? "live mode (real Deriv multipliers)" : "paper-only"}. 4-strategy R-stack: RDBEAR + RDBULL × (mean-rev fade + drift-follow), all 5m.
         Runtime-configurable trade leverage and martingale multiplier.
         Currently running at <strong>MULT={paper.config.tradeMultiplier}× · martingale={paper.config.martingaleMultiplier}×</strong> on a ${paper.startingBalance.toFixed(0)} starting balance.
       </div>
@@ -263,7 +263,7 @@ export function Fast2Panel({ state, doAction, pending }: {
 
       <h3 className="section-title">Configuration</h3>
       <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
-        Deriv constraints (BOOM/CRASH 300N MULTIPLIER): leverage ∈ {`{${TRADE_MULT_OPTIONS.join(", ")}}`}× · stake ∈ ${DERIV_MIN_STAKE}–${DERIV_MAX_STAKE}. Out-of-range values are auto-snapped on Apply.
+        Deriv multiplier-contract constraints: leverage ∈ {`{${TRADE_MULT_OPTIONS.join(", ")}}`}× · stake ∈ ${DERIV_MIN_STAKE}–${DERIV_MAX_STAKE}. Out-of-range values are auto-snapped on Apply.
       </div>
       <div className="card" style={{ marginBottom: 16, padding: 16 }}>
         <div className="grid grid-3" style={{ gap: 12, marginBottom: 12 }}>

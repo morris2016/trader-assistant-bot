@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { api, fmtTime, type RealTrade, type ClosedPaperPosition } from "../api";
+import { api, fmtTime, type RealTrade } from "../api";
 
 type UnifiedTrade = {
-  source: "real" | "synth";
   id: string;
   closedAt: number | null;
   openedAt: number;
@@ -12,13 +11,11 @@ type UnifiedTrade = {
   stake: number;
   pnl: number | null;
   status: string; // "won" / "lost" / "open" / etc.
-  // raw payload for the expand panel
-  raw: RealTrade | ClosedPaperPosition;
+  raw: RealTrade;
 };
 
 function normaliseReal(t: RealTrade): UnifiedTrade {
   return {
-    source: "real",
     id: t.id,
     closedAt: t.closedAt,
     openedAt: t.openedAt,
@@ -32,37 +29,17 @@ function normaliseReal(t: RealTrade): UnifiedTrade {
   };
 }
 
-function normaliseSynth(t: ClosedPaperPosition): UnifiedTrade {
-  return {
-    source: "synth",
-    id: t.id,
-    closedAt: t.closedAt,
-    openedAt: t.openedAt,
-    symbol: t.symbol,
-    side: t.side,
-    detector: t.detector,
-    stake: t.stake,
-    pnl: t.pnl,
-    status: t.result,
-    raw: t,
-  };
-}
-
 export function TradesPanel() {
   const [trades, setTrades] = useState<UnifiedTrade[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [filterSymbol, setFilterSymbol] = useState<string>("ALL");
-  const [filterSource, setFilterSource] = useState<"ALL" | "real" | "synth">("ALL");
   const [filterStatus, setFilterStatus] = useState<"ALL" | "won" | "lost">("ALL");
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [r, s] = await Promise.all([api.trades(200), api.synthPaperTrades(200)]);
-        const merged = [
-          ...r.trades.map(normaliseReal),
-          ...s.trades.map(normaliseSynth),
-        ].sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
+        const r = await api.trades(200);
+        const merged = r.trades.map(normaliseReal).sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
         setTrades(merged);
       } catch {
         // swallow — header banner shows server health
@@ -77,7 +54,6 @@ export function TradesPanel() {
 
   const filtered = trades.filter((t) =>
     (filterSymbol === "ALL" || t.symbol === filterSymbol) &&
-    (filterSource === "ALL" || t.source === filterSource) &&
     (filterStatus === "ALL" || t.status === filterStatus),
   );
 
@@ -91,7 +67,7 @@ export function TradesPanel() {
         <div className="card">
           <div className="card-title">Filtered Trades</div>
           <div className="card-value">{filtered.length}</div>
-          <div className="card-sub">of {trades.length} total · real + synth</div>
+          <div className="card-sub">of {trades.length} total</div>
         </div>
         <div className="card">
           <div className="card-title">Win Rate</div>
@@ -118,11 +94,6 @@ export function TradesPanel() {
             <option value="ALL">All symbols</option>
             {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
-          <select className="filter-select" value={filterSource} onChange={(e) => setFilterSource(e.target.value as "ALL" | "real" | "synth")}>
-            <option value="ALL">Real + synth</option>
-            <option value="real">Real only</option>
-            <option value="synth">Synth only</option>
-          </select>
           <select className="filter-select" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value as "ALL" | "won" | "lost")}>
             <option value="ALL">Won + Lost</option>
             <option value="won">Won only</option>
@@ -135,7 +106,7 @@ export function TradesPanel() {
           <table>
             <thead>
               <tr>
-                <th></th><th>Closed</th><th>Source</th><th>Symbol</th><th>Side</th><th>Detector</th><th>Stake</th><th>Profit</th><th>Status</th>
+                <th></th><th>Closed</th><th>Symbol</th><th>Side</th><th>Detector</th><th>Stake</th><th>Profit</th><th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -144,11 +115,6 @@ export function TradesPanel() {
                   <tr onClick={() => setExpanded(expanded === t.id ? null : t.id)} style={{ cursor: "pointer" }}>
                     <td className="faint">{expanded === t.id ? "▼" : "▶"}</td>
                     <td className="mono faint">{t.closedAt ? fmtTime(t.closedAt) : "—"}</td>
-                    <td>
-                      <span className={`pill ${t.source === "real" ? "pill-amber" : "pill-blue"}`}>
-                        {t.source}
-                      </span>
-                    </td>
                     <td className="mono">{t.symbol}</td>
                     <td><span className={`pill ${t.side === "BUY" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
                     <td><span className="strat-chip">{t.detector}</span></td>
@@ -162,8 +128,8 @@ export function TradesPanel() {
                   </tr>
                   {expanded === t.id && (
                     <tr className="row-expand">
-                      <td colSpan={9} style={{ padding: 0 }}>
-                        {t.source === "real" ? <RealDetails t={t.raw as RealTrade} /> : <SynthDetails t={t.raw as ClosedPaperPosition} />}
+                      <td colSpan={8} style={{ padding: 0 }}>
+                        <RealDetails t={t.raw} />
                       </td>
                     </tr>
                   )}
@@ -196,21 +162,3 @@ function RealDetails({ t }: { t: RealTrade }) {
   );
 }
 
-function SynthDetails({ t }: { t: ClosedPaperPosition }) {
-  return (
-    <div className="detail-grid">
-      <div><div className="detail-key">Multiplier</div><div className="detail-val mono">{t.multiplier}×</div></div>
-      <div><div className="detail-key">Granularity</div><div className="detail-val mono">{t.granularity}s</div></div>
-      <div><div className="detail-key">Entry Price</div><div className="detail-val mono">{t.entryPrice.toFixed(5)}</div></div>
-      <div><div className="detail-key">Exit Price</div><div className="detail-val mono">{t.exitPrice.toFixed(5)}</div></div>
-      <div><div className="detail-key">Stop Price</div><div className="detail-val mono">{t.stopPrice.toFixed(5)}</div></div>
-      <div><div className="detail-key">Take Profit Price</div><div className="detail-val mono">{t.takeProfitPrice.toFixed(5)}</div></div>
-      <div><div className="detail-key">R Multiple</div><div className="detail-val mono">{t.rMultiple.toFixed(2)}R</div></div>
-      <div><div className="detail-key">Adaptive Mult</div><div className="detail-val mono">{t.appliedShiftMultiplier.toFixed(2)}×</div></div>
-      <div><div className="detail-key">Adaptive Reasons</div><div className="detail-val">{t.appliedShiftReasons}</div></div>
-      <div><div className="detail-key">Opened At</div><div className="detail-val mono">{fmtTime(t.openedAt)}</div></div>
-      <div><div className="detail-key">Closed At</div><div className="detail-val mono">{t.closedAt ? fmtTime(t.closedAt) : "—"}</div></div>
-      <div><div className="detail-key">Trade ID</div><div className="detail-val mono">{t.id.slice(0, 8)}…</div></div>
-    </div>
-  );
-}

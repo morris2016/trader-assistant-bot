@@ -9,7 +9,7 @@
 //      ladder we are. Independent of strategy params.
 //
 // State is per-strategy (each fast strategy maintains its own ladder) so a
-// loss streak on CRASH500N doesn't escalate stake on BOOM300N.
+// loss streak on one strategy doesn't escalate stake on another.
 
 export type MartingaleState = {
   /** Consecutive-loss counter. 0 after a win or after circuit-breaker reset. */

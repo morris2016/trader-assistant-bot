@@ -3,10 +3,6 @@
 // so we can compare paper-vs-live performance side by side. Useful for
 // detecting live-execution drag (slippage, latency, fill quality).
 //
-// Replaced 2026-05-02 — old BOOM/CRASH 300N spike-fade descriptors deleted
-// (those strategies migrated to Fast2 in earlier session, then removed entirely
-// when user opted to focus on R-stack only).
-//
 // Each strategy is a clone of its Fast2 sibling with a "fast1_" id prefix so
 // the dispatch router and per-strategy ladder/balance state stay distinct.
 

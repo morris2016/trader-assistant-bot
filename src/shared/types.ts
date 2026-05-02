@@ -196,8 +196,8 @@ export type RealTrade = {
    *  live (signals route to real.placeTrade instead of fast2Paper). Used at
    *  settle time to advance the correct martingale ladder. Defaults to
    *  "real" when undefined for backward compatibility with existing trades. */
-  sandbox?: "real" | "fast" | "fast2" | "synth";
-  /** Strategy id within the sandbox (e.g. "fast2_crash300n_spike"). Lets
+  sandbox?: "real" | "fast" | "fast2";
+  /** Strategy id within the sandbox (e.g. "fast2_rdbear_meanrev"). Lets
    *  the settle handler look up the right ladder without re-deriving from
    *  symbol+detector. */
   sandboxStrategyId?: string;

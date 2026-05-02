@@ -139,10 +139,7 @@ export class RealEngine extends EventEmitter {
   /** Hydrate open/closed contract history from Deriv's authoritative state.
    *  Used at bot startup when local state was wiped (Railway redeploy etc.)
    *  so the UI can show the user's actual trade history even after a fresh
-   *  install. Tags every BOOM/CRASH 300N MULTIPLIER contract as Fast2 since
-   *  that's the only path the bot uses for those symbols today — without
-   *  this, post-restart trades fall under the unfiltered "real" sandbox
-   *  and disappear from the Fast2 panel.
+   *  install.
    *
    *  Pulls in:
    *    • portfolio: 1   → currently open contracts (re-subscribes to each
@@ -209,12 +206,11 @@ export class RealEngine extends EventEmitter {
   }
 
   /** Convert a Deriv contract record (from portfolio or profit_table) into
-   *  a RealTrade we can store. Tags BOOM/CRASH 300N MULTIPLIER contracts as
-   *  sandbox="fast2" so they appear under the Fast2 panel. */
+   *  a RealTrade we can store. */
   private contractToTrade(info: Record<string, unknown>, isOpen: boolean): RealTrade | null {
     const contractId = Number(info.contract_id ?? 0);
     if (!contractId) return null;
-    // profit_table responses use `shortcode` (e.g. "MULTUP_BOOM300N_5.00_100_…")
+    // profit_table responses use `shortcode` (e.g. "MULTUP_RDBULL_5.00_100_…")
     // rather than top-level symbol/contract_type fields, so derive everything
     // from shortcode when those fields are absent.
     const shortcode = String(info.shortcode ?? "");
@@ -261,10 +257,6 @@ export class RealEngine extends EventEmitter {
     const takeProfit = info.take_profit != null ? Number((info.take_profit as { order_amount?: number })?.order_amount ?? info.take_profit) : null;
     const stopLoss = info.stop_loss != null ? Number((info.stop_loss as { order_amount?: number })?.order_amount ?? info.stop_loss) : null;
 
-    // Heuristic: Fast2 is the only path that opens BOOM/CRASH 300N MULT
-    // contracts in this bot. Tag them so the Fast2 panel can find them.
-    const isFast2 = isMultiplier && (symbol === "BOOM300N" || symbol === "CRASH300N");
-
     return {
       id: randomUUID(),
       contractId,
@@ -286,12 +278,8 @@ export class RealEngine extends EventEmitter {
       status,
       profit,
       detector: "restored",
-      sandbox: isFast2 ? "fast2" : "real",
-      sandboxStrategyId: isFast2
-        ? (side === "BUY" && symbol === "CRASH300N" ? "fast2_crash300n_spike"
-          : side === "SELL" && symbol === "BOOM300N" ? "fast2_boom300n_spike"
-          : undefined)
-        : undefined,
+      sandbox: "real",
+      sandboxStrategyId: undefined,
     };
   }
 
@@ -384,8 +372,8 @@ export class RealEngine extends EventEmitter {
     stakeOverride?: number;
     /** Origin sandbox tag — propagated onto the RealTrade so the settle
      *  handler can advance the right martingale ladder. Defaults to "real". */
-    sandbox?: "real" | "fast" | "fast2" | "synth";
-    /** Strategy id within the origin sandbox (e.g. "fast2_crash300n_spike"). */
+    sandbox?: "real" | "fast" | "fast2";
+    /** Strategy id within the origin sandbox (e.g. "fast2_rdbear_meanrev"). */
     sandboxStrategyId?: string;
   }): Promise<RealTrade> {
     const gate = this.canOpen();

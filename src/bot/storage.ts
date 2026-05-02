@@ -39,9 +39,9 @@ export type FastSandboxConfig = {
   /** Adverse stop-loss slippage in basis points. On synthetic-index spikes,
    *  Deriv's SL doesn't fill at the exact trigger price — the next-tick fill
    *  is typically 5-15 bps past the stop. Paper models this so SL-hits cost
-   *  more than the geometry suggests. Defaults to 5 bps for BOOM/CRASH.
-   *  TP fills are NOT slipped (they trigger cleanly during normal price
-   *  fluctuation, not on volatile spikes). */
+   *  more than the geometry suggests. Defaults to 5 bps. TP fills are NOT
+   *  slipped (they trigger cleanly during normal price fluctuation, not on
+   *  volatile spikes). */
   slSlippageBps: number;
   /** UI override: when true, the bot escalates the martingale ladder for
    *  EVERY strategy in the sandbox, regardless of the per-strategy
@@ -110,7 +110,7 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
 };
 
 /** Fast2 — same shape as Fast1. Defaults aligned to Deriv's actual contract
- *  constraints for BOOM/CRASH 300N multiplier contracts:
+ *  constraints for synthetic-index multiplier contracts:
  *    multiplier ∈ {20, 40, 60, 80, 100}
  *    minStake = $1, maxStake = $2000 (per Deriv contracts_for)
  *    commission = 0.5% baked into proposal pricing
@@ -136,17 +136,17 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   liveTradingEnabled: true,      // SHIPPED LIVE 2026-05-02 with validated R-stack
 };
 
-/** Deriv-valid multiplier values for BOOM/CRASH 300N MULTIPLIER contracts.
- *  Source: Deriv contracts_for response (multiplier_range field).
- *  Anything outside this set is rejected by the buy endpoint with
- *  ContractBuyValidationError. Same set applies to BOOM/CRASH 300/500/1000N. */
-export const DERIV_BOOMCRASH_MULTIPLIERS = [20, 40, 60, 80, 100] as const;
+/** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.
+ *  Source: Deriv contracts_for response (multiplier_range field). Anything
+ *  outside this set is rejected by the buy endpoint with
+ *  ContractBuyValidationError. */
+export const DERIV_MULTIPLIER_OPTIONS = [20, 40, 60, 80, 100] as const;
 /** Snap an arbitrary multiplier to the closest Deriv-accepted value. */
 export function clampDerivMultiplier(m: number): number {
   if (!isFinite(m) || m <= 0) return 100;
-  let best = DERIV_BOOMCRASH_MULTIPLIERS[0];
+  let best = DERIV_MULTIPLIER_OPTIONS[0];
   let bestDist = Math.abs(m - best);
-  for (const v of DERIV_BOOMCRASH_MULTIPLIERS) {
+  for (const v of DERIV_MULTIPLIER_OPTIONS) {
     const d = Math.abs(m - v);
     if (d < bestDist) { best = v; bestDist = d; }
   }
@@ -159,28 +159,8 @@ export const DERIV_MIN_STAKE_USD = 1;
 export const DERIV_MAX_STAKE_USD = 2000;
 /** Deriv minimum take_profit / stop_loss amount on multiplier contracts.
  *  ContractBuyValidationError fires below this. Universal minimum across
- *  synthetics — applies to BOOM/CRASH/Volatility/Step indices. */
+ *  synthetics. */
 export const DERIV_MIN_TPSL_USD = 0.10;
-
-/** Synth sandbox — same shape as Fast1/Fast2. Defaults match the validation
- *  baseline (MULT=100×, $1 stake, no martingale) so the live numbers map
- *  directly to the OOS results. forceMartingale flag lets the operator opt
- *  in via the UI without touching strategy descriptors. */
-export type SynthConfig = FastSandboxConfig;
-export const DEFAULT_SYNTH_CONFIG: SynthConfig = {
-  tradeMultiplier: 100,
-  martingaleMultiplier: 1.7,
-  baseStake: 1.0,
-  maxLevels: 5,
-  perTradeCap: 30,
-  commissionPct: 0.005,
-  entrySpreadBps: 1.0,
-  slSlippageBps: 5.0,
-  forceMartingale: false,
-  sideFilter: "both",
-  martingaleMode: "classic",
-  liveTradingEnabled: false,
-};
 
 export type BotState = {
   /** Currently open contracts (still being tracked for settlement). */
@@ -193,19 +173,11 @@ export type BotState = {
   adaptiveShift: AdaptiveShiftState;
   /** Paper trading sim — separate balance, trades, adaptive shift, equity curve. */
   paper: PaperState;
-  /** Synth-strategies paper sandbox — completely isolated from real-asset paper. */
-  synthPaper: PaperState;
-  /** Per-strategy martingale ladder state for the Synth sandbox, keyed by
-   *  strategy id. Same shape as fast/fast2 ladders. */
-  synthMartingale: Record<string, MartingaleState>;
-  /** Synth sandbox runtime config — leverage, martingale, fees. Editable
-   *  from the UI parallel to Fast/Fast2 sandboxes. */
-  synthConfig: SynthConfig;
-  /** Fast-trade synth sandbox — own paper account for high-frequency
+  /** Fast-trade sandbox — own paper account for high-frequency
    *  drift-fade scalps with martingale stake escalation. */
   fastPaper: PaperState;
-  /** Per-strategy martingale ladder state for the fast-trade sandbox. Keyed
-   *  by strategy id (e.g. "crash500n_drift" / "boom300n_drift"). */
+  /** Per-strategy martingale ladder state for the fast-trade sandbox, keyed
+   *  by strategy id. */
   fastMartingale: Record<string, MartingaleState>;
   /** Fast (sandbox 1) runtime config — leverage, martingale, fees. Editable
    *  from the UI; the bot applies it at every Fast trade open and ladder
@@ -233,9 +205,6 @@ export function emptyBotState(): BotState {
     daily: { date: "", profit: 0, tradesOpened: 0, capHit: false },
     adaptiveShift: emptyAdaptiveShiftState(),
     paper: emptyPaperState(),
-    synthPaper: emptyPaperState(),
-    synthMartingale: {},
-    synthConfig: { ...DEFAULT_SYNTH_CONFIG },
     fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
     fastMartingale: {},
     fast1Config: { ...DEFAULT_FAST1_CONFIG },
@@ -311,9 +280,6 @@ export class BotStorage {
         daily: parsed.daily ?? { date: "", profit: 0, tradesOpened: 0, capHit: false },
         adaptiveShift: parsed.adaptiveShift ?? emptyAdaptiveShiftState(),
         paper: parsed.paper ?? emptyPaperState(),
-        synthPaper: parsed.synthPaper ?? emptyPaperState(),
-        synthMartingale: parsed.synthMartingale ?? {},
-        synthConfig: { ...DEFAULT_SYNTH_CONFIG, ...(parsed.synthConfig ?? {}), ...(prefs.synthConfig ?? {}) },
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
         fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}), ...(prefs.fast1Config ?? {}) },
@@ -338,7 +304,6 @@ export class BotStorage {
         const empty = emptyBotState();
         return {
           ...empty,
-          synthConfig: { ...empty.synthConfig, ...(prefs.synthConfig ?? {}) },
           fast1Config: { ...empty.fast1Config, ...(prefs.fast1Config ?? {}) },
           fast2Config: applyFast2EnvOverrides({ ...empty.fast2Config, ...(prefs.fast2Config ?? {}) }),
         };
@@ -347,7 +312,7 @@ export class BotStorage {
     }
   }
 
-  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; synthConfig?: Partial<SynthConfig> }> {
+  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config> }> {
     try {
       const raw = await fs.readFile(this.prefsFile, "utf8");
       return JSON.parse(raw);
@@ -361,9 +326,9 @@ export class BotStorage {
    * Atomic save: write to .tmp, fsync, rename. Coalesces concurrent saves
    * so the latest state always wins and we never have overlapping writes.
    * Also mirrors the user-tunable configs to a separate prefs sidecar so
-   * they survive resetFastPaper / resetSynthPaper / resetFast2Paper without
-   * the state-side wipe touching tuning state. The prefs file is also the
-   * thing a Railway volume mount should preserve across redeploys.
+   * they survive resetFastPaper / resetFast2Paper without the state-side
+   * wipe touching tuning state. The prefs file is also the thing a Railway
+   * volume mount should preserve across redeploys.
    */
   save(state: BotState): Promise<void> {
     const next = async () => {
@@ -383,7 +348,6 @@ export class BotStorage {
       const prefs = {
         fast1Config: state.fast1Config,
         fast2Config: state.fast2Config,
-        synthConfig: state.synthConfig,
       };
       const prefsTmp = this.prefsFile + ".tmp";
       const prefsJson = JSON.stringify(prefs, null, 2);

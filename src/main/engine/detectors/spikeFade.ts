@@ -3,7 +3,7 @@ import type { Detector, DetectorContext, DetectorOutput } from "./types";
 import { latestAtr } from "../indicators";
 
 /**
- * Spike-Fade detector — high-frequency edge on Deriv Boom/Crash synthetics.
+ * Spike-Fade detector — high-frequency edge on Deriv Crash synthetics.
  *
  * Pattern:
  *   • Bar i (the "spike bar") has range = high − low ≥ spikeNAtr × ATR(i−1).
@@ -18,10 +18,8 @@ import { latestAtr } from "../indicators";
  *     we exit before the full spike has been faded.
  *
  * Validated 2026-04-30 via 17-day historical backtest on Deriv synthetics:
- *   • BOOM300N 1m (n=3.0, buf=0.2, tpFrac=0.5, conf=1): 1670 trades / 17.4d,
- *     WR 56%, expR +0.36, +$749 at $50/30× — STABLE across both halves.
- *   • CRASH300N 1m (same params): 1687 trades / 17.4d, WR 56%, expR +0.39,
- *     +$849 at $50/30× — STABLE.
+ *   • CRASH300N 1m (n=3.0, buf=0.2, tpFrac=0.5, conf=1): 1687 trades / 17.4d,
+ *     WR 56%, expR +0.39, +$849 at $50/30× — STABLE across both halves.
  *
  * Note: this detector emits explicit signal.stopPrice and signal.targetPrice
  * derived from the spike's geometry, NOT from ATR multiples. The caller MUST

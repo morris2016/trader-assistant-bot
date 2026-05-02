@@ -1,35 +1,22 @@
 // Fast2 sandbox — parallel to FAST_STRATEGIES, completely independent.
-// 6-strategy stack:
-//   BOOM 300N + CRASH 300N spike-fade (1m, TP=0.7×spike)
+// 4-strategy R-stack:
 //   RDBEAR mean-rev fade (5m, SELL on up-pierces)
 //   RDBULL mean-rev fade (5m, BUY on down-pierces)
-//   RDBEAR drift-follow  (5m, SELL on down-pierces, NEW 2026-05-02)
-//   RDBULL drift-follow  (5m, BUY on up-pierces, NEW 2026-05-02)
+//   RDBEAR drift-follow  (5m, SELL on down-pierces)
+//   RDBULL drift-follow  (5m, BUY on up-pierces)
 // The mean-rev + drift pair on each Bear/Bull asset captures BOTH pierce
 // directions — fade trades up-pierces, drift trades down-pierces (mirror for
 // RDBULL). Doubles signal density per asset without conflict.
 // 9-month validation totals at $3 stake:
 //   RDBEAR fade  +$6,926  /  3,633t / 56% WR
-//   RDBEAR drift +$9,204  /  5,112t / 56% WR  (NEW)
+//   RDBEAR drift +$9,204  /  5,112t / 56% WR
 //   RDBULL fade  +$10,783 /  3,521t / 61% WR
-//   RDBULL drift +$13,539 /  5,598t / 60% WR  (NEW)
+//   RDBULL drift +$13,539 /  5,598t / 60% WR
 //   Combined RDBEAR+RDBULL pair = +$40,452 over 9 months.
-// BOOM/CRASH 500 + 600 + 900 NOT in stack. Detector params shared with FAST.
+// Detector params shared with FAST.
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
-
-const SPIKE_FADE_PARAMS = {
-  atrPeriod: 14,
-  spikeNAtr: 3.0,
-  bufferAtrMul: 0.05,    // TUNED 2026-05-02: tighter SL than 0.2 cuts loss size
-  tpFracOfSpike: 0.7,    // TUNED 2026-05-02: bigger TP than 0.5 grows wins
-  requireConfirmation: 1,
-  // Per-month sweep across 8 months (Sept 2025 → Apr 2026, TRAIN+TEST):
-  //   BOOM 300N:  TP=0.5 (old): 52% WR / +$2,707  →  TP=0.7 (new): 45% WR / +$3,341  (+23%)
-  //   CRASH 300N: TP=0.5 (old): 52% WR / +$2,683  →  TP=0.7 (new): 44% WR / +$3,264  (+22%)
-  // All 8 months positive at TP=0.7. WR drops ~7pp but per-trade $ rises 25%.
-};
 
 const RDBULL_MEANREV_PARAMS = {
   lookback: 15,
@@ -83,77 +70,6 @@ const RDBEAR_MEANREV_PARAMS = {
   effWindow: 24,
   effChopThresh: 1.01,   // disabled (was 0.30)
   minAdx: 0,             // decorative — never applied
-};
-
-export const fast2Boom300nSpike: StrategyDescriptor = {
-  id: "fast2_boom300n_spike",
-  name: "Fast2 BOOM 300N spike-fade",
-  description:
-    "1m spike-fade on BOOM 300N. Martingale-on. After a 3×ATR up-spike, sells " +
-    "with structural SL just past spike high and TP at 50% of the spike range.",
-  symbols: ["BOOM300N"],
-  granularity: 60,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    enabled: d.id === "spikeFade",
-    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
-  })),
-  atrSlMult: 1.0,
-  atrTpMult: 1.0,
-  costBps: 5.0,
-  useMartingale: true,
-  validation: {
-    validatedAt: "2026-05-02",
-    sampleDays: 25,
-    trades: 405,
-    winRate: 0.52,
-    expectancyR: 0.20,
-    pnlUsd: 41,
-    stake: 1.5,
-    multiplier: 100,
-    notes: [
-      "Re-tuned 2026-05-02 with TP=0.7×spike + buf=0.05×ATR (was TP=0.5 / buf=0.2).",
-      "Per-month sweep Sep 2025 → Apr 2026: 18,578 trades, 45% WR, +$3,341 net (+23% vs old TP=0.5).",
-      "All 8 months positive. Higher TP = bigger wins per win, lower WR but ~25% more per-trade $.",
-      "BOOM/CRASH 600 + 900 tested same day — all near-breakeven, no edge.",
-      "Martingale multiplier and trade leverage are runtime-configurable via Fast2Config.",
-    ],
-  },
-};
-
-export const fast2Crash300nSpike: StrategyDescriptor = {
-  id: "fast2_crash300n_spike",
-  name: "Fast2 CRASH 300N spike-fade",
-  description:
-    "Mirror of fast2_boom300n_spike on CRASH 300N — buys after a confirmed " +
-    "down-spike. Structural SL past spike low, TP at 50% of spike range.",
-  symbols: ["CRASH300N"],
-  granularity: 60,
-  detectors: defaultDetectorConfigs().map((d) => ({
-    ...d,
-    enabled: d.id === "spikeFade",
-    params: d.id === "spikeFade" ? SPIKE_FADE_PARAMS : d.params,
-  })),
-  atrSlMult: 1.0,
-  atrTpMult: 1.0,
-  costBps: 5.0,
-  useMartingale: true,
-  validation: {
-    validatedAt: "2026-05-02",
-    sampleDays: 25,
-    trades: 408,
-    winRate: 0.52,
-    expectancyR: 0.27,
-    pnlUsd: 54,
-    stake: 1.5,
-    multiplier: 100,
-    notes: [
-      "Re-tuned 2026-05-02 with TP=0.7×spike + buf=0.05×ATR (was TP=0.5 / buf=0.2).",
-      "Per-month sweep Sep 2025 → Apr 2026: 18,458 trades, 44% WR, +$3,264 net (+22% vs old TP=0.5).",
-      "All 8 months positive at TP=0.7. Same shape as BOOM mirror — higher TP, more $/trade.",
-      "Restored 2026-05-02 after RDBEAR replaced it in the previous Fast2 cycle.",
-    ],
-  },
 };
 
 export const fast2RdbearMeanRev: StrategyDescriptor = {
@@ -307,8 +223,6 @@ export const fast2RdbullDrift: StrategyDescriptor = {
 };
 
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
-  // BOOM/CRASH 300N spike-fade descriptors REMOVED 2026-05-02 — user opted to
-  // run RDBEAR/RDBULL only. Descriptors preserved in file for re-add later.
   fast2RdbearMeanRev,
   fast2RdbullMeanRev,
   fast2RdbearDrift,
