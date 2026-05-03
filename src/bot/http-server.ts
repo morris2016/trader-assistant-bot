@@ -233,6 +233,8 @@ export function startHttpServer(opts: {
             if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
             const lt = url.searchParams.get("liveTradingEnabled");
             if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
+            const en = url.searchParams.get("enabled");
+            if (en != null) patch.enabled = en === "true" || en === "1";
             if (strategyId) {
               opts.manualControls.updateFast2StrategyConfig(strategyId, clear ? null : patch);
             } else {

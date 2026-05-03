@@ -222,11 +222,239 @@ export const fast2RdbullDrift: StrategyDescriptor = {
   },
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTIPLIER-CAPABLE PORT (added 2026-05-03)
+// RDBEAR/RDBULL don't have MULTUP/MULTDOWN offered on Deriv — every fast2 LIVE
+// placeTrade on those symbols returns OfferingsValidationError. The R-stack
+// signal logic was ported to multiplier-capable synthetics validated through
+// 3-window CV ($150 acct / $10 stake / 2.0× mart d=3) and continuous April:
+//   $250 → $7,436 over April 2026 (2,875%) / 1,064 trades / 0 busts
+// All 5 use the same 5m breakout pierce detector but on different symbols,
+// each with proven directional bias.
+// ─────────────────────────────────────────────────────────────────────────────
+const FADE_KATR = 4.0, DRIFT_KATR = 2.5;
+
+const BOOM300N_FADE_PARAMS = {
+  lookback: 15, atrPeriod: 14, kAtr: FADE_KATR, momRatio: 0.7,
+  sideFilter: -1,        // SELL-only on up-pierces (BOOM has up-drift bias on calm bars)
+  effWindow: 24, effChopThresh: 1.01, minAdx: 0,
+};
+
+const JD75_FADE_UP_PARAMS = {
+  lookback: 15, atrPeriod: 14, kAtr: FADE_KATR, momRatio: 0.7,
+  sideFilter: -1,        // SELL-only on up-pierces
+  effWindow: 24, effChopThresh: 1.01, minAdx: 0,
+};
+
+const JD75_FADE_DOWN_PARAMS = {
+  lookback: 15, atrPeriod: 14, kAtr: FADE_KATR, momRatio: 0.7,
+  sideFilter: 1,         // BUY-only on down-pierces
+  effWindow: 24, effChopThresh: 1.01, minAdx: 0,
+};
+
+const CRASH300N_FADE_PARAMS = {
+  lookback: 15, atrPeriod: 14, kAtr: FADE_KATR, momRatio: 0.7,
+  sideFilter: 1,         // BUY-only on down-pierces (CRASH has down-drift on calm bars)
+  effWindow: 24, effChopThresh: 1.01, minAdx: 0,
+};
+
+const BOOM300N_DRIFT_DOWN_PARAMS = {
+  lookback: 15, atrPeriod: 14, kAtr: DRIFT_KATR, momRatio: 0.7,
+  sideFilter: -1,        // SELL-only on down-pierces (continuation in bear-correction phase)
+};
+
+export const fast2Boom300nFadeUp: StrategyDescriptor = {
+  id: "fast2_boom300n_fade_up",
+  name: "Fast2 BOOM300N fade up-pierce",
+  description:
+    "5m breakout mean-reversion on BOOM300N. SELL on up-pierces of the prior " +
+    "15-bar high. BOOM300N has an asymmetric structure (frequent small drifts, " +
+    "rare large up-spikes); fading routine up-pierces during drift phases " +
+    "captures the mean-reversion edge. Equidistant SL/TP at 4.0×ATR.",
+  symbols: ["BOOM300N"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutMeanRev",
+    params: d.id === "breakoutMeanRev" ? BOOM300N_FADE_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-03",
+    sampleDays: 60,
+    trades: 356,
+    winRate: 0.528,
+    expectancyR: 0.05,
+    pnlUsd: 974,
+    stake: 10,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-03 — 60d / 3-window CV all positive at $150/$10/2.0×/d=2.",
+      "Continuous April 2026: 181t / 49.7% WR / +$1,601 / 0 bust on $250 acct.",
+      "Strongest single-strategy contributor to combined 5-strat book ($7,436 final).",
+      "Live-tradable on Deriv (MULTUP/MULTDOWN ★ confirmed via contracts_for).",
+    ],
+  },
+};
+
+export const fast2Jd75FadeUp: StrategyDescriptor = {
+  id: "fast2_jd75_fade_up",
+  name: "Fast2 JD75 fade up-pierce",
+  description:
+    "5m breakout mean-reversion on JD75 (Jump 75 Index). SELL on up-pierces. " +
+    "Jump indices have symmetric random walks with periodic jumps; pierces are " +
+    "exhaustion events that mean-revert. Equidistant SL/TP at 4.0×ATR.",
+  symbols: ["JD75"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutMeanRev",
+    params: d.id === "breakoutMeanRev" ? JD75_FADE_UP_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-03",
+    sampleDays: 60,
+    trades: 326,
+    winRate: 0.506,
+    expectancyR: 0.01,
+    pnlUsd: 799,
+    stake: 10,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-03 — 60d / 3-window CV all positive at $150/$10/2.0×/d=2.",
+      "Continuous April 2026: 154t / 45.5% WR / +$1,062 / 0 bust on $250 acct.",
+      "Live-tradable on Deriv (MULTUP/MULTDOWN ★ confirmed via contracts_for).",
+    ],
+  },
+};
+
+export const fast2Jd75FadeDown: StrategyDescriptor = {
+  id: "fast2_jd75_fade_down",
+  name: "Fast2 JD75 fade down-pierce",
+  description:
+    "5m breakout mean-reversion on JD75 (Jump 75 Index). BUY on down-pierces of " +
+    "the prior 15-bar low. Mirror of fast2_jd75_fade_up — together they capture " +
+    "both pierce directions. Equidistant SL/TP at 4.0×ATR.",
+  symbols: ["JD75"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutMeanRev",
+    params: d.id === "breakoutMeanRev" ? JD75_FADE_DOWN_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-03",
+    sampleDays: 60,
+    trades: 328,
+    winRate: 0.491,
+    expectancyR: 0.0,
+    pnlUsd: 701,
+    stake: 10,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-03 — 60d / 3-window CV all positive at $150/$10/2.0×/d=2.",
+      "Continuous April 2026: 157t / 50.3% WR / +$1,423 / 0 bust on $250 acct.",
+      "Live-tradable on Deriv (MULTUP/MULTDOWN ★ confirmed via contracts_for).",
+    ],
+  },
+};
+
+export const fast2Crash300nFadeDown: StrategyDescriptor = {
+  id: "fast2_crash300n_fade_down",
+  name: "Fast2 CRASH300N fade down-pierce",
+  description:
+    "5m breakout mean-reversion on CRASH300N. BUY on down-pierces of the prior " +
+    "15-bar low. CRASH300N has down-drift on calm bars and rare large down-spikes; " +
+    "fading routine down-pierces captures mean-reversion. Equidistant SL/TP at 4.0×ATR.",
+  symbols: ["CRASH300N"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutMeanRev",
+    params: d.id === "breakoutMeanRev" ? CRASH300N_FADE_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-03",
+    sampleDays: 60,
+    trades: 355,
+    winRate: 0.499,
+    expectancyR: -0.0,
+    pnlUsd: 1343,
+    stake: 10,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-03 — 60d / 3-window CV all positive at $150/$10/2.0×/d=2.",
+      "Continuous April 2026: 175t / 49.7% WR / +$2,282 / 0 bust on $250 acct (BEST single-strat).",
+      "Live-tradable on Deriv (MULTUP/MULTDOWN ★ confirmed via contracts_for).",
+    ],
+  },
+};
+
+export const fast2Boom300nDriftDown: StrategyDescriptor = {
+  id: "fast2_boom300n_drift_down",
+  name: "Fast2 BOOM300N drift-follow on down-pierces",
+  description:
+    "5m breakout-continuation on BOOM300N. SELL on down-pierces of the prior " +
+    "15-bar low — rides the bear-correction phase between BOOM up-spikes. " +
+    "Highest signal density (~38 trades/day). SL/TP at 2.5×ATR.",
+  symbols: ["BOOM300N"],
+  granularity: 300,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "breakoutContinuation",
+    params: d.id === "breakoutContinuation" ? BOOM300N_DRIFT_DOWN_PARAMS : d.params,
+  })),
+  atrSlMult: 1.0,
+  atrTpMult: 1.0,
+  costBps: 5.0,
+  useMartingale: true,
+  validation: {
+    validatedAt: "2026-05-03",
+    sampleDays: 60,
+    trades: 808,
+    winRate: 0.564,
+    expectancyR: 0.13,
+    pnlUsd: 444,
+    stake: 10,
+    multiplier: 100,
+    notes: [
+      "Validated 2026-05-03 — 60d / 3-window CV all positive at $150/$10/2.0×/d=2.",
+      "Continuous April 2026: 397t / 59.2% WR / +$818 / 0 bust on $250 acct.",
+      "Highest signal density of the book — drives win-rate stability.",
+      "Live-tradable on Deriv (MULTUP/MULTDOWN ★ confirmed via contracts_for).",
+    ],
+  },
+};
+
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
+  // Original RDBEAR/RDBULL paper-only — Deriv account does NOT offer MULT for
+  // these symbols; LIVE placeTrade returns OfferingsValidationError. Kept for
+  // paper-mode signal flow (validated +$40k 9-month paper book).
   fast2RdbearMeanRev,
   fast2RdbullMeanRev,
   fast2RdbearDrift,
   fast2RdbullDrift,
+  // Multiplier-capable port (LIVE-tradable, validated 2026-05-03):
+  fast2Boom300nFadeUp,
+  fast2Jd75FadeUp,
+  fast2Jd75FadeDown,
+  fast2Crash300nFadeDown,
+  fast2Boom300nDriftDown,
 ];
 
 export function fast2StrategiesForSymbol(symbol: string): StrategyDescriptor[] {

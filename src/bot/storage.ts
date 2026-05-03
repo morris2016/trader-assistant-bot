@@ -67,6 +67,12 @@ export type FastSandboxConfig = {
    *  on the real-engine side. All circuits (price-tolerance, latency,
    *  session-DD) remain enforced. */
   liveTradingEnabled: boolean;
+  /** Strategy-level kill switch. When `false` (only meaningful in a
+   *  perStrategy override), the strategy is silenced — its signals are
+   *  dropped before any paper/live open path. Defaults to `true`/undefined
+   *  meaning the strategy is active. Lets the operator turn off a single
+   *  strategy without removing it from the registry. */
+  enabled?: boolean;
   /** Per-strategy overrides: any subset of the above fields, keyed by
    *  strategyId. When a strategy is dispatched, the effective config is
    *  computed by spreading the general config and then overlaying the
@@ -118,14 +124,17 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
  *  staying within the live-tradable range. */
 export type Fast2Config = FastSandboxConfig;
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
-  // R-stack live config — flat-stake $3, no martingale (validated config from
-  // 9-month sweep: mart was destroying edge; flat compounds linearly to +$94k/yr
-  // on $3 stake). User can re-enable mart via UI for higher growth at higher
-  // bust risk, but defaults are the safe validated path.
+  // 5-strategy multiplier book defaults (validated 2026-05-03):
+  //   $250 acct / $10 stake / 2.0× mart d=3 / 100× mult
+  //   Continuous April 2026: $250 → $7,436 (2,875%) / 1,064t / 0 busts
+  //   Combined book book on BOOM300N + JD75 + CRASH300N (all MULT-capable).
+  // The original $3 flat config was tuned for RDBEAR/RDBULL but those symbols
+  // are not multiplier-tradable on Deriv (OfferingsValidationError on every
+  // placeTrade); the new ladder config powers the live-tradable port.
   tradeMultiplier: 100,
-  martingaleMultiplier: 1.0,    // flat stake — no mart
-  baseStake: 3,
-  maxLevels: 1,                  // no laddering
+  martingaleMultiplier: 2.0,     // full-recovery martingale: each L1 win covers L0 loss
+  baseStake: 10,
+  maxLevels: 3,                  // d=3 ladder: cum-loss $150 fits in $250 acct (60% drawdown floor)
   perTradeCap: 100,
   commissionPct: 0.005,
   entrySpreadBps: 1.0,
@@ -208,7 +217,7 @@ export function emptyBotState(): BotState {
     fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
     fastMartingale: {},
     fast1Config: { ...DEFAULT_FAST1_CONFIG },
-    fast2Paper: emptyPaperState(50), // Fast2 sandbox sized to the validated $50 starting balance
+    fast2Paper: emptyPaperState(250), // Fast2 sandbox sized to validated $250 d=3 mart book (2026-05-03)
     fast2MartingalePaper: {},
     fast2MartingaleLive: {},
     fast2Config: { ...DEFAULT_FAST2_CONFIG },

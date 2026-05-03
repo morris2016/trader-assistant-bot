@@ -171,6 +171,11 @@ export type FastSandboxConfig = {
    *  Deriv) instead of paper. Sandbox-scoped — flipping Fast2 live keeps
    *  Fast on paper. */
   liveTradingEnabled: boolean;
+  /** Per-strategy kill switch. Only meaningful in a perStrategy override:
+   *  set to false to silence one strategy without removing it from the
+   *  registry. Defaults to true/undefined (active). */
+  enabled?: boolean;
+  perStrategy?: Record<string, Partial<FastSandboxConfig>>;
 };
 export type Fast1Config = FastSandboxConfig;
 export type Fast2Config = FastSandboxConfig;

@@ -466,6 +466,7 @@ async function main() {
         if (patch.martingaleMode === "classic" || patch.martingaleMode === "anti") {
           cleaned.martingaleMode = patch.martingaleMode;
         }
+        if (typeof patch.enabled === "boolean") cleaned.enabled = patch.enabled;
         // Note: liveTradingEnabled is NOT applied per-strategy — it's a
         // sandbox-wide safety knob. Use the general updateFast2Config to flip.
         const merged: Partial<Fast2Config> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
@@ -1142,7 +1143,13 @@ async function main() {
       // Per-strategy side filter (falls back to general). Drops signals on
       // the disabled direction. "both" lets every signal through.
       const sideAllowed = sCfg.sideFilter === "both" || sCfg.sideFilter === sig.action;
-      if (!passes) {
+      // Per-strategy kill switch. When `enabled === false` (only set via
+      // perStrategy override), drop signals before any open path.
+      const stratEnabled = (fast2Config.perStrategy?.[fast2Match.id]?.enabled ?? true) !== false;
+      if (!stratEnabled) {
+        log.info("fast2 signal blocked — strategy disabled by operator", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
+        handledFast2 = true;
+      } else if (!passes) {
         log.info("fast2 signal blocked by strategy filters", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
         handledFast2 = true;
       } else if (!sideAllowed) {

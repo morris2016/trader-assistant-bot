@@ -479,8 +479,20 @@ export function Fast2Panel({ state, doAction, pending }: {
       <div className="card" style={{ padding: 12, marginBottom: 16 }}>
         {strategies.map((s) => {
           const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
+          const isOff = ov.enabled === false;
           return (
-            <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1.4fr 0.9fr 0.7fr 0.9fr 0.9fr 0.7fr 0.7fr", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: "1px solid #2a2f44" }}>
+            <div key={s.id} style={{ display: "grid", gridTemplateColumns: "0.5fr 1.4fr 0.9fr 0.7fr 0.9fr 0.9fr 0.7fr 0.7fr", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: "1px solid #2a2f44", opacity: isOff ? 0.45 : 1 }}>
+              <div>
+                <div className="muted" style={{ fontSize: 10 }}>active</div>
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" }} title="Toggle this strategy on/off without removing it from the registry">
+                  <input
+                    type="checkbox"
+                    checked={!isOff}
+                    onChange={(e) => api.updateFast2StrategyConfig(s.id, { enabled: e.target.checked })}
+                  />
+                  <span className={`mono ${isOff ? "neg" : "pos"}`} style={{ fontSize: 11 }}>{isOff ? "OFF" : "ON"}</span>
+                </label>
+              </div>
               <div>
                 <div className="bold" style={{ fontSize: 12 }}>{s.id}</div>
                 <div className="muted" style={{ fontSize: 10 }}>{s.symbols.join(",")} · {s.granularity}s</div>
