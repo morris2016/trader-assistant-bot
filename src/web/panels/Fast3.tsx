@@ -118,7 +118,7 @@ export function Fast3Panel({ state, doAction, pending }: {
         Each tick = one binary 1-tick contract (predict next tick's last digit is ODD).
         Edge is structural: synthetic RNG never produces digit 0, so digits 1-9 are uniform → P(odd) = 5/9 = 55.5%.
         Deriv pays 1.95× as if it were a fair coin → ~5%/tick edge.
-        Currently running at <strong>base ${cfg.baseStake.toFixed(2)} · martingale {cfg.martingaleMultiplier.toFixed(1)}× · depth {cfg.maxLevels}</strong> on a ${startingBalance.toFixed(0)} starting balance.
+        Currently running at <strong>base ${cfg.baseStake.toFixed(2)} · martingale {cfg.martingaleMultiplier.toFixed(1)}× · depth {cfg.maxLevels}</strong> on a ${paperStartingBalance.toFixed(0)} starting balance.
       </div>
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
