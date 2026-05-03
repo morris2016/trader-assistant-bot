@@ -726,6 +726,13 @@ async function main() {
   // for individual pairs and must not re-subscribe ticks unnecessarily.
   const tickedSymbols = new Set<string>();
 
+  // Track pairs that returned "MarketIsClosed" so self-heal/subscribeAll backs
+  // off instead of retrying every 30 seconds during weekends/market closures.
+  // Forex (frx*) and commodities close Sat 21:00 UTC → Sun 21:00 UTC.
+  // Re-check after MARKET_CLOSED_BACKOFF_MS to catch market reopen on Monday.
+  const marketClosedPairs = new Map<string, number>(); // key → timestamp last failed
+  const MARKET_CLOSED_BACKOFF_MS = 30 * 60 * 1000; // re-check every 30 min
+
   // Subscribe a single (sym, gr) pair end-to-end: fetch history, build engine,
   // seed chart buffer, optionally subscribe ticks, register in subscribedKeys.
   // Returns true on success, false on permanent failure (3 retries exhausted).
@@ -733,6 +740,13 @@ async function main() {
     const key = engKey(sym, gr);
     if (subscribedKeys.has(key) && engines.has(key) && chartBuffers.has(key)) {
       return true; // already fully wired
+    }
+    // If this pair was recently flagged "MarketIsClosed", back off until the
+    // backoff window elapses. Synth indices (R_*, BOOM*, CRASH*, RDBEAR/RDBULL,
+    // 1HZ*, JD*, RB*, stpRNG*) are 24/7 and never trigger this gate.
+    const closedAt = marketClosedPairs.get(key);
+    if (closedAt != null && Date.now() - closedAt < MARKET_CLOSED_BACKOFF_MS) {
+      return false; // silently skip — wait for backoff to expire
     }
     let lastErr: Error | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -767,6 +781,14 @@ async function main() {
         return true;
       } catch (e) {
         lastErr = e as Error;
+        // MarketIsClosed is a benign weekend state for forex/commodity pairs.
+        // Stop retrying immediately, mark for backoff, and let self-heal poll
+        // again after 30 min (instead of hammering the API every 30 sec).
+        if (lastErr.message.includes("MarketIsClosed")) {
+          marketClosedPairs.set(key, Date.now());
+          log.info(`market closed ${sym}@${gr}s — backing off for ${MARKET_CLOSED_BACKOFF_MS / 60000} min`);
+          return false;
+        }
         log.warn(`subscribe attempt ${attempt + 1}/3 failed ${sym}@${gr}s: ${lastErr.message}`);
         if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
       }
@@ -1414,12 +1436,30 @@ async function main() {
     }
     const expected = expectedPairs();
     const missing: string[] = [];
+    const closedSkipped: string[] = [];
+    const now = Date.now();
     for (const key of expected) {
-      if (!subscribedKeys.has(key) || !engines.has(key) || !chartBuffers.has(key)) {
-        missing.push(key);
+      if (subscribedKeys.has(key) && engines.has(key) && chartBuffers.has(key)) continue;
+      // Pairs flagged "MarketIsClosed" within the backoff window are skipped
+      // silently — Deriv closes forex/commodities on weekends, no point pinging
+      // every 30 sec. They'll get re-checked when backoff expires.
+      const closedAt = marketClosedPairs.get(key);
+      if (closedAt != null && now - closedAt < MARKET_CLOSED_BACKOFF_MS) {
+        closedSkipped.push(key);
+        continue;
       }
+      missing.push(key);
     }
-    if (missing.length === 0) return;
+    if (missing.length === 0) {
+      if (closedSkipped.length > 0) {
+        // Log occasionally so the operator knows pairs ARE waiting on market open.
+        // Only emit once per 10 self-heal cycles (≈ 5 min) to avoid spam.
+        if ((selfHealCount++ % 10) === 0) {
+          log.info(`self-heal: ${subscribedKeys.size}/${expected.size} pairs wired; ${closedSkipped.length} waiting on market open: ${closedSkipped.join(", ")}`);
+        }
+      }
+      return;
+    }
     log.warn("self-heal: expected pairs missing from bot-side state, subscribing them now", { missing });
     for (const key of missing) {
       const [sym, grStr] = key.split("|");
@@ -1427,6 +1467,7 @@ async function main() {
     }
     log.info(`self-heal targeted subscribe complete: ${subscribedKeys.size}/${expected.size} expected pairs wired`);
   }, 30_000);
+  let selfHealCount = 0;
 
   // Heartbeat: structured ops snapshot every 60s. Updates lastHeartbeatMs which
   // /health uses to detect hangs (Railway restarts on 503).

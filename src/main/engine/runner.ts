@@ -28,6 +28,10 @@ export class Engine extends EventEmitter {
   private strategyConfig: StrategyConfig = { mode: "raw", adxThreshold: 22, confluenceWindowBars: 3 };
   private recentDetectorSignals = new Map<SymbolCode, Map<string, StrategyTrace>>();
   private barIndex = new Map<SymbolCode, number>();
+  // Latest epoch we've evaluated detectors on. Prevents the first live ohlc
+  // from re-evaluating the last seed bar (which was already evaluated during
+  // seed()). Set in seed() to the last historical epoch.
+  private lastEvaluatedEpoch = new Map<SymbolCode, number>();
 
   constructor(configs: DetectorConfig[], strategy?: StrategyConfig) {
     super();
@@ -69,6 +73,9 @@ export class Engine extends EventEmitter {
       }
     }
     this.barIndex.set(symbol, history.length - 1);
+    if (history.length > 0) {
+      this.lastEvaluatedEpoch.set(symbol, history[history.length - 1].epoch);
+    }
   }
 
   reset(symbol: SymbolCode) {
@@ -76,6 +83,7 @@ export class Engine extends EventEmitter {
     this.state.delete(symbol);
     this.recentDetectorSignals.delete(symbol);
     this.barIndex.delete(symbol);
+    this.lastEvaluatedEpoch.delete(symbol);
   }
 
   onCandle(symbol: SymbolCode, candle: Candle, isNew: boolean): {
@@ -91,14 +99,45 @@ export class Engine extends EventEmitter {
     regime?: RegimeSnapshot;
   } {
     const buf = this.buffers.get(symbol) ?? new CandleBuffer();
-    buf.push(candle);
-    this.buffers.set(symbol, buf);
 
-    if (!isNew) return {
-      signals: [], orderBlocks: [], mitigatedBlockIds: [], structureMarks: [],
-      liquidityPools: [], liquidityPoolsSwept: [], liquidityPoolsRemoved: [],
-      diagnostics: [],
-    };
+    // CRITICAL ORDER (fixed 2026-05-03): when isNew=true (a new bar's first
+    // tick), the PREVIOUS bar (currently the last entry in buf) just finalized
+    // its close. We must run detectors on that finalized previous bar BEFORE
+    // pushing the new bar. Pushing first would put the new bar (with only its
+    // first-tick close) at length-1, and the detector would evaluate it as
+    // "current bar" — missing 5 minutes of price action that already happened
+    // during the bar that just closed. This bug caused R-stack to silently
+    // emit zero signals for hours of live operation.
+    if (!isNew) {
+      // Tick update of the still-forming bar — update buffer, don't fire detectors.
+      buf.push(candle);
+      this.buffers.set(symbol, buf);
+      return {
+        signals: [], orderBlocks: [], mitigatedBlockIds: [], structureMarks: [],
+        liquidityPools: [], liquidityPoolsSwept: [], liquidityPoolsRemoved: [],
+        diagnostics: [],
+      };
+    }
+
+    // isNew=true → bar transition. The current buf.last is the just-finalized
+    // previous bar (its final close was set by the last tick update). Fire
+    // detectors on it as "current bar" — UNLESS we've already evaluated this
+    // epoch (happens once at startup: the first live ohlc fires before we've
+    // pushed the new bar, but the seed already evaluated the last seed bar).
+    const lastBuf = buf.last();
+    const alreadyEvaluated = lastBuf != null && (this.lastEvaluatedEpoch.get(symbol) ?? -1) >= lastBuf.epoch;
+    if (buf.length() === 0 || alreadyEvaluated) {
+      // Either no buffer yet, or the previous bar was already evaluated during
+      // seed/prior live evaluation. Just push and return.
+      buf.push(candle);
+      this.buffers.set(symbol, buf);
+      return {
+        signals: [], orderBlocks: [], mitigatedBlockIds: [], structureMarks: [],
+        liquidityPools: [], liquidityPoolsSwept: [], liquidityPoolsRemoved: [],
+        diagnostics: [],
+      };
+    }
+    if (lastBuf) this.lastEvaluatedEpoch.set(symbol, lastBuf.epoch);
 
     const idx = (this.barIndex.get(symbol) ?? -1) + 1;
     this.barIndex.set(symbol, idx);
@@ -147,6 +186,12 @@ export class Engine extends EventEmitter {
       recentByDetector: recent,
       currentBarIndex: idx,
     });
+
+    // Detectors evaluated on the just-closed previous bar. Now push the new
+    // bar (the just-arrived tick is its first sample) onto the buffer so
+    // future tick updates and the next bar transition see it.
+    buf.push(candle);
+    this.buffers.set(symbol, buf);
 
     return {
       signals: decision.allowedSignals,
