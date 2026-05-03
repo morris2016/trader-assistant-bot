@@ -193,6 +193,9 @@ export type FastPaperResp = {
 
 export type Fast2PaperResp = Omit<FastPaperResp, "config"> & {
   config: Fast2Config;
+  /** Last-known close price per symbol with an open position. Used by the
+   *  UI to render live unrealized P&L + SL/TP progress per row. */
+  prices?: Record<string, number>;
 };
 
 export type LogEntry = {
@@ -253,6 +256,14 @@ export const api = {
       else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
+  },
+  /** Manually close an open Fast2 position. `mode` is "paper" or "live"
+   *  depending on which sandbox owns the position. */
+  closeFast2Position: (id: string, mode: "paper" | "live") => {
+    const p = new URLSearchParams();
+    p.set("id", id);
+    p.set("mode", mode);
+    return post<{ ok: boolean }>(`/api/control/close-fast2-position?${p.toString()}`);
   },
   /** Update or clear a per-strategy override under fast2Config.perStrategy.
    *  Pass `clear: true` to remove the override (strategy falls back to general). */

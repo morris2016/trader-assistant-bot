@@ -50,7 +50,7 @@ async function main() {
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -68,6 +68,7 @@ async function main() {
       getFast2StrategyStats: () => [],
       getFast2Config: () => ({ ...DEFAULT_FAST2_CONFIG }),
       getDiagnostics: () => [],
+      getLastPriceFor: () => null,
       getRecentLogs: (limit: number) => bootLog.tail(limit),
     });
     process.on("SIGTERM", () => { idleHttp.close().finally(() => process.exit(0)); });
@@ -475,6 +476,26 @@ async function main() {
         persist();
         log.warn("fast2 per-strategy override updated", { strategyId, patch: cleaned, merged });
       },
+      closeFast2Position: async (id: string, mode: "paper" | "live") => {
+        if (mode === "live") {
+          await real.closeContract(id);
+          log.warn("fast2 LIVE position manually closed via API", { id });
+          return;
+        }
+        // Paper close: settle the position at the current last-known price
+        // for that symbol. Picks the latest close from any engine running it.
+        const pos = fast2Paper.getState().open.find((p) => p.id === id);
+        if (!pos) throw new Error("position not found");
+        let exitPrice: number | null = null;
+        for (const eng of engines.values()) {
+          const px = eng.lastCloseFor(pos.symbol as SymbolCode);
+          if (px != null) { exitPrice = px; break; }
+        }
+        if (exitPrice == null) throw new Error("no live price available for symbol");
+        const closed = fast2Paper.closeById(id, exitPrice, Date.now(), "manual");
+        if (!closed) throw new Error("close failed");
+        log.warn(`fast2Paper position manually closed: ${closed.symbol} ${closed.side} pnl=$${closed.pnl.toFixed(2)} at exit=${exitPrice.toFixed(5)}`);
+      },
       forceResubscribe: async () => {
         log.warn("force-resubscribe initiated via API");
         await deriv.forgetAll("candles").catch(() => undefined);
@@ -624,6 +645,15 @@ async function main() {
         engine: eng.diagnose(sym as SymbolCode),
       };
     }),
+    getLastPriceFor: (symbol: string) => {
+      // Prefer the most-recent close from any engine running this symbol
+      // (across granularities). Fast2 strategies are 5m so usually only one.
+      for (const eng of engines.values()) {
+        const px = eng.lastCloseFor(symbol as SymbolCode);
+        if (px != null) return px;
+      }
+      return null;
+    },
     getFastStrategyStats: () => {
       const sigs = recentSignals;
       return FAST_STRATEGIES.map((s) => {
@@ -1159,13 +1189,20 @@ async function main() {
         log.info("fast2 signal blocked by session-DD circuit", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
         handledFast2 = true;
       } else {
-        // Dedupe must look at the path that will actually open the trade.
-        // In LIVE mode, look at real.open[] for an existing fast2-tagged
-        // position on this symbol. In PAPER mode, look at fast2Paper.open.
+        // Dedupe per-strategy (was per-symbol — too restrictive when one
+        // symbol hosts multiple strategies, e.g. BOOM300N has fade_up +
+        // drift_down, JD75 has fade_up + fade_down). Each strategy can have
+        // ONE concurrent open at a time; different strategies on the same
+        // symbol run in parallel.
         const isLiveMode = sCfg.liveTradingEnabled;
+        const stratDetectorIds = fast2Match.detectors.filter((d) => d.enabled).map((d) => d.id);
         const alreadyOpen = isLiveMode
-          ? real.state().open.some((t) => t.sandbox === "fast2" && t.symbol === sig.symbol)
-          : fast2Paper.getState().open.some((p) => p.symbol === sig.symbol);
+          ? real.state().open.some((t) => t.sandbox === "fast2" && t.sandboxStrategyId === fast2Match.id)
+          : fast2Paper.getState().open.some((p) =>
+              p.symbol === sig.symbol &&
+              stratDetectorIds.includes(p.detector) &&
+              p.side === sig.action,
+            );
         if (alreadyOpen) {
           log.info("fast2 signal skipped — position already open", { symbol: sig.symbol, side: sig.action, strategy: fast2Match.id, mode: isLiveMode ? "live" : "paper" });
           handledFast2 = true;

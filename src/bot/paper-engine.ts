@@ -370,6 +370,48 @@ export class PaperEngine {
     return settled;
   }
 
+  /**
+   * Manually close an open position by id at a given exit price. Mirrors the
+   * onCandle settle path (commission already paid at open, gross pnl computed
+   * from the linear multiplier model, balance + adaptive shift updated).
+   * Returns the closed position, or null if `id` is not open.
+   */
+  closeById(id: string, exitPrice: number, closedAt: number, _reason: "manual"): ClosedPaperPosition | null {
+    const idx = this.state.open.findIndex((p) => p.id === id);
+    if (idx < 0) return null;
+    const pos = this.state.open[idx];
+    if (!isFinite(exitPrice) || exitPrice <= 0) return null;
+    const moveAmt = (exitPrice - pos.entryPrice) / pos.entryPrice;
+    const sideSign = pos.side === "BUY" ? 1 : -1;
+    const pnlPct = Math.max(-1, moveAmt * pos.multiplier * sideSign);
+    const grossPnl = pos.stake * pnlPct;
+    const closed: ClosedPaperPosition = {
+      ...pos,
+      closedAt,
+      closedAtCandleEpoch: pos.openedAtCandleEpoch,
+      exitPrice,
+      result: grossPnl > 0 ? "won" : "lost",
+      pnl: round2(grossPnl),
+      rMultiple: pos.stake > 0 ? round2(grossPnl / pos.stake) : 0,
+    };
+    this.state.balance = round2(this.state.balance + grossPnl);
+    this.state.daily.profit = round2(this.state.daily.profit + grossPnl);
+    this.state.closed.unshift(closed);
+    if (this.state.closed.length > MAX_CLOSED_RETAINED) this.state.closed.length = MAX_CLOSED_RETAINED;
+    this.state.equity.push({ ts: closed.closedAt, balance: this.state.balance });
+    if (this.state.equity.length > MAX_EQUITY_POINTS) this.state.equity.splice(0, this.state.equity.length - MAX_EQUITY_POINTS);
+    this.state.adaptiveShift = updateAfterTrade(
+      this.state.adaptiveShift,
+      grossPnl > 0 ? "W" : "L",
+      pos.side,
+      pos.symbol,
+      closed.closedAt,
+    );
+    this.state.open.splice(idx, 1);
+    this.emit();
+    return closed;
+  }
+
   describeAdaptive(): string {
     const a = this.state.adaptiveShift;
     const parts: string[] = [];

@@ -42,6 +42,10 @@ export type ManualControls = {
    *  If `patch` is null, the override entry is removed (strategy falls back
    *  to the general config). */
   updateFast2StrategyConfig: (strategyId: string, patch: Partial<Fast2Config> | null) => void;
+  /** Manually close an open Fast2 position. `id` is the paper position id
+   *  or live trade id depending on mode. Throws if the position can't be
+   *  found or close fails (Deriv sell error, etc.). */
+  closeFast2Position: (id: string, mode: "paper" | "live") => Promise<void>;
   /** Force a fresh resubscribe — wipes local engine state, calls deriv.forgetAll, re-runs subscribeAll. */
   forceResubscribe: () => Promise<void>;
   /** Reconcile open Real contracts with Deriv: snapshot each, settle any that
@@ -145,6 +149,10 @@ export function startHttpServer(opts: {
   getFast2Config: () => Fast2Config;
   /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
   getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
+  /** Most-recent close price for a symbol across any engine (used by the UI
+   *  to compute live unrealized P&L on open trades). Returns null if the
+   *  symbol has not been seeded yet. */
+  getLastPriceFor: (symbol: string) => number | null;
   /** Recent in-memory log entries for the web UI's Logs panel. */
   getRecentLogs: (limit: number) => Array<import("./logger").LogEntry>;
 }): HttpServerHandle {
@@ -155,7 +163,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/close-fast2-position" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -240,6 +248,21 @@ export function startHttpServer(opts: {
             } else {
               opts.manualControls.updateFast2Config(patch);
             }
+          }
+          else if (path0 === "/api/control/close-fast2-position") {
+            const id = url.searchParams.get("id");
+            const modeQ = url.searchParams.get("mode");
+            const mode: "paper" | "live" = modeQ === "live" ? "live" : "paper";
+            if (!id) { json(res, 400, { error: "id required" }); return; }
+            try {
+              await opts.manualControls.closeFast2Position(id, mode);
+              opts.logger.warn("fast2 position manually closed", { id, mode });
+              json(res, 200, { ok: true });
+            } catch (e) {
+              opts.logger.error("manual close failed", { id, mode, err: (e as Error).message });
+              json(res, 500, { error: (e as Error).message });
+            }
+            return;
           }
           else if (path0 === "/api/control/resubscribe") {
             opts.manualControls.forceResubscribe().catch((e) => opts.logger.error("forceResubscribe failed", { err: (e as Error).message }));
@@ -407,6 +430,14 @@ export function startHttpServer(opts: {
         if (path0 === "/api/fast2-paper") {
           const ps = opts.getFast2PaperState();
           const stats = opts.getFast2PaperStats();
+          // Snapshot of last-known prices for each symbol with an open position.
+          // The UI uses this to render live unrealized P&L per row + a SL/TP
+          // progress bar so the operator can intervene before the bot does.
+          const prices: Record<string, number> = {};
+          for (const p of ps.open) {
+            const px = opts.getLastPriceFor(p.symbol);
+            if (px != null) prices[p.symbol] = px;
+          }
           json(res, 200, {
             stats,
             startingBalance: ps.startingBalance,
@@ -415,6 +446,7 @@ export function startHttpServer(opts: {
             open: ps.open,
             martingale: opts.getFast2Martingale(),
             config: opts.getFast2Config(),
+            prices,
           });
           return;
         }

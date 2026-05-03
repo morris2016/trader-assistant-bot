@@ -618,9 +618,13 @@ export function Fast2Panel({ state, doAction, pending }: {
                       <th style={{ textAlign: "right" }}>Stake</th>
                       <th style={{ textAlign: "right" }}>MULT</th>
                       <th style={{ textAlign: "right" }}>Entry</th>
+                      <th style={{ textAlign: "right" }}>Current</th>
+                      <th style={{ textAlign: "right" }}>uPnL</th>
+                      <th style={{ minWidth: 110 }}>SL ──── TP</th>
                       <th style={{ textAlign: "right" }}>SL</th>
                       <th style={{ textAlign: "right" }}>TP</th>
                       {isLive && <th style={{ textAlign: "right" }}>Contract</th>}
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -631,6 +635,34 @@ export function Fast2Panel({ state, doAction, pending }: {
                         : ageMs < 3_600_000
                           ? `${Math.floor(ageMs / 60_000)}m`
                           : `${(ageMs / 3_600_000).toFixed(1)}h`;
+                      const cur = paper.prices?.[r.symbol] ?? null;
+                      // Unrealized P&L using same linear-multiplier model as
+                      // settlement (gross — commission already deducted at open).
+                      let upnl: number | null = null;
+                      let progressPct: number | null = null;
+                      let priceDelta: number | null = null;
+                      if (cur != null && r.entryPrice && r.entryPrice > 0) {
+                        const move = (cur - r.entryPrice) / r.entryPrice;
+                        const sideSign = r.side === "BUY" ? 1 : -1;
+                        upnl = Math.max(-r.stake, r.stake * (r.multiplier ?? 1) * move * sideSign);
+                        priceDelta = cur - r.entryPrice;
+                        // Map current price into [SL, TP] range. For BUY: SL<entry<TP. For SELL: TP<entry<SL.
+                        if (r.stopPrice != null && r.takeProfitPrice != null) {
+                          const slDist = Math.abs(r.entryPrice - r.stopPrice);
+                          const tpDist = Math.abs(r.takeProfitPrice - r.entryPrice);
+                          if (r.side === "BUY") {
+                            // Range is [SL=0%, entry=center, TP=100%]
+                            if (cur >= r.entryPrice) progressPct = 50 + (Math.min(cur, r.takeProfitPrice) - r.entryPrice) / tpDist * 50;
+                            else                    progressPct = 50 - (r.entryPrice - Math.max(cur, r.stopPrice)) / slDist * 50;
+                          } else {
+                            // SELL: TP below entry, SL above. Same scale: SL=0%, entry=center, TP=100%.
+                            if (cur <= r.entryPrice) progressPct = 50 + (r.entryPrice - Math.max(cur, r.takeProfitPrice)) / tpDist * 50;
+                            else                    progressPct = 50 - (Math.min(cur, r.stopPrice) - r.entryPrice) / slDist * 50;
+                          }
+                          progressPct = Math.max(0, Math.min(100, progressPct));
+                        }
+                      }
+                      const upnlClass = upnl == null ? "muted" : upnl > 0 ? "pos" : upnl < 0 ? "neg" : "muted";
                       return (
                         <tr key={r.id}>
                           <td>{fmtTime(r.openedAt)} <span className="muted" style={{ fontSize: 10 }}>({ageStr})</span></td>
@@ -640,9 +672,41 @@ export function Fast2Panel({ state, doAction, pending }: {
                           <td style={{ textAlign: "right" }}>${r.stake.toFixed(2)}</td>
                           <td style={{ textAlign: "right" }}>{r.multiplier ? `${r.multiplier}×` : "—"}</td>
                           <td style={{ textAlign: "right" }}>{r.entryPrice ? r.entryPrice.toFixed(5) : "—"}</td>
+                          <td style={{ textAlign: "right" }} className={`mono ${priceDelta == null ? "" : priceDelta > 0 ? "pos" : priceDelta < 0 ? "neg" : ""}`}>
+                            {cur != null ? cur.toFixed(5) : "—"}
+                            {priceDelta != null && (
+                              <div className="muted" style={{ fontSize: 10 }}>
+                                {priceDelta >= 0 ? "+" : ""}{priceDelta.toFixed(5)}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ textAlign: "right" }} className={`mono ${upnlClass}`}>
+                            {upnl == null ? "—" : `${upnl >= 0 ? "+" : ""}$${upnl.toFixed(2)}`}
+                          </td>
+                          <td>
+                            {progressPct == null ? <span className="muted" style={{ fontSize: 10 }}>no price</span> : (
+                              <div style={{ position: "relative", height: 8, background: "#2a2f44", borderRadius: 4, overflow: "hidden" }} title={`${progressPct.toFixed(1)}% (0=SL, 50=entry, 100=TP)`}>
+                                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${progressPct}%`, background: progressPct >= 50 ? "#3acc7c" : "#e5526e" }} />
+                                <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "#888" }} />
+                              </div>
+                            )}
+                          </td>
                           <td style={{ textAlign: "right" }}>{r.stopPrice ? r.stopPrice.toFixed(5) : "—"}</td>
                           <td style={{ textAlign: "right" }}>{r.takeProfitPrice ? r.takeProfitPrice.toFixed(5) : "—"}</td>
                           {isLive && <td style={{ textAlign: "right", fontSize: 11 }} className="muted">{r.contractId ?? "—"}</td>}
+                          <td>
+                            <button
+                              className="btn btn-warn btn-sm"
+                              onClick={() => {
+                                if (!confirm(`Close ${r.symbol} ${r.side} now${upnl != null ? ` at uPnL ${upnl >= 0 ? "+" : ""}$${upnl.toFixed(2)}` : ""}?`)) return;
+                                doAction(`close ${r.id}`, () => api.closeFast2Position(r.id, isLive ? "live" : "paper"));
+                              }}
+                              disabled={pending !== null || (isLive && r.contractId == null)}
+                              title={isLive ? "Sell the contract on Deriv now" : "Close paper position at the current price"}
+                            >
+                              close
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
