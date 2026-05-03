@@ -371,6 +371,63 @@ export class PaperEngine {
   }
 
   /**
+   * Apply a raw P&L delta to the paper balance and record a synthetic
+   * closed-trade entry. Used by Fast3 (DIGITODD tick contracts) where there's
+   * no entry-price geometry to track — just a binary win/loss outcome.
+   * Returns the synthetic closed position.
+   */
+  applyDelta(pnl: number, opts: {
+    symbol: SymbolCode;
+    side: "BUY" | "SELL";
+    detector: string;
+    strategyId?: string;
+    stake: number;
+    result: "won" | "lost";
+    pnl: number;
+    openedAt: number;
+    closedAt: number;
+    entryPrice: number;
+    exitPrice: number;
+  }): ClosedPaperPosition {
+    const closed: ClosedPaperPosition = {
+      id: randomUUID(),
+      signalId: opts.strategyId ?? "",
+      symbol: opts.symbol,
+      side: opts.side,
+      detector: opts.detector,
+      stake: opts.stake,
+      multiplier: 1,
+      entryPrice: opts.entryPrice,
+      stopPrice: 0,
+      takeProfitPrice: 0,
+      openedAt: opts.openedAt,
+      openedAtCandleEpoch: 0,
+      granularity: 0,
+      appliedShiftMultiplier: 1,
+      appliedShiftReasons: "",
+      commission: 0,
+      entrySpread: 0,
+      slSlippageFrac: 0,
+      entryFinalized: true,
+      signalEntryPrice: opts.entryPrice,
+      closedAt: opts.closedAt,
+      closedAtCandleEpoch: 0,
+      exitPrice: opts.exitPrice,
+      result: opts.result,
+      pnl: round2(opts.pnl),
+      rMultiple: opts.stake > 0 ? round2(opts.pnl / opts.stake) : 0,
+    };
+    this.state.balance = round2(this.state.balance + pnl);
+    this.state.daily.profit = round2(this.state.daily.profit + pnl);
+    this.state.closed.unshift(closed);
+    if (this.state.closed.length > MAX_CLOSED_RETAINED) this.state.closed.length = MAX_CLOSED_RETAINED;
+    this.state.equity.push({ ts: closed.closedAt, balance: this.state.balance });
+    if (this.state.equity.length > MAX_EQUITY_POINTS) this.state.equity.splice(0, this.state.equity.length - MAX_EQUITY_POINTS);
+    this.emit();
+    return closed;
+  }
+
+  /**
    * Manually close an open position by id at a given exit price. Mirrors the
    * onCandle settle path (commission already paid at open, gross pnl computed
    * from the linear multiplier model, balance + adaptive shift updated).

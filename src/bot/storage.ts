@@ -145,6 +145,34 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   liveTradingEnabled: true,      // SHIPPED LIVE 2026-05-02 with validated R-stack
 };
 
+/** Fast3 — DIGITODD tick-level binary contracts on synthetic indices.
+ *  Each tick = one DIGITODD bet. Win pays 1.93×; loss = -stake. The
+ *  measured base-rate WR across synthetic symbols is 55-57% (RNG only
+ *  produces digits 1-9, so P(odd) = 5/9 = 55.5%).
+ *
+ *  Default config (validated 2026-05-03 last-hour real-acc sim):
+ *    $41 acct  / $1 stake / 1.5× mart depth=∞ (capped by affordability) /
+ *    7 symbols (R_50, RDBEAR, RDBULL, R_75, JD75, 1HZ50V, 1HZ100V)
+ *    → $41 → $986 with frictions in 1h, ZERO bust events.
+ *
+ *  tradeMultiplier is unused for DIGITODD (binary payout) — kept in the
+ *  config schema so the UI is uniform with Fast2. */
+export type Fast3Config = FastSandboxConfig;
+export const DEFAULT_FAST3_CONFIG: Fast3Config = {
+  tradeMultiplier: 100,            // unused for DIGIT contracts; UI parity only
+  martingaleMultiplier: 1.5,
+  baseStake: 1,
+  maxLevels: 6,                    // L6 cum-loss $32 fits $41 acct; L7 BUSTS
+  perTradeCap: 50,                 // Deriv DIGIT contract typical max stake
+  commissionPct: 0,                // DIGITs don't carry commission like multipliers
+  entrySpreadBps: 0,
+  slSlippageBps: 0,
+  forceMartingale: false,
+  sideFilter: "both",
+  martingaleMode: "classic",
+  liveTradingEnabled: false,       // PAPER ONLY by default — flip after live wiring
+};
+
 /** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.
  *  Source: Deriv contracts_for response (multiplier_range field). Anything
  *  outside this set is rejected by the buy endpoint with
@@ -203,6 +231,12 @@ export type BotState = {
    *  tagged sandbox="fast2" settles. Cannot influence paper stake. */
   fast2MartingaleLive: Record<string, MartingaleState>;
   fast2Config: Fast2Config;
+  /** Fast3 sandbox — DIGITODD tick-level book on synthetic indices.
+   *  Parallel to Fast2 but trades binary 1-tick contracts, not multipliers. */
+  fast3Paper: PaperState;
+  fast3MartingalePaper: Record<string, MartingaleState>;
+  fast3MartingaleLive: Record<string, MartingaleState>;
+  fast3Config: Fast3Config;
 };
 
 const MAX_CLOSED_RETAINED = 500;
@@ -221,6 +255,10 @@ export function emptyBotState(): BotState {
     fast2MartingalePaper: {},
     fast2MartingaleLive: {},
     fast2Config: { ...DEFAULT_FAST2_CONFIG },
+    fast3Paper: emptyPaperState(41), // Fast3 sandbox sized to validated $41 / $1 / 1.5× DIGITODD book
+    fast3MartingalePaper: {},
+    fast3MartingaleLive: {},
+    fast3Config: { ...DEFAULT_FAST3_CONFIG },
   };
 }
 
@@ -305,6 +343,14 @@ export class BotStorage {
           ...(parsed.fast2Config ?? {}),
           ...(prefs.fast2Config ?? {}),
         }),
+        fast3Paper: parsed.fast3Paper ?? emptyPaperState(41),
+        fast3MartingalePaper: parsed.fast3MartingalePaper ?? {},
+        fast3MartingaleLive: parsed.fast3MartingaleLive ?? {},
+        fast3Config: {
+          ...DEFAULT_FAST3_CONFIG,
+          ...(parsed.fast3Config ?? {}),
+          ...(prefs.fast3Config ?? {}),
+        },
       };
     } catch (e: any) {
       if (e?.code === "ENOENT") {
@@ -315,13 +361,14 @@ export class BotStorage {
           ...empty,
           fast1Config: { ...empty.fast1Config, ...(prefs.fast1Config ?? {}) },
           fast2Config: applyFast2EnvOverrides({ ...empty.fast2Config, ...(prefs.fast2Config ?? {}) }),
+          fast3Config: { ...empty.fast3Config, ...(prefs.fast3Config ?? {}) },
         };
       }
       throw e;
     }
   }
 
-  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config> }> {
+  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; fast3Config?: Partial<Fast3Config> }> {
     try {
       const raw = await fs.readFile(this.prefsFile, "utf8");
       return JSON.parse(raw);
@@ -357,6 +404,7 @@ export class BotStorage {
       const prefs = {
         fast1Config: state.fast1Config,
         fast2Config: state.fast2Config,
+        fast3Config: state.fast3Config,
       };
       const prefsTmp = this.prefsFile + ".tmp";
       const prefsJson = JSON.stringify(prefs, null, 2);

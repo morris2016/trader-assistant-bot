@@ -17,12 +17,13 @@ import { STRATEGIES } from "../main/engine/strategies";
 import { strategiesForSymbol } from "../main/engine/strategies";
 import { FAST_STRATEGIES, isFastSymbol, fastStrategiesForSymbol } from "../main/engine/fast-strategies";
 import { FAST2_STRATEGIES } from "../main/engine/fast2-strategies";
+import { FAST3_STRATEGIES, FAST3_DETECTOR_TAG } from "../main/engine/fast3-strategies";
 import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -50,7 +51,7 @@ async function main() {
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, resetFast3Paper: () => {}, updateFast3Config: () => {}, updateFast3StrategyConfig: () => {}, closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -67,6 +68,11 @@ async function main() {
       getFast2Martingale: () => ({}),
       getFast2StrategyStats: () => [],
       getFast2Config: () => ({ ...DEFAULT_FAST2_CONFIG }),
+      getFast3PaperState: () => emptyPaperState(),
+      getFast3PaperStats: () => ({}),
+      getFast3Martingale: () => ({}),
+      getFast3StrategyStats: () => [],
+      getFast3Config: () => ({ ...DEFAULT_FAST3_CONFIG }),
       getDiagnostics: () => [],
       getLastPriceFor: () => null,
       getRecentLogs: (limit: number) => bootLog.tail(limit),
@@ -175,6 +181,36 @@ async function main() {
   let fast2SessionPeak = fast2Paper.getState().balance;
   let fast2DDPaused = false;
 
+  // ── Fast3: DIGITODD tick-level sandbox ───────────────────────────────────
+  // Distinct from Fast2: fires on every TICK (not bar close), uses binary
+  // 1-tick contracts (DIGITODD), no SL/TP geometry. Per-tick: 55% WR base
+  // rate × 1.95× payout = ~5% per-tick edge. Validated 2026-05-03.
+  const fast3Paper = new PaperEngine(persisted.fast3Paper);
+  const fast3MartingalePaper: Record<string, MartingaleState> = { ...persisted.fast3MartingalePaper };
+  const fast3MartingaleLive: Record<string, MartingaleState> = { ...persisted.fast3MartingaleLive };
+  for (const s of FAST3_STRATEGIES) {
+    if (!fast3MartingalePaper[s.id]) fast3MartingalePaper[s.id] = emptyMartingaleState();
+    if (!fast3MartingaleLive[s.id]) fast3MartingaleLive[s.id] = emptyMartingaleState();
+  }
+  let fast3Config: Fast3Config = { ...DEFAULT_FAST3_CONFIG, ...persisted.fast3Config };
+  const fast3ConfigFor = (strategyId: string): Fast3Config =>
+    resolveFastConfig(fast3Config, strategyId);
+  const fast3MartingaleFor = (mode: "paper" | "live"): Record<string, MartingaleState> =>
+    mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
+  const fast3ActiveMode = (): "paper" | "live" =>
+    fast3Config.liveTradingEnabled ? "live" : "paper";
+  // Per-symbol pending bet: tracks DIGITODD bets that have been placed at
+  // tick T and are waiting for tick T+1 to settle. Key = symbol; value =
+  // { entryEpoch, stake, strategyId, mode }. The next tick on the same
+  // symbol settles it.
+  type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
+  const fast3Pending = new Map<string, Fast3Pending>();
+  log.info("fast3Paper: state loaded", {
+    balance: fast3Paper.getState().balance,
+    closed: fast3Paper.getState().closed.length,
+    config: fast3Config,
+  });
+
   const deriv = new DerivClient({ appId: cfg.derivAppId });
   // One Engine instance per (symbol, granularity). Engine state (detector pools,
   // ATR/ADX windows, recent signals) is symbol-keyed internally — running two
@@ -264,11 +300,16 @@ async function main() {
       fast2MartingalePaper,
       fast2MartingaleLive,
       fast2Config,
+      fast3Paper: fast3Paper.getState(),
+      fast3MartingalePaper,
+      fast3MartingaleLive,
+      fast3Config,
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
   paper.onChange(() => persist());
   fastPaper.onChange(() => persist());
   fast2Paper.onChange(() => persist());
+  fast3Paper.onChange(() => persist());
 
   // Persist on every state change (settle, open, capHit, adaptive update)
   real.on("opened", (t) => { log.info("trade opened", { symbol: t.symbol, side: t.side, stake: t.stake, detector: t.detector, contractId: t.contractId, sandbox: t.sandbox ?? "real" }); persist(); });
@@ -475,6 +516,53 @@ async function main() {
         fast2Config = { ...fast2Config, perStrategy: beforePerStrat };
         persist();
         log.warn("fast2 per-strategy override updated", { strategyId, patch: cleaned, merged });
+      },
+      // ── Fast3 manual controls ──
+      resetFast3Paper: (balance?: number) => {
+        const newBal = balance ?? 41;
+        fast3Paper.reset(newBal);
+        for (const sId of Object.keys(fast3MartingalePaper)) fast3MartingalePaper[sId] = emptyMartingaleState();
+        for (const sId of Object.keys(fast3MartingaleLive)) fast3MartingaleLive[sId] = emptyMartingaleState();
+        persist();
+        log.warn(`fast3Paper reset via API to $${newBal.toFixed(2)} — all DIGITODD ladders cleared`);
+      },
+      updateFast3Config: (patch: Partial<Fast3Config>) => {
+        const before = { ...fast3Config };
+        const next: Fast3Config = { ...fast3Config, ...patch };
+        if (!isFinite(next.martingaleMultiplier) || next.martingaleMultiplier <= 1) next.martingaleMultiplier = before.martingaleMultiplier;
+        if (!isFinite(next.baseStake) || next.baseStake <= 0) next.baseStake = before.baseStake;
+        if (!isFinite(next.maxLevels) || next.maxLevels < 1) next.maxLevels = before.maxLevels;
+        if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
+        if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
+        if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
+        if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
+        if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
+        if (next.baseStake < DERIV_MIN_STAKE_USD) next.baseStake = DERIV_MIN_STAKE_USD;
+        if (next.perTradeCap > DERIV_MAX_STAKE_USD) next.perTradeCap = DERIV_MAX_STAKE_USD;
+        if (next.perTradeCap < DERIV_MIN_STAKE_USD) next.perTradeCap = DERIV_MIN_STAKE_USD;
+        fast3Config = next;
+        persist();
+        log.warn("fast3Config updated via API", { before, after: next });
+      },
+      updateFast3StrategyConfig: (strategyId: string, patch: Partial<Fast3Config> | null) => {
+        const beforePerStrat = { ...(fast3Config.perStrategy ?? {}) };
+        if (patch === null) {
+          if (beforePerStrat[strategyId]) delete beforePerStrat[strategyId];
+          fast3Config = { ...fast3Config, perStrategy: beforePerStrat };
+          persist();
+          return;
+        }
+        const cleaned: Partial<Fast3Config> = {};
+        if (patch.martingaleMultiplier != null && isFinite(patch.martingaleMultiplier) && patch.martingaleMultiplier > 1) cleaned.martingaleMultiplier = patch.martingaleMultiplier;
+        if (patch.baseStake != null && isFinite(patch.baseStake) && patch.baseStake >= DERIV_MIN_STAKE_USD) cleaned.baseStake = patch.baseStake;
+        if (patch.maxLevels != null && isFinite(patch.maxLevels) && patch.maxLevels >= 1) cleaned.maxLevels = Math.round(patch.maxLevels);
+        if (patch.perTradeCap != null && isFinite(patch.perTradeCap) && patch.perTradeCap >= DERIV_MIN_STAKE_USD) cleaned.perTradeCap = Math.min(patch.perTradeCap, DERIV_MAX_STAKE_USD);
+        if (typeof patch.enabled === "boolean") cleaned.enabled = patch.enabled;
+        if (patch.sideFilter === "both" || patch.sideFilter === "BUY" || patch.sideFilter === "SELL") cleaned.sideFilter = patch.sideFilter;
+        const merged: Partial<Fast3Config> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
+        beforePerStrat[strategyId] = merged;
+        fast3Config = { ...fast3Config, perStrategy: beforePerStrat };
+        persist();
       },
       closeFast2Position: async (id: string, mode: "paper" | "live") => {
         if (mode === "live") {
@@ -708,6 +796,41 @@ async function main() {
         };
       });
     },
+    getFast3PaperState: () => fast3Paper.getState(),
+    getFast3PaperStats: () => fast3Paper.stats() as unknown as Record<string, number>,
+    getFast3Martingale: () => {
+      const out: Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }> = {};
+      const map = fast3MartingaleFor(fast3ActiveMode());
+      for (const s of FAST3_STRATEGIES) {
+        const m = map[s.id] ?? emptyMartingaleState();
+        const cfg = fast3ConfigFor(s.id);
+        const params: MartingaleParams = { baseStake: cfg.baseStake, multiplier: cfg.martingaleMultiplier, maxLevels: cfg.maxLevels, perTradeCap: cfg.perTradeCap };
+        out[s.id] = { level: m.level, wins: m.wins, losses: m.losses, circuitBreakers: m.circuitBreakers, lastCircuitBreakerAt: m.lastCircuitBreakerAt, nextStake: fastNextStake(m, params) };
+      }
+      return out;
+    },
+    getFast3Config: () => ({ ...fast3Config }),
+    getFast3StrategyStats: () => {
+      return FAST3_STRATEGIES.map((s) => {
+        const sSyms = new Set(s.symbols);
+        // Fast3 closed trades have detector === FAST3_DETECTOR_TAG
+        const closed = fast3Paper.getState().closed.filter((t) => sSyms.has(t.symbol) && t.detector === FAST3_DETECTOR_TAG);
+        const wins = closed.filter((t) => t.pnl > 0).length;
+        const pnl = closed.reduce((acc, t) => acc + t.pnl, 0);
+        return {
+          id: s.id, name: s.name, description: s.description, symbols: s.symbols, granularity: s.granularity,
+          validation: { expectancyR: s.validation?.expectancyR, winRate: s.validation?.winRate, pnlUsd: s.validation?.pnlUsd, trades: s.validation?.trades },
+          live: {
+            signals: closed.length, trades: closed.length, wins, losses: closed.length - wins,
+            pnlUsd: pnl, winRate: closed.length ? wins / closed.length : 0, expectancyR: 0,
+            lastSignalAt: closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null,
+            lastTradeAt: closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null,
+            barsSeen: 0,
+            lastBarSeenAt: null,
+          },
+        };
+      });
+    },
     getRecentLogs: (limit: number) => log.tail(limit),
   });
 
@@ -851,6 +974,23 @@ async function main() {
     } else {
       log.warn(`⚠ Fast2 NOT fully warmed — unsubscribed pairs: ${unwarmed.join(", ")}. Live trading will be partial until self-heal completes.`);
     }
+    // ── Fast3 tick subscription: ensure every Fast3 symbol has a tick stream ──
+    // Fast3 strategies are tick-level (granularity=0) and don't go through the
+    // candle pipeline. Subscribe to ticks for any Fast3 symbol that isn't
+    // already covered by a Fast2/STRATEGIES candle subscription.
+    const fast3Symbols = new Set<string>();
+    for (const s of FAST3_STRATEGIES) for (const sym of s.symbols) fast3Symbols.add(sym);
+    for (const sym of Array.from(fast3Symbols)) {
+      if (tickedSymbols.has(sym)) continue;
+      try {
+        await deriv.subscribeTicks(sym as SymbolCode);
+        tickedSymbols.add(sym);
+        log.info(`fast3 tick subscription: ${sym} active`);
+      } catch (e) {
+        log.warn(`fast3 tick subscription failed for ${sym}: ${(e as Error).message}`);
+      }
+    }
+    log.info(`✓ Fast3 DIGITODD ready (${FAST3_STRATEGIES.length} strategies / ${fast3Symbols.size} symbols)`);
   }
 
   // Candle handler — routes the candle to the (symbol, granularity)-specific
@@ -1748,6 +1888,108 @@ async function main() {
     // ours would mistakenly re-trigger subscribeAll on the next "open".
   });
   deriv.on("error", (err) => log.error("deriv error", { err: err.message ?? String(err) }));
+
+  // ── Fast3: tick-level DIGITODD dispatch ──────────────────────────────────
+  // For each Fast3 symbol, on every tick:
+  //   1. Settle any pending bet from the previous tick (resolution = current digit).
+  //   2. Place a new DIGITODD bet for the next tick (per-strategy ladder stake).
+  // The "next-tick" model: we bet at tick T on whether tick T+1 will be ODD.
+  // The pending map holds the in-flight bet until the next tick arrives.
+  const fast3LastDigitFor = (price: number): number => {
+    const s = price.toString();
+    const dot = s.indexOf(".");
+    if (dot < 0) return 0;
+    const dec = s.slice(dot + 1);
+    if (dec.length === 0) return 0;
+    return Number(dec[dec.length - 1]);
+  };
+  deriv.on("tick", (tick) => {
+    // Find all Fast3 strategies for this symbol
+    const stratsForSym = FAST3_STRATEGIES.filter((s) => s.symbols.includes(tick.symbol));
+    if (stratsForSym.length === 0) return;
+
+    // ── Settle any pending bet on this symbol ──
+    const pending = fast3Pending.get(tick.symbol);
+    if (pending && pending.entryEpoch < tick.epoch) {
+      fast3Pending.delete(tick.symbol);
+      const isOdd = fast3LastDigitFor(tick.quote) % 2 !== 0;
+      const cfg = fast3ConfigFor(pending.strategyId);
+      // DIGITODD payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
+      const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
+      const netPnl = isOdd ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
+      const ladderMap = pending.mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
+      const ladder = ladderMap[pending.strategyId] ?? emptyMartingaleState();
+      const params: MartingaleParams = {
+        baseStake: cfg.baseStake,
+        multiplier: cfg.martingaleMultiplier,
+        maxLevels: cfg.maxLevels,
+        perTradeCap: cfg.perTradeCap,
+      };
+      const nextLadder = fastMartingaleUpdate(ladder, netPnl > 0 ? "W" : "L", params, "classic");
+      ladderMap[pending.strategyId] = nextLadder;
+
+      if (pending.mode === "paper") {
+        // Apply pnl to fast3 paper balance directly (no SL/TP geometry).
+        const ps = fast3Paper.getState();
+        const newBal = Number((ps.balance + netPnl).toFixed(2));
+        fast3Paper.applyDelta(netPnl, {
+          symbol: tick.symbol,
+          side: "BUY",  // arbitrary tag — DIGITODD is a digit prediction, not directional
+          detector: FAST3_DETECTOR_TAG,
+          strategyId: pending.strategyId,
+          stake: pending.stake,
+          result: netPnl > 0 ? "won" : "lost",
+          pnl: netPnl,
+          openedAt: pending.entryEpoch * 1000,
+          closedAt: tick.epoch * 1000,
+          entryPrice: 0,
+          exitPrice: tick.quote,
+        });
+        log.debug(`fast3Paper settled ${tick.symbol} ${netPnl > 0 ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
+      }
+      // (live settlement is handled via real.on("settled") elsewhere)
+    }
+
+    // ── Place a new bet for the next tick ──
+    if (fast3Pending.has(tick.symbol)) return; // still busy waiting on settle from last tick
+    for (const strat of stratsForSym) {
+      const cfg = fast3ConfigFor(strat.id);
+      const enabled = (fast3Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
+      if (!enabled) continue;
+      const mode = fast3ActiveMode();
+      const ladderMap = mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
+      const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
+      const stake = Number((cfg.baseStake * Math.pow(cfg.martingaleMultiplier, ladder.level)).toFixed(2));
+      // Affordability + stake cap
+      const cappedStake = Math.min(stake, cfg.perTradeCap);
+      const ps = fast3Paper.getState();
+      if (mode === "paper" && ps.balance < cappedStake) {
+        // Reset ladder, can't afford this level
+        if (ladder.level > 0) ladderMap[strat.id] = emptyMartingaleState();
+        continue;
+      }
+      // Stake-cap hit → reset to L0 base stake
+      const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
+      if (mode === "live") {
+        // LIVE wiring stub: route to real.placeTrade with DIGITODD family.
+        // Real engine doesn't yet support DIGIT family — log + skip until that
+        // path is wired. Operator can flip livenoteEnabled=false to use paper.
+        log.warn("fast3 LIVE not yet wired (DIGIT family pending real.ts support)", { symbol: tick.symbol, strategy: strat.id });
+        continue;
+      }
+      fast3Pending.set(tick.symbol, {
+        entryEpoch: tick.epoch,
+        stake: finalStake,
+        strategyId: strat.id,
+        mode,
+      });
+      // Only one strategy fires per symbol per tick (first match wins);
+      // multiple Fast3 strategies on same symbol would collide on the
+      // pending slot anyway.
+      break;
+    }
+  });
+
   deriv.on("balance", (b) => {
     if (account) {
       const prev = account.balance;

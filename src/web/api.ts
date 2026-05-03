@@ -197,6 +197,10 @@ export type Fast2PaperResp = Omit<FastPaperResp, "config"> & {
    *  UI to render live unrealized P&L + SL/TP progress per row. */
   prices?: Record<string, number>;
 };
+export type Fast3Config = FastSandboxConfig;
+export type Fast3PaperResp = Omit<FastPaperResp, "config"> & {
+  config: Fast3Config;
+};
 
 export type LogEntry = {
   ts: string;
@@ -281,6 +285,38 @@ export const api = {
       }
     }
     return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
+  },
+  // ── Fast3 (DIGITODD tick-level) ──
+  fast3Paper: () => get<Fast3PaperResp>("/api/fast3-paper"),
+  fast3PaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/fast3-paper/trades?limit=${limit}`),
+  fast3PaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/fast3-paper/equity"),
+  fast3Strategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot>; config: Fast3Config }>("/api/fast3-strategies"),
+  fast3Config: () => get<{ config: Fast3Config }>("/api/fast3-config"),
+  resetFast3Paper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-fast3-paper${balance ? `?balance=${balance}` : ""}`),
+  updateFast3Config: (patch: Partial<Fast3Config>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === "perStrategy") continue;
+      if (typeof v === "boolean") p.set(k, String(v));
+      else if (typeof v === "string") p.set(k, v);
+      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast3-config?${p.toString()}`);
+  },
+  updateFast3StrategyConfig: (strategyId: string, patch: Partial<Fast3Config> | null) => {
+    const p = new URLSearchParams();
+    p.set("strategyId", strategyId);
+    if (patch === null) {
+      p.set("clear", "1");
+    } else {
+      for (const [k, v] of Object.entries(patch)) {
+        if (k === "perStrategy" || k === "liveTradingEnabled") continue;
+        if (typeof v === "boolean") p.set(k, String(v));
+        else if (typeof v === "string") p.set(k, v);
+        else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+      }
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast3-config?${p.toString()}`);
   },
   logs: (opts: { limit?: number; level?: string; q?: string } = {}) => {
     const p = new URLSearchParams();

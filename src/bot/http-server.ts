@@ -6,7 +6,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { BotState, Fast1Config, Fast2Config } from "./storage";
+import type { BotState, Fast1Config, Fast2Config, Fast3Config } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
@@ -42,6 +42,12 @@ export type ManualControls = {
    *  If `patch` is null, the override entry is removed (strategy falls back
    *  to the general config). */
   updateFast2StrategyConfig: (strategyId: string, patch: Partial<Fast2Config> | null) => void;
+  /** Reset the Fast3 paper sandbox (balance + ladders). */
+  resetFast3Paper: (balance?: number) => void;
+  /** Patch Fast3 runtime config. */
+  updateFast3Config: (patch: Partial<Fast3Config>) => void;
+  /** Patch a per-strategy Fast3 override; null clears. */
+  updateFast3StrategyConfig: (strategyId: string, patch: Partial<Fast3Config> | null) => void;
   /** Manually close an open Fast2 position. `id` is the paper position id
    *  or live trade id depending on mode. Throws if the position can't be
    *  found or close fails (Deriv sell error, etc.). */
@@ -147,6 +153,12 @@ export function startHttpServer(opts: {
   getFast2StrategyStats: () => StrategyStats[];
   /** Fast2 runtime config — user-selectable trade leverage + martingale params. */
   getFast2Config: () => Fast2Config;
+  /** Fast3 paper sandbox state — DIGITODD tick-level book. */
+  getFast3PaperState: () => PaperState;
+  getFast3PaperStats: () => Record<string, number>;
+  getFast3Martingale: () => Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }>;
+  getFast3StrategyStats: () => StrategyStats[];
+  getFast3Config: () => Fast3Config;
   /** Per-engine diagnostic snapshot — used to debug why signals aren't firing. */
   getDiagnostics: () => Array<{ key: string; symbol: string; granularity: number; lastCandleAtMs: number | null; engine: ReturnType<import("../main/engine/runner").Engine["diagnose"]> }>;
   /** Most-recent close price for a symbol across any engine (used by the UI
@@ -163,7 +175,7 @@ export function startHttpServer(opts: {
 
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
-        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/close-fast2-position" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
+        if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/reset-fast3-paper" || path0 === "/api/control/update-fast3-config" || path0 === "/api/control/close-fast2-position" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
           if (path0 === "/api/control/pause")            opts.manualControls.setPaused(true);
           else if (path0 === "/api/control/resume")      opts.manualControls.setPaused(false);
           else if (path0 === "/api/control/reset-adaptive") opts.manualControls.resetAdaptiveShift();
@@ -247,6 +259,38 @@ export function startHttpServer(opts: {
               opts.manualControls.updateFast2StrategyConfig(strategyId, clear ? null : patch);
             } else {
               opts.manualControls.updateFast2Config(patch);
+            }
+          }
+          else if (path0 === "/api/control/reset-fast3-paper") {
+            const balance = url.searchParams.get("balance");
+            opts.manualControls.resetFast3Paper(balance ? Number(balance) : undefined);
+          }
+          else if (path0 === "/api/control/update-fast3-config") {
+            const strategyId = url.searchParams.get("strategyId") ?? undefined;
+            const clear = url.searchParams.get("clear") === "1";
+            const patch: Partial<Fast3Config> = {};
+            const mm = url.searchParams.get("martingaleMultiplier");
+            if (mm) patch.martingaleMultiplier = Number(mm);
+            const bs = url.searchParams.get("baseStake");
+            if (bs) patch.baseStake = Number(bs);
+            const ml = url.searchParams.get("maxLevels");
+            if (ml) patch.maxLevels = Number(ml);
+            const cap = url.searchParams.get("perTradeCap");
+            if (cap) patch.perTradeCap = Number(cap);
+            const fm = url.searchParams.get("forceMartingale");
+            if (fm != null) patch.forceMartingale = fm === "true" || fm === "1";
+            const sf = url.searchParams.get("sideFilter");
+            if (sf === "both" || sf === "BUY" || sf === "SELL") patch.sideFilter = sf;
+            const mm2 = url.searchParams.get("martingaleMode");
+            if (mm2 === "classic" || mm2 === "anti") patch.martingaleMode = mm2;
+            const lt = url.searchParams.get("liveTradingEnabled");
+            if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
+            const en = url.searchParams.get("enabled");
+            if (en != null) patch.enabled = en === "true" || en === "1";
+            if (strategyId) {
+              opts.manualControls.updateFast3StrategyConfig(strategyId, clear ? null : patch);
+            } else {
+              opts.manualControls.updateFast3Config(patch);
             }
           }
           else if (path0 === "/api/control/close-fast2-position") {
@@ -477,6 +521,44 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/fast2-config") {
           json(res, 200, { config: opts.getFast2Config() });
+          return;
+        }
+        // ── Fast3 endpoints ──
+        if (path0 === "/api/fast3-paper") {
+          const ps = opts.getFast3PaperState();
+          const stats = opts.getFast3PaperStats();
+          json(res, 200, {
+            stats,
+            startingBalance: ps.startingBalance,
+            balance: ps.balance,
+            daily: ps.daily,
+            open: ps.open,
+            martingale: opts.getFast3Martingale(),
+            config: opts.getFast3Config(),
+          });
+          return;
+        }
+        if (path0 === "/api/fast3-paper/trades") {
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 1000);
+          const ps = opts.getFast3PaperState();
+          json(res, 200, { trades: ps.closed.slice(0, limit) });
+          return;
+        }
+        if (path0 === "/api/fast3-paper/equity") {
+          const ps = opts.getFast3PaperState();
+          json(res, 200, { equity: ps.equity, startingBalance: ps.startingBalance });
+          return;
+        }
+        if (path0 === "/api/fast3-strategies") {
+          json(res, 200, {
+            strategies: opts.getFast3StrategyStats(),
+            martingale: opts.getFast3Martingale(),
+            config: opts.getFast3Config(),
+          });
+          return;
+        }
+        if (path0 === "/api/fast3-config") {
+          json(res, 200, { config: opts.getFast3Config() });
           return;
         }
         if (path0 === "/api/logs") {
