@@ -462,8 +462,8 @@ export function Fast2Panel({ state, doAction, pending }: {
                 <td className={`mono ${s.live.barsSeen === 0 ? "neg" : ""}`}>{s.live.barsSeen}</td>
                 <td className="mono">{s.live.trades}</td>
                 <td className="mono">{s.live.trades > 0 ? `${s.live.wins}W/${s.live.losses}L` : "—"}</td>
-                <td className={`mono ${s.live.pnlUsd > 0 ? "pos" : s.live.pnlUsd < 0 ? "neg" : "muted"}`}>
-                  {s.live.pnlUsd >= 0 ? "+" : ""}${s.live.pnlUsd.toFixed(2)}
+                <td className={`mono ${(s.live.pnlUsd ?? 0) > 0 ? "pos" : (s.live.pnlUsd ?? 0) < 0 ? "neg" : "muted"}`}>
+                  {(s.live.pnlUsd ?? 0) >= 0 ? "+" : ""}${(s.live.pnlUsd ?? 0).toFixed(2)}
                 </td>
                 <td className="faint">{s.live.lastSignalAt ? fmtTime(s.live.lastSignalAt) : "—"}</td>
               </tr>

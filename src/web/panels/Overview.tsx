@@ -16,10 +16,10 @@ export function OverviewPanel({ state, strategies, doAction, pending }: {
   // Aggregate live stats across all strategies
   const totalLive = strategies.reduce(
     (acc, s) => ({
-      signals: acc.signals + s.live.signals,
-      trades: acc.trades + s.live.trades,
-      wins: acc.wins + s.live.wins,
-      pnl: acc.pnl + s.live.pnlUsd,
+      signals: acc.signals + (s.live.signals ?? 0),
+      trades: acc.trades + (s.live.trades ?? 0),
+      wins: acc.wins + (s.live.wins ?? 0),
+      pnl: acc.pnl + (s.live.pnlUsd ?? 0),
     }),
     { signals: 0, trades: 0, wins: 0, pnl: 0 },
   );
@@ -67,8 +67,8 @@ export function OverviewPanel({ state, strategies, doAction, pending }: {
               <div className="row">
                 <span className="strat-chip">{s.id}</span>
                 <span className="spacer" />
-                <span className={`pill ${s.live.pnlUsd > 0 ? "pill-green" : s.live.pnlUsd < 0 ? "pill-red" : "pill-blue"}`}>
-                  {s.live.pnlUsd >= 0 ? "+" : ""}${s.live.pnlUsd.toFixed(2)}
+                <span className={`pill ${(s.live.pnlUsd ?? 0) > 0 ? "pill-green" : (s.live.pnlUsd ?? 0) < 0 ? "pill-red" : "pill-blue"}`}>
+                  {(s.live.pnlUsd ?? 0) >= 0 ? "+" : ""}${(s.live.pnlUsd ?? 0).toFixed(2)}
                 </span>
               </div>
               <div style={{ marginTop: 10 }}>
@@ -83,7 +83,7 @@ export function OverviewPanel({ state, strategies, doAction, pending }: {
                   </div>
                   <div>
                     <div className="card-title" style={{ marginBottom: 2 }}>WR</div>
-                    <div className="bold">{s.live.trades > 0 ? `${(s.live.winRate * 100).toFixed(0)}%` : "—"}</div>
+                    <div className="bold">{s.live.trades > 0 ? `${((s.live.winRate ?? 0) * 100).toFixed(0)}%` : "—"}</div>
                   </div>
                 </div>
                 <div className="card-sub" style={{ marginTop: 10 }}>

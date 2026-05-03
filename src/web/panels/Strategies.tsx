@@ -39,9 +39,9 @@ export function StrategiesPanel({ strategies }: { strategies: StrategyStats[] })
               <td className="faint">{fmtAgo(s.live.lastBarSeenAt)}</td>
               <td className="mono">{s.live.signals}</td>
               <td className="mono">{s.live.trades}</td>
-              <td className="mono">{s.live.trades > 0 ? `${(s.live.winRate * 100).toFixed(0)}%` : "—"}</td>
-              <td className={`mono ${s.live.pnlUsd > 0 ? "pos" : s.live.pnlUsd < 0 ? "neg" : "muted"}`}>
-                {s.live.pnlUsd >= 0 ? "+" : ""}${s.live.pnlUsd.toFixed(2)}
+              <td className="mono">{s.live.trades > 0 ? `${((s.live.winRate ?? 0) * 100).toFixed(0)}%` : "—"}</td>
+              <td className={`mono ${(s.live.pnlUsd ?? 0) > 0 ? "pos" : (s.live.pnlUsd ?? 0) < 0 ? "neg" : "muted"}`}>
+                {(s.live.pnlUsd ?? 0) >= 0 ? "+" : ""}${(s.live.pnlUsd ?? 0).toFixed(2)}
               </td>
               <td className="faint">{fmtAgo(s.live.lastSignalAt)}</td>
               <td className="faint">{fmtAgo(s.live.lastTradeAt)}</td>
