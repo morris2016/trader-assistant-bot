@@ -2096,7 +2096,10 @@ async function main() {
           fast3StratBurstStartedAt.set(strat.id, now);
           fast3StratBuysThisBurst.set(strat.id, 0);
           fast3StratPendingCooldown.delete(strat.id);
-          log.info(`fast3 LIVE burst OPEN [${strat.id}] — ${FAST3_BURST_DURATION_MS / 60_000}min, then ${FAST3_COOLDOWN_DURATION_MS / 60_000}min cooldown`);
+          // Demoted to debug to silence the log flood when 8 strategies
+          // re-open simultaneously after a shared cooldown ends. The first
+          // actual buy will log at info level with the burst progress.
+          log.debug(`fast3 LIVE burst OPEN [${strat.id}] — ${(FAST3_BURST_DURATION_MS / 1000).toFixed(0)}s burst, ${(FAST3_COOLDOWN_DURATION_MS / 1000).toFixed(0)}s cooldown`);
         }
         const burstElapsed = now - stratBurstStartedAt >= FAST3_BURST_DURATION_MS;
         if (burstElapsed) {
