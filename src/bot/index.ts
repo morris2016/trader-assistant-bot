@@ -1457,9 +1457,7 @@ async function main() {
               if (Date.now() < liveSharedCooldownUntil) {
                 log.info(`fast2 LIVE skip — shared rate-limit cooldown active for ${Math.ceil((liveSharedCooldownUntil - Date.now()) / 1000)}s more`);
                 handledFast2 = true;
-                continue;
-              }
-              try {
+              } else try {
                 liveLastGlobalBuyAt = Date.now();
                 const trade = await real.placeTrade({
                   symbol: sig.symbol as SymbolCode,
