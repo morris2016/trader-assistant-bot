@@ -215,24 +215,28 @@ async function main() {
   // Plus: per-symbol min gap (1.5s) so a single noisy symbol doesn't hog
   // the burst budget, and a hard cooldown if Deriv responds with RateLimit
   // (signal that we're still over the line — back off harder).
-  // Time-based duty cycle: trade for BURST_DURATION_MS, then sleep
-  // COOLDOWN_DURATION_MS, repeat. During the burst window, GLOBAL_MIN_GAP_MS
-  // throttles per-buy spacing to stay under Deriv's per-minute ceiling
-  // (~60/min) so we don't trip mid-burst. The cooldown window lets Deriv's
-  // sliding rate-limit window clear before the next burst.
+  // PER-STRATEGY time-based duty cycle: each strategy independently runs
+  // BURST_DURATION_MS → COOLDOWN_DURATION_MS → repeat. Strategies' cycles
+  // run on their own clocks, so when one is cooling down the others keep
+  // trading. CRITICAL: if a strategy's burst window expires while its
+  // martingale ladder is active (level > 0), cooldown is DEFERRED until
+  // the ladder resets (win at any level OR max-level reached) — we never
+  // abandon a recovery sequence mid-ladder.
   //
-  // Defaults: 5 min burst, 4 min cooldown, 1.5s global gap (~40 buys/min
-  // during burst → ~200 buys per burst, 22 buys/min averaged over the
-  // 9-min cycle). All env-tunable.
+  // Plus a GLOBAL stagger gate so when multiple strategies' burst windows
+  // overlap, the combined rate stays under Deriv's ~60 buys/min ceiling.
+  //
+  // Defaults: 5 min burst, 4 min cooldown, 1.5s global gap. All env-tunable.
   const FAST3_BURST_DURATION_MS = Number(process.env.FAST3_BURST_DURATION_MS ?? 5 * 60_000);
   const FAST3_COOLDOWN_DURATION_MS = Number(process.env.FAST3_COOLDOWN_DURATION_MS ?? 4 * 60_000);
   const FAST3_GLOBAL_MIN_GAP_MS = Number(process.env.FAST3_GLOBAL_MIN_GAP_MS ?? 1500);
   const FAST3_PER_SYMBOL_GAP_MS = Number(process.env.FAST3_PER_SYMBOL_GAP_MS ?? 1500);
   const FAST3_HARD_COOLDOWN_MS = Number(process.env.FAST3_HARD_COOLDOWN_MS ?? 60_000);
-  let fast3BurstStartedAt = 0;        // ms when current burst opened (0 = pending)
-  let fast3CooldownUntil = 0;
+  const fast3StratBurstStartedAt = new Map<string, number>();   // strategyId → ms (0 = pending fresh)
+  const fast3StratCooldownUntil = new Map<string, number>();    // strategyId → ms
+  const fast3StratBuysThisBurst = new Map<string, number>();    // strategyId → count
+  const fast3StratPendingCooldown = new Set<string>();          // burst expired but ladder active
   let fast3LastGlobalBuyAt = 0;
-  let fast3BuysThisBurst = 0;
   const fast3LiveLastBuyAt = new Map<string, number>();
   const fast3LiveInFlight = new Set<string>();
   log.info("fast3Paper: state loaded", {
@@ -396,6 +400,18 @@ async function main() {
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
       fast3MartingaleLive[t.sandboxStrategyId] = nextLadder;
       log.info(`fast3 LIVE settled ${t.symbol} DIGITODD ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} contract=${t.contractId}`);
+      // ── Deferred-cooldown close ──
+      // If this strategy's burst window had expired but cooldown was deferred
+      // due to an active ladder, and the ladder is now back at L0, enter
+      // the cooldown. The next dispatch tick will see the cooldown timer
+      // active and skip until it expires.
+      if (fast3StratPendingCooldown.has(t.sandboxStrategyId) && nextLadder.level === 0) {
+        fast3StratCooldownUntil.set(t.sandboxStrategyId, Date.now() + FAST3_COOLDOWN_DURATION_MS);
+        fast3StratBurstStartedAt.set(t.sandboxStrategyId, 0);
+        fast3StratPendingCooldown.delete(t.sandboxStrategyId);
+        const buys = fast3StratBuysThisBurst.get(t.sandboxStrategyId) ?? 0;
+        log.info(`fast3 LIVE deferred cooldown CLOSED [${t.sandboxStrategyId}] (${buys} buys, ladder back to L0) — cooldown ${FAST3_COOLDOWN_DURATION_MS / 60_000}min`);
+      }
     }
     persist();
   });
@@ -2020,43 +2036,59 @@ async function main() {
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
       if (mode === "live") {
         const now = Date.now();
-        // ── Time-based duty cycle: BURST 5 min → COOLDOWN 4 min → repeat ──
-        // Cooldown window: silently skip every tick until cooldown expires.
-        if (now < fast3CooldownUntil) break;
-        // First buy after cooldown (or first ever) opens a new burst window.
-        if (fast3BurstStartedAt === 0) {
-          fast3BurstStartedAt = now;
-          fast3BuysThisBurst = 0;
-          log.info(`fast3 LIVE burst window OPEN — trading for ${FAST3_BURST_DURATION_MS / 60_000}min, then ${FAST3_COOLDOWN_DURATION_MS / 60_000}min cooldown`);
+        // ── PER-STRATEGY duty cycle ──
+        // Each strategy has its own burst/cooldown. Other strategies keep
+        // trading while this one is in cooldown.
+        const stratCooldownUntil = fast3StratCooldownUntil.get(strat.id) ?? 0;
+        if (now < stratCooldownUntil) continue;  // this strategy still cooling
+        let stratBurstStartedAt = fast3StratBurstStartedAt.get(strat.id) ?? 0;
+        if (stratBurstStartedAt === 0) {
+          stratBurstStartedAt = now;
+          fast3StratBurstStartedAt.set(strat.id, now);
+          fast3StratBuysThisBurst.set(strat.id, 0);
+          fast3StratPendingCooldown.delete(strat.id);
+          log.info(`fast3 LIVE burst OPEN [${strat.id}] — ${FAST3_BURST_DURATION_MS / 60_000}min, then ${FAST3_COOLDOWN_DURATION_MS / 60_000}min cooldown`);
         }
-        // Burst window elapsed → enter cooldown.
-        if (now - fast3BurstStartedAt >= FAST3_BURST_DURATION_MS) {
-          fast3CooldownUntil = now + FAST3_COOLDOWN_DURATION_MS;
-          log.info(`fast3 LIVE burst window CLOSED (${fast3BuysThisBurst} buys in ${FAST3_BURST_DURATION_MS / 60_000}min) — cooldown ${FAST3_COOLDOWN_DURATION_MS / 60_000}min`);
-          fast3BurstStartedAt = 0;  // marks "next eligible tick reopens the window"
-          break;
+        const burstElapsed = now - stratBurstStartedAt >= FAST3_BURST_DURATION_MS;
+        if (burstElapsed) {
+          // ── DEFERRED COOLDOWN: don't stop mid-ladder. ──
+          // If the strategy is in active recovery (level > 0), keep trading
+          // through the burst-window expiry until the ladder resets.
+          // Cooldown will close on a future tick when ladder is back at L0.
+          if (ladder.level > 0) {
+            if (!fast3StratPendingCooldown.has(strat.id)) {
+              fast3StratPendingCooldown.add(strat.id);
+              log.info(`fast3 LIVE burst expired [${strat.id}] but ladder L${ladder.level} active — cooldown DEFERRED until ladder resets`);
+            }
+            // fall through to placement; this trade is a recovery bet
+          } else {
+            // Ladder at L0 (or burst expired with no active ladder). Close out.
+            const buys = fast3StratBuysThisBurst.get(strat.id) ?? 0;
+            fast3StratCooldownUntil.set(strat.id, now + FAST3_COOLDOWN_DURATION_MS);
+            fast3StratBurstStartedAt.set(strat.id, 0);
+            fast3StratPendingCooldown.delete(strat.id);
+            log.info(`fast3 LIVE burst CLOSED [${strat.id}] (${buys} buys) — cooldown ${FAST3_COOLDOWN_DURATION_MS / 60_000}min`);
+            continue;  // try the next strategy that may still be in burst
+          }
         }
-        // GLOBAL stagger gate inside the burst — keeps us under Deriv's
-        // ~60 buys/min ceiling. At 1.5s default → 40 buys/min sustained.
+        // GLOBAL stagger gate (across all strategies) — keeps combined rate
+        // under Deriv's ~60 buys/min ceiling when multiple bursts overlap.
         if (now - fast3LastGlobalBuyAt < FAST3_GLOBAL_MIN_GAP_MS) continue;
-        // Per-symbol minimum gap so one noisy symbol doesn't hog the budget.
         const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
         if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
-        // Concurrency: don't fire a second placeTrade while one is in flight.
         if (fast3LiveInFlight.has(tick.symbol)) continue;
-        // Don't open if there's already a live contract open for this symbol.
         if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
 
         fast3LiveInFlight.add(tick.symbol);
         fast3LiveLastBuyAt.set(tick.symbol, now);
         fast3LastGlobalBuyAt = now;
-        fast3BuysThisBurst++;
-        const elapsedMs = now - fast3BurstStartedAt;
-        // LIVE: place a real DIGITODD contract via Deriv. Settlement comes
-        // back via real.on("settled") which advances the live ladder.
+        const buyCount = (fast3StratBuysThisBurst.get(strat.id) ?? 0) + 1;
+        fast3StratBuysThisBurst.set(strat.id, buyCount);
+        const elapsedMs = now - stratBurstStartedAt;
+        const tag = fast3StratPendingCooldown.has(strat.id) ? " [recovery]" : "";
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
-          side: "BUY", // arbitrary — DIGITODD encodes prediction in contractType
+          side: "BUY",
           family: "DIGIT",
           digitContractType: "DIGITODD",
           detector: FAST3_DETECTOR_TAG,
@@ -2066,17 +2098,20 @@ async function main() {
           sandboxStrategyId: strat.id,
           entryPriceHint: tick.quote,
         }).then((trade) => {
-          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level} buy=${fast3BuysThisBurst} t=${(elapsedMs / 1000).toFixed(0)}s/${(FAST3_BURST_DURATION_MS / 1000).toFixed(0)}s`);
+          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level} buy=${buyCount} t=${(elapsedMs / 1000).toFixed(0)}s${tag}`);
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {
-            // Deriv said no — close the burst early and start the cooldown
-            // hard (longer than scheduled) so the rate-limit window clears.
-            const wasInCooldown = Date.now() < fast3CooldownUntil;
-            fast3CooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
-            fast3BurstStartedAt = 0;
-            if (!wasInCooldown) {
-              log.warn(`fast3 LIVE rate-limited by Deriv → hard cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s; burst window closed early`);
+            // Hard cooldown ALL strategies briefly so Deriv's rate window
+            // can clear, then resume per-strategy timers.
+            const allStratsInCooldownAlready = Array.from(fast3StratCooldownUntil.values()).every((t) => Date.now() < t);
+            for (const s of FAST3_STRATEGIES) {
+              fast3StratCooldownUntil.set(s.id, Date.now() + FAST3_HARD_COOLDOWN_MS);
+              fast3StratBurstStartedAt.set(s.id, 0);
+              fast3StratPendingCooldown.delete(s.id);
+            }
+            if (!allStratsInCooldownAlready) {
+              log.warn(`fast3 LIVE rate-limited by Deriv → hard cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s ALL strategies; bursts closed early`);
             }
           } else {
             log.warn(`fast3 LIVE placeTrade failed ${tick.symbol}: ${msg}`);
