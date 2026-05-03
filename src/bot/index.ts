@@ -218,9 +218,11 @@ async function main() {
   const FAST3_BURST_MAX_BUYS = 20;
   const FAST3_BURST_COOLDOWN_MS = 30_000;
   const FAST3_PER_SYMBOL_GAP_MS = 1500;
+  const FAST3_GLOBAL_MIN_GAP_MS = 250;          // stagger ALL live buys ≥ 250ms apart
   const FAST3_HARD_COOLDOWN_MS = 60_000;        // when Deriv says RateLimit → back off harder
   let fast3BurstBuyCount = 0;
   let fast3CooldownUntil = 0;
+  let fast3LastGlobalBuyAt = 0;
   const fast3LiveLastBuyAt = new Map<string, number>();
   const fast3LiveInFlight = new Set<string>();
   log.info("fast3Paper: state loaded", {
@@ -2023,6 +2025,10 @@ async function main() {
         // Per-symbol minimum gap so one noisy symbol doesn't hog the budget.
         const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
         if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
+        // GLOBAL stagger gate: don't fire two live buys within 250ms of each
+        // other across ALL symbols. Stops the burst-of-8-at-once that
+        // overflows Deriv's WS queue and inflates open latency to 18s.
+        if (now - fast3LastGlobalBuyAt < FAST3_GLOBAL_MIN_GAP_MS) continue;
         // Concurrency: don't fire a second placeTrade while one is in flight.
         if (fast3LiveInFlight.has(tick.symbol)) continue;
         // Don't open if there's already a live contract open for this symbol.
@@ -2030,6 +2036,7 @@ async function main() {
 
         fast3LiveInFlight.add(tick.symbol);
         fast3LiveLastBuyAt.set(tick.symbol, now);
+        fast3LastGlobalBuyAt = now;
         fast3BurstBuyCount++;
         // LIVE: place a real DIGITODD contract via Deriv. Settlement comes
         // back via real.on("settled") which advances the live ladder.

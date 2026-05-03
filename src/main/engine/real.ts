@@ -433,7 +433,11 @@ export class RealEngine extends EventEmitter {
       });
       const contractOpenedAt = Date.now();
       const latency = signalFiredAt != null ? contractOpenedAt - signalFiredAt : null;
-      if (latency != null) this.recordOpenLatency(latency);
+      // NOTE: DIGITODD latency is NOT fed into the circuit-breaker. DIGIT
+      // contracts are binary fixed-payout — slight latency doesn't affect
+      // P&L (no price-stale slip risk like CALL_PUT/MULT). Fast3 fires
+      // hundreds of these per minute and would dominate the moving avg,
+      // tripping the breaker even when CALL/PUT/MULT trades are healthy.
       trade = {
         id: randomUUID(),
         contractId: buy.contract_id,
