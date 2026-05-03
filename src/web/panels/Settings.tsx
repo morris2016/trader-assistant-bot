@@ -22,7 +22,7 @@ export function SettingsPanel({ state, doAction, pending }: {
             <div className="kv-list">
               <div className="kv-row"><div className="kv-key">Login ID</div><div className="kv-val mono">{state.account.loginid}</div></div>
               <div className="kv-row"><div className="kv-key">Currency</div><div className="kv-val">{state.account.currency}</div></div>
-              <div className="kv-row"><div className="kv-key">Balance</div><div className="kv-val mono">${state.account.balance.toFixed(2)}</div></div>
+              <div className="kv-row"><div className="kv-key">Balance</div><div className="kv-val mono">${(state.account.balance ?? 0).toFixed(2)}</div></div>
               <div className="kv-row"><div className="kv-key">Account Type</div><div className="kv-val">
                 <span className={`pill ${state.account.isVirtual ? "pill-cyan" : "pill-red"}`}>
                   <span className="pill-dot" />{state.account.isVirtual ? "DEMO" : "REAL"}

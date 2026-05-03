@@ -104,7 +104,7 @@ export function FastPanel({ doAction, pending }: {
       </div>
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Card title="Balance" value={`$${paper.balance.toFixed(2)}`} sub={`started at $${paper.startingBalance.toFixed(2)}`} tone={paper.balance >= paper.startingBalance ? "pos" : "neg"} />
+        <Card title="Balance" value={`$${(paper.balance ?? 0).toFixed(2)}`} sub={`started at $${(paper.startingBalance ?? 0).toFixed(2)}`} tone={(paper.balance ?? 0) >= (paper.startingBalance ?? 0) ? "pos" : "neg"} />
         <Card title="Net P&L" value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toFixed(2)}`} sub={`${stats.pnlPct >= 0 ? "+" : ""}${stats.pnlPct.toFixed(1)}% from start · fees $${totalCommission.toFixed(2)}`} tone={stats.totalPnl >= 0 ? "pos" : "neg"} />
         <Card title="Win Rate" value={stats.trades > 0 ? `${(stats.winRate * 100).toFixed(0)}%` : "—"} sub={`${stats.wins}W / ${stats.losses}L · ${stats.trades} trades · avg ${stats.avgR.toFixed(2)}R`} tone={stats.winRate >= 0.55 ? "pos" : stats.trades > 5 ? "neg" : "muted"} />
         <Card title="Peak / DD" value={`$${stats.peak.toFixed(2)}`} sub={`${stats.ddPct.toFixed(1)}% from peak · ${stats.open} open`} tone={stats.ddPct > -10 ? "pos" : "neg"} />

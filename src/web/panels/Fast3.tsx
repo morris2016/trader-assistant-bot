@@ -58,18 +58,20 @@ export function Fast3Panel({ state, doAction, pending }: {
     pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
   );
 
-  const stats = paper.stats;
+  const stats = paper.stats ?? {};
+  const balance = paper.balance ?? 0;
+  const startingBalance = paper.startingBalance ?? 0;
   const view = {
-    balance: paper.balance,
-    balanceSub: `${isLive ? "LIVE" : "paper"} · started at $${paper.startingBalance.toFixed(2)}`,
-    balanceTone: (paper.balance >= paper.startingBalance ? "pos" : "neg") as "pos" | "neg",
-    totalPnl: stats.totalPnl ?? 0,
+    balance,
+    balanceSub: `${isLive ? "LIVE" : "paper"} · started at $${startingBalance.toFixed(2)}`,
+    balanceTone: (balance >= startingBalance ? "pos" : "neg") as "pos" | "neg",
+    totalPnl: (stats as any).totalPnl ?? 0,
     totalPnlSub: `${paperTrades.length} trades`,
-    wr: stats.winRate ?? 0,
-    wrSub: `${stats.wins ?? 0}W / ${stats.losses ?? 0}L`,
-    peak: stats.peak ?? 0,
+    wr: (stats as any).winRate ?? 0,
+    wrSub: `${(stats as any).wins ?? 0}W / ${(stats as any).losses ?? 0}L`,
+    peak: (stats as any).peak ?? 0,
     peakSub: `peak balance`,
-    ddPct: stats.ddPct ?? 0,
+    ddPct: (stats as any).ddPct ?? 0,
   };
 
   const applyCfg = () => {

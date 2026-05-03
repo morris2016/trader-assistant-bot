@@ -169,7 +169,7 @@ function Header({ state, stale, error }: { state: StateResp | null; stale: boole
           <div className="subtitle">
             {account ? (
               <>
-                {account.loginid} · {account.currency} ${account.balance.toFixed(2)} · {account.isVirtual ? "DEMO" : "LIVE"}
+                {account.loginid} · {account.currency} ${(account.balance ?? 0).toFixed(2)} · {account.isVirtual ? "DEMO" : "LIVE"}
               </>
             ) : "no account"}
           </div>
@@ -190,9 +190,9 @@ function Header({ state, stale, error }: { state: StateResp | null; stale: boole
           )}
         </div>
       </div>
-      {state && account && !account.isVirtual && account.balance < 10 && (
+      {state && account && !account.isVirtual && account.balance != null && account.balance < 10 && (
         <div className="banner banner-warn">
-          ⚠ Real account with balance ${account.balance.toFixed(2)} — fund the account or switch DERIV_TOKEN to a demo account before trading.
+          ⚠ Real account with balance ${(account.balance ?? 0).toFixed(2)} — fund the account or switch DERIV_TOKEN to a demo account before trading.
         </div>
       )}
     </>
