@@ -4,7 +4,7 @@
 // (DIGITODD) so there's no SL/TP geometry or trade multiplier in play.
 
 import React, { useEffect, useState } from "react";
-import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast3Config, type Fast3PaperResp, type FastMartingaleSnapshot, type StateResp, type StrategyStats } from "../api";
+import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast3Config, type Fast3PaperResp, type FastMartingaleSnapshot, type RealTrade, type StateResp, type StrategyStats } from "../api";
 
 const MART_MULT_OPTIONS = [1.3, 1.5, 1.7, 2.0, 2.2];
 const DERIV_MIN_STAKE = 1;
@@ -20,6 +20,7 @@ export function Fast3Panel({ state, doAction, pending }: {
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
   const [martingale, setMartingale] = useState<Record<string, FastMartingaleSnapshot>>({});
+  const [liveTrades, setLiveTrades] = useState<RealTrade[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [resetTo, setResetTo] = useState<string>("41");
   const [pendingCfg, setPendingCfg] = useState<Fast3Config | null>(null);
@@ -27,14 +28,15 @@ export function Fast3Panel({ state, doAction, pending }: {
   useEffect(() => {
     const load = async () => {
       try {
-        const [p, t, e, s] = await Promise.all([
-          api.fast3Paper(), api.fast3PaperTrades(500), api.fast3PaperEquity(), api.fast3Strategies(),
+        const [p, t, e, s, rt] = await Promise.all([
+          api.fast3Paper(), api.fast3PaperTrades(500), api.fast3PaperEquity(), api.fast3Strategies(), api.trades(500),
         ]);
         setPaper(p);
         setPaperTrades(t.trades);
         setEquity(e.equity);
         setStrategies(s.strategies);
         setMartingale(s.martingale);
+        setLiveTrades(rt.trades.filter((rec) => rec.sandbox === "fast3"));
         setError(null);
       } catch (err) { setError((err as Error).message); }
     };
@@ -58,22 +60,45 @@ export function Fast3Panel({ state, doAction, pending }: {
     pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
   );
 
+  // ── Mode-aware view: LIVE reads Deriv account balance + real trades
+  // tagged sandbox="fast3"; PAPER reads from the paper engine state.
   const stats = (paper.stats ?? {}) as Partial<{ balance: number; startingBalance: number; totalPnl: number; pnlPct: number; trades: number; wins: number; losses: number; winRate: number; avgR: number; peak: number; ddPct: number; open: number }>;
-  const balance = paper.balance ?? 0;
-  const startingBalance = paper.startingBalance ?? 0;
-  const view = {
-    balance,
-    balanceSub: `${isLive ? "LIVE" : "paper"} · started at $${startingBalance.toFixed(2)}`,
-    balanceTone: (balance >= startingBalance ? "pos" : "neg") as "pos" | "neg" | "muted",
-    totalPnl: stats.totalPnl ?? 0,
-    totalPnlSub: `${(stats.pnlPct ?? 0) >= 0 ? "+" : ""}${(stats.pnlPct ?? 0).toFixed(1)}% from start`,
-    wr: stats.winRate ?? 0,
-    wrSub: `${stats.wins ?? 0}W / ${stats.losses ?? 0}L · ${stats.trades ?? 0} bets`,
-    wrTrades: stats.trades ?? 0,
-    peak: stats.peak ?? 0,
-    peakSub: `${(stats.ddPct ?? 0).toFixed(1)}% from peak · ${stats.open ?? 0} pending`,
-    ddPct: stats.ddPct ?? 0,
-  };
+  const liveClosed = liveTrades.filter((t) => t.closedAt != null);
+  const liveOpenCount = liveTrades.length - liveClosed.length;
+  const liveWins = liveClosed.filter((t) => (t.profit ?? 0) > 0).length;
+  const liveLosses = liveClosed.length - liveWins;
+  const liveTotalPnl = liveClosed.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+  const accountBalance = state?.account?.balance ?? 0;
+  const accountLogin = state?.account?.loginid ?? "—";
+  const paperBalance = paper.balance ?? 0;
+  const paperStartingBalance = paper.startingBalance ?? 0;
+  const view = isLive
+    ? {
+        balance: accountBalance,
+        balanceSub: `Deriv · ${accountLogin}`,
+        balanceTone: (accountBalance > 0 ? "pos" : "muted") as "pos" | "neg" | "muted",
+        totalPnl: liveTotalPnl,
+        totalPnlSub: `${liveClosed.length} live trades · ${liveOpenCount} open`,
+        wr: liveClosed.length > 0 ? liveWins / liveClosed.length : 0,
+        wrSub: `${liveWins}W / ${liveLosses}L · ${liveClosed.length} bets`,
+        wrTrades: liveClosed.length,
+        peak: 0,
+        peakSub: "live peak — see logs",
+        ddPct: 0,
+      }
+    : {
+        balance: paperBalance,
+        balanceSub: `paper · started at $${paperStartingBalance.toFixed(2)}`,
+        balanceTone: (paperBalance >= paperStartingBalance ? "pos" : "neg") as "pos" | "neg" | "muted",
+        totalPnl: stats.totalPnl ?? 0,
+        totalPnlSub: `${(stats.pnlPct ?? 0) >= 0 ? "+" : ""}${(stats.pnlPct ?? 0).toFixed(1)}% from start`,
+        wr: stats.winRate ?? 0,
+        wrSub: `${stats.wins ?? 0}W / ${stats.losses ?? 0}L · ${stats.trades ?? 0} bets`,
+        wrTrades: stats.trades ?? 0,
+        peak: stats.peak ?? 0,
+        peakSub: `${(stats.ddPct ?? 0).toFixed(1)}% from peak · ${stats.open ?? 0} pending`,
+        ddPct: stats.ddPct ?? 0,
+      };
 
   const applyCfg = () => {
     if (!pendingCfg) return;
@@ -85,7 +110,7 @@ export function Fast3Panel({ state, doAction, pending }: {
     <>
       {isLive && (
         <div className="banner banner-danger" style={{ marginBottom: 12, fontWeight: 600 }}>
-          🔴 LIVE TRADING TOGGLED — Fast3 LIVE wiring is currently a stub. DIGIT family contract support has not landed in real.ts yet, so signals will log a warning and skip placement until that's done. Flip OFF to keep paper fully working.
+          🔴 LIVE TRADING ACTIVE — every tick fires a real DIGITODD contract on Deriv ({accountLogin}). KPI cards now show your Deriv account balance + live-trade stats, not paper. Per-strategy table below shows live ladder state. Flip OFF to switch back to paper sim.
         </div>
       )}
       <div className="banner" style={{ marginBottom: 12 }}>
@@ -164,8 +189,8 @@ export function Fast3Panel({ state, doAction, pending }: {
           </ConfigField>
           <ConfigField label="Live Trading">
             <select className="filter-select" value={String(cfg.liveTradingEnabled)} onChange={(e) => setCfg({ liveTradingEnabled: e.target.value === "true" })}>
-              <option value="false">PAPER</option>
-              <option value="true">LIVE (stub — DIGIT family pending in real.ts)</option>
+              <option value="false">PAPER (sandbox sim)</option>
+              <option value="true">LIVE (real DIGITODD on Deriv)</option>
             </select>
           </ConfigField>
         </div>
@@ -191,7 +216,25 @@ export function Fast3Panel({ state, doAction, pending }: {
               const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
               const isOff = ov.enabled === false;
               const m = martingale[s.id];
-              const pnlUsd = s.live.pnlUsd ?? 0;
+              // Per-strategy stats: when LIVE, count from real trades tagged
+              // sandbox=fast3+strategyId. When PAPER, use server-computed
+              // stats which read from fast3Paper.closed.
+              let trades: number, wins: number, losses: number, pnlUsd: number, lastTradeAt: number | null;
+              if (isLive) {
+                const myTrades = liveClosed.filter((t) => t.sandboxStrategyId === s.id);
+                trades = myTrades.length;
+                wins = myTrades.filter((t) => (t.profit ?? 0) > 0).length;
+                losses = trades - wins;
+                pnlUsd = myTrades.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+                lastTradeAt = myTrades.length > 0 ? Math.max(...myTrades.map((t) => t.closedAt ?? 0)) : null;
+              } else {
+                trades = s.live.trades ?? 0;
+                wins = s.live.wins ?? 0;
+                losses = s.live.losses ?? 0;
+                pnlUsd = s.live.pnlUsd ?? 0;
+                lastTradeAt = s.live.lastTradeAt ?? null;
+              }
+              const wr = trades > 0 ? wins / trades : 0;
               return (
                 <tr key={s.id} style={{ opacity: isOff ? 0.45 : 1 }}>
                   <td>
@@ -205,14 +248,14 @@ export function Fast3Panel({ state, doAction, pending }: {
                     <div className="muted" style={{ fontSize: 10 }}>{s.name}</div>
                   </td>
                   <td className="mono">{s.symbols.join(", ")}</td>
-                  <td className="mono">{s.live.trades ?? 0}</td>
-                  <td className="mono">{(s.live.trades ?? 0) > 0 ? `${s.live.wins ?? 0}W/${s.live.losses ?? 0}L` : "—"}</td>
-                  <td className="mono">{(s.live.trades ?? 0) > 0 ? `${((s.live.winRate ?? 0) * 100).toFixed(1)}%` : "—"}</td>
+                  <td className="mono">{trades}</td>
+                  <td className="mono">{trades > 0 ? `${wins}W/${losses}L` : "—"}</td>
+                  <td className="mono">{trades > 0 ? `${(wr * 100).toFixed(1)}%` : "—"}</td>
                   <td className={`mono ${pnlUsd > 0 ? "pos" : pnlUsd < 0 ? "neg" : "muted"}`}>{pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}</td>
                   <td className="muted" style={{ fontSize: 11 }}>
                     {m ? <>L{m.level ?? 0} · next ${(m.nextStake ?? 0).toFixed(2)}</> : "—"}
                   </td>
-                  <td className="faint" style={{ fontSize: 11 }}>{s.live.lastTradeAt ? fmtTime(s.live.lastTradeAt) : "—"}</td>
+                  <td className="faint" style={{ fontSize: 11 }}>{lastTradeAt ? fmtTime(lastTradeAt) : "—"}</td>
                 </tr>
               );
             })}
@@ -220,25 +263,41 @@ export function Fast3Panel({ state, doAction, pending }: {
         </table>
       </div>
 
-      <h3 className="section-title">Recent Trades ({paperTrades.length})</h3>
+      <h3 className="section-title">Recent {isLive ? "Live" : "Paper"} Trades ({isLive ? liveClosed.length : paperTrades.length})</h3>
       <div className="card table-card">
-        {paperTrades.length === 0 ? (
-          <div className="empty"><span className="empty-emoji">🎯</span>No trades yet — Fast3 is awaiting tick stream. The bot subscribes to ticks for {strategies.length} symbols on startup; trades will appear as ticks arrive.</div>
+        {(isLive ? liveClosed.length : paperTrades.length) === 0 ? (
+          <div className="empty"><span className="empty-emoji">🎯</span>No {isLive ? "live" : "paper"} trades yet — Fast3 is awaiting tick stream. The bot subscribes to ticks for {strategies.length} symbols on startup; trades will appear as ticks arrive.</div>
         ) : (
           <table className="trades-table">
             <thead>
-              <tr><th>Closed</th><th>Symbol</th><th style={{ textAlign: "right" }}>Stake</th><th>Result</th><th style={{ textAlign: "right" }}>P&L</th></tr>
+              <tr><th>Closed</th><th>Symbol</th><th>Strategy</th><th style={{ textAlign: "right" }}>Stake</th><th>Result</th><th style={{ textAlign: "right" }}>P&L</th>{isLive && <th style={{ textAlign: "right" }}>Contract</th>}</tr>
             </thead>
             <tbody>
-              {paperTrades.slice(0, 100).map((t) => (
-                <tr key={t.id}>
-                  <td>{fmtTime(t.closedAt)}</td>
-                  <td>{t.symbol}</td>
-                  <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
-                  <td className={t.pnl > 0 ? "pos" : "neg"}>{t.pnl > 0 ? "WIN" : "LOSS"}</td>
-                  <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}</td>
-                </tr>
-              ))}
+              {isLive
+                ? liveClosed.slice(0, 100).map((t) => {
+                    const pnl = t.profit ?? 0;
+                    return (
+                      <tr key={t.id}>
+                        <td>{t.closedAt ? fmtTime(t.closedAt) : "—"}</td>
+                        <td>{t.symbol}</td>
+                        <td className="muted" style={{ fontSize: 11 }}>{t.sandboxStrategyId ?? "—"}</td>
+                        <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
+                        <td className={pnl > 0 ? "pos" : "neg"}>{pnl > 0 ? "WIN" : "LOSS"}</td>
+                        <td className={`mono ${pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}</td>
+                        <td style={{ textAlign: "right", fontSize: 11 }} className="muted">{t.contractId ?? "—"}</td>
+                      </tr>
+                    );
+                  })
+                : paperTrades.slice(0, 100).map((t) => (
+                    <tr key={t.id}>
+                      <td>{fmtTime(t.closedAt)}</td>
+                      <td>{t.symbol}</td>
+                      <td className="muted" style={{ fontSize: 11 }}>—</td>
+                      <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
+                      <td className={t.pnl > 0 ? "pos" : "neg"}>{t.pnl > 0 ? "WIN" : "LOSS"}</td>
+                      <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}</td>
+                    </tr>
+                  ))}
             </tbody>
           </table>
         )}
