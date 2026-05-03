@@ -205,6 +205,24 @@ async function main() {
   // symbol settles it.
   type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
   const fast3Pending = new Map<string, Fast3Pending>();
+  // ── Fast3 LIVE rate limiting (burst-then-cooldown duty cycle) ──
+  // Deriv's buy/proposal endpoints rate-limit at ~5-10 calls/min/account.
+  // Strategy: take a burst of trades, then pause; loop. Avoids the hammering
+  // that produces RateLimit errors on every other tick.
+  //
+  // Defaults: 20 buys per burst, then 30s cooldown. Yields ~1200 trades/hr
+  // at peak, well under Deriv's per-minute ceiling.
+  // Plus: per-symbol min gap (1.5s) so a single noisy symbol doesn't hog
+  // the burst budget, and a hard cooldown if Deriv responds with RateLimit
+  // (signal that we're still over the line — back off harder).
+  const FAST3_BURST_MAX_BUYS = 20;
+  const FAST3_BURST_COOLDOWN_MS = 30_000;
+  const FAST3_PER_SYMBOL_GAP_MS = 1500;
+  const FAST3_HARD_COOLDOWN_MS = 60_000;        // when Deriv says RateLimit → back off harder
+  let fast3BurstBuyCount = 0;
+  let fast3CooldownUntil = 0;
+  const fast3LiveLastBuyAt = new Map<string, number>();
+  const fast3LiveInFlight = new Set<string>();
   log.info("fast3Paper: state loaded", {
     balance: fast3Paper.getState().balance,
     closed: fast3Paper.getState().closed.length,
@@ -1989,9 +2007,32 @@ async function main() {
       // Stake-cap hit → reset to L0 base stake
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
       if (mode === "live") {
-        // LIVE: place a real DIGITODD contract via Deriv. The contract is
-        // 1-tick — Deriv settles it itself; we listen via the existing
-        // real.on("settled") handler which advances the live ladder.
+        const now = Date.now();
+        // ── Burst-then-cooldown gate ──
+        // Cooldown window: silently skip every tick until cooldown expires.
+        // When cooldown ends, the burst counter is already 0 from when the
+        // cooldown was set, so the next tick starts a fresh burst.
+        if (now < fast3CooldownUntil) break;
+        // Burst budget exhausted: enter cooldown.
+        if (fast3BurstBuyCount >= FAST3_BURST_MAX_BUYS) {
+          fast3CooldownUntil = now + FAST3_BURST_COOLDOWN_MS;
+          fast3BurstBuyCount = 0;
+          log.info(`fast3 LIVE burst complete (${FAST3_BURST_MAX_BUYS} buys) — cooldown ${FAST3_BURST_COOLDOWN_MS / 1000}s`);
+          break;
+        }
+        // Per-symbol minimum gap so one noisy symbol doesn't hog the budget.
+        const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
+        if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
+        // Concurrency: don't fire a second placeTrade while one is in flight.
+        if (fast3LiveInFlight.has(tick.symbol)) continue;
+        // Don't open if there's already a live contract open for this symbol.
+        if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
+
+        fast3LiveInFlight.add(tick.symbol);
+        fast3LiveLastBuyAt.set(tick.symbol, now);
+        fast3BurstBuyCount++;
+        // LIVE: place a real DIGITODD contract via Deriv. Settlement comes
+        // back via real.on("settled") which advances the live ladder.
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
           side: "BUY", // arbitrary — DIGITODD encodes prediction in contractType
@@ -1999,16 +2040,29 @@ async function main() {
           digitContractType: "DIGITODD",
           detector: FAST3_DETECTOR_TAG,
           stakeOverride: finalStake,
-          signalFiredAt: Date.now(),
+          signalFiredAt: now,
           sandbox: "fast3",
           sandboxStrategyId: strat.id,
           entryPriceHint: tick.quote,
         }).then((trade) => {
-          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level} burst=${fast3BurstBuyCount}/${FAST3_BURST_MAX_BUYS}`);
         }).catch((e) => {
-          log.warn(`fast3 LIVE placeTrade failed ${tick.symbol}: ${(e as Error).message}`);
+          const msg = (e as Error).message;
+          if (msg.includes("RateLimit") || msg.includes("rate limit")) {
+            // Deriv said no — back off harder than the standard burst cooldown.
+            // Reset budget so we re-enter the gate fresh after the hard pause.
+            const wasInCooldown = Date.now() < fast3CooldownUntil;
+            fast3CooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
+            fast3BurstBuyCount = 0;
+            if (!wasInCooldown) {
+              log.warn(`fast3 LIVE rate-limited by Deriv → hard cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s; burst budget reset`);
+            }
+          } else {
+            log.warn(`fast3 LIVE placeTrade failed ${tick.symbol}: ${msg}`);
+          }
+        }).finally(() => {
+          fast3LiveInFlight.delete(tick.symbol);
         });
-        // Don't set fast3Pending in live — settlement comes via real.on("settled")
         break;
       }
       fast3Pending.set(tick.symbol, {
