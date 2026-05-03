@@ -179,7 +179,15 @@ export function FastPanel({ doAction, pending }: {
       <h3 className="section-title">Martingale Ladders</h3>
       <div className="grid grid-2" style={{ marginBottom: 16 }}>
         {strategies.map((s) => {
-          const m = martingale[s.id] ?? { level: 0, wins: 0, losses: 0, circuitBreakers: 0, lastCircuitBreakerAt: 0, nextStake: paper.config.baseStake };
+          const raw = martingale[s.id];
+          const m = {
+            level: raw?.level ?? 0,
+            wins: raw?.wins ?? 0,
+            losses: raw?.losses ?? 0,
+            circuitBreakers: raw?.circuitBreakers ?? 0,
+            lastCircuitBreakerAt: raw?.lastCircuitBreakerAt ?? 0,
+            nextStake: raw?.nextStake ?? paper.config.baseStake ?? 0,
+          };
           const ladderColor = m.level === 0 ? "pos" : m.level >= 3 ? "neg" : "muted";
           return (
             <div key={s.id} className="card">

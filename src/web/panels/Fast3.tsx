@@ -210,7 +210,7 @@ export function Fast3Panel({ state, doAction, pending }: {
                   <td className="mono">{(s.live.trades ?? 0) > 0 ? `${((s.live.winRate ?? 0) * 100).toFixed(1)}%` : "—"}</td>
                   <td className={`mono ${pnlUsd > 0 ? "pos" : pnlUsd < 0 ? "neg" : "muted"}`}>{pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}</td>
                   <td className="muted" style={{ fontSize: 11 }}>
-                    {m ? <>L{m.level} · next ${m.nextStake.toFixed(2)}</> : "—"}
+                    {m ? <>L{m.level ?? 0} · next ${(m.nextStake ?? 0).toFixed(2)}</> : "—"}
                   </td>
                   <td className="faint" style={{ fontSize: 11 }}>{s.live.lastTradeAt ? fmtTime(s.live.lastTradeAt) : "—"}</td>
                 </tr>

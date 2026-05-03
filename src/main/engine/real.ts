@@ -223,14 +223,16 @@ export class RealEngine extends EventEmitter {
     }
     if (!symbol) return null;
     const isMultiplier = contractType.startsWith("MULT");
-    const family: ContractFamily = isMultiplier ? "MULTIPLIER" : "CALL_PUT";
+    const isDigit = contractType.startsWith("DIGIT");
+    const family: ContractFamily = isDigit ? "DIGIT" : isMultiplier ? "MULTIPLIER" : "CALL_PUT";
     const side: RealTradeSide = (contractType === "MULTUP" || contractType === "CALL") ? "BUY" : "SELL";
     // Narrow to RealTrade["contractType"] union. Anything outside the set
     // (unexpected from Deriv) maps to a side-derived default so we never
     // store an arbitrary string.
+    const KNOWN_CTS: RealTrade["contractType"][] = ["CALL", "PUT", "MULTUP", "MULTDOWN", "DIGITODD", "DIGITEVEN", "DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITDIFF"];
     const ct: RealTrade["contractType"] =
-      contractType === "CALL" || contractType === "PUT" || contractType === "MULTUP" || contractType === "MULTDOWN"
-        ? contractType
+      (KNOWN_CTS as string[]).includes(contractType)
+        ? contractType as RealTrade["contractType"]
         : (isMultiplier ? (side === "BUY" ? "MULTUP" : "MULTDOWN") : (side === "BUY" ? "CALL" : "PUT"));
     const buyPrice = Number(info.buy_price ?? 0);
     const sellPrice = info.sell_price != null ? Number(info.sell_price) : null;
@@ -372,9 +374,12 @@ export class RealEngine extends EventEmitter {
     stakeOverride?: number;
     /** Origin sandbox tag — propagated onto the RealTrade so the settle
      *  handler can advance the right martingale ladder. Defaults to "real". */
-    sandbox?: "real" | "fast" | "fast2";
+    sandbox?: "real" | "fast" | "fast2" | "fast3";
     /** Strategy id within the origin sandbox (e.g. "fast2_rdbear_meanrev"). */
     sandboxStrategyId?: string;
+    /** DIGIT family contract type — DIGITODD/DIGITEVEN are the only ones the
+     *  bot currently uses (no barrier needed). 1-tick duration is hardcoded. */
+    digitContractType?: "DIGITODD" | "DIGITEVEN";
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
@@ -415,7 +420,48 @@ export class RealEngine extends EventEmitter {
     let trade: RealTrade;
     const signalFiredAt = params.signalFiredAt ?? null;
 
-    if (params.family === "CALL_PUT") {
+    if (params.family === "DIGIT") {
+      // DIGITODD / DIGITEVEN — 1-tick binary contract. No SL/TP geometry,
+      // payout fixed by Deriv (≈1.95×). Side is encoded purely in the
+      // contract type, not the directional BUY/SELL convention.
+      const contractType = params.digitContractType ?? "DIGITODD";
+      const { proposal, buy } = await this.deriv.placeDigitContract({
+        symbol: params.symbol,
+        contract_type: contractType,
+        stake,
+        currency: this.account.currency,
+      });
+      const contractOpenedAt = Date.now();
+      const latency = signalFiredAt != null ? contractOpenedAt - signalFiredAt : null;
+      if (latency != null) this.recordOpenLatency(latency);
+      trade = {
+        id: randomUUID(),
+        contractId: buy.contract_id,
+        symbol: params.symbol,
+        side: params.side,
+        family: "DIGIT",
+        contractType,
+        stake,
+        currency: this.account.currency,
+        entrySpot: proposal.spot ?? null,
+        exitSpot: null,
+        buyPrice: buy.buy_price,
+        payout: proposal.payout ?? null,
+        durationTicks: 1,
+        openedAt: contractOpenedAt,
+        closedAt: null,
+        status: "open",
+        profit: null,
+        detector: params.detector,
+        signalFiredAt,
+        signalEntry: params.entryPriceHint ?? null,
+        contractOpenedAt,
+        entrySlippage: null,
+        openLatencyMs: latency,
+        sandbox: params.sandbox ?? "real",
+        sandboxStrategyId: params.sandboxStrategyId,
+      };
+    } else if (params.family === "CALL_PUT") {
       const contractType = params.side === "BUY" ? "CALL" : "PUT";
       const durationTicks = params.durationTicks ?? 10;
       const { proposal, buy } = await this.deriv.placeRiseFall({

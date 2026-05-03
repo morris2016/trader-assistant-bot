@@ -190,6 +190,36 @@ export class DerivClient extends EventEmitter {
     return { proposal, buy };
   }
 
+  async placeDigitContract(params: {
+    symbol: SymbolCode;
+    contract_type: "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER" | "DIGITMATCH" | "DIGITDIFF";
+    stake: number;
+    currency: string;
+    /** Required for OVER/UNDER/MATCH/DIFF — the prediction digit (0-9). */
+    barrier?: number;
+  }): Promise<{ proposal: ProposalInfo; buy: BuyInfo }> {
+    if (!this.authToken) throw new Error("Not authorized — set a token first");
+    const req: DerivRequest = {
+      proposal: 1,
+      amount: params.stake,
+      basis: "stake",
+      contract_type: params.contract_type,
+      currency: params.currency,
+      duration: 1,           // DIGIT contracts are always 1-tick
+      duration_unit: "t",
+      symbol: params.symbol,
+    };
+    if (params.barrier != null) (req as { barrier?: number }).barrier = params.barrier;
+    const propResp = await this.send(req);
+    const proposal = propResp.proposal as ProposalInfo | undefined;
+    if (!proposal) throw new Error("Empty digit proposal response");
+    const buyResp = await this.send({ buy: proposal.id, price: proposal.ask_price });
+    const buy = buyResp.buy as BuyInfo | undefined;
+    if (!buy) throw new Error("Empty digit buy response");
+    this.subscribeOpenContract(buy.contract_id);
+    return { proposal, buy };
+  }
+
   async placeMultiplier(params: {
     symbol: SymbolCode;
     contract_type: "MULTUP" | "MULTDOWN";

@@ -5,7 +5,7 @@
  */
 export type SymbolCode = string;
 
-export type ContractFamily = "CALL_PUT" | "MULTIPLIER";
+export type ContractFamily = "CALL_PUT" | "MULTIPLIER" | "DIGIT";
 
 export type Granularity = 60 | 120 | 180 | 300 | 600 | 900 | 1800 | 3600 | 7200 | 14400 | 28800 | 86400;
 
@@ -157,7 +157,7 @@ export type RealTrade = {
   symbol: SymbolCode;
   side: RealTradeSide;
   family: ContractFamily;       // "CALL_PUT" (binary) or "MULTIPLIER"
-  contractType: "CALL" | "PUT" | "MULTUP" | "MULTDOWN";
+  contractType: "CALL" | "PUT" | "MULTUP" | "MULTDOWN" | "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER" | "DIGITMATCH" | "DIGITDIFF";
   stake: number;
   currency: string;
   entrySpot: number | null;
@@ -196,7 +196,7 @@ export type RealTrade = {
    *  live (signals route to real.placeTrade instead of fast2Paper). Used at
    *  settle time to advance the correct martingale ladder. Defaults to
    *  "real" when undefined for backward compatibility with existing trades. */
-  sandbox?: "real" | "fast" | "fast2";
+  sandbox?: "real" | "fast" | "fast2" | "fast3";
   /** Strategy id within the sandbox (e.g. "fast2_rdbear_meanrev"). Lets
    *  the settle handler look up the right ladder without re-deriving from
    *  symbol+detector. */

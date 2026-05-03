@@ -349,6 +349,24 @@ async function main() {
         log.info(`fast2 LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} W=${fast2MartingaleLive[t.sandboxStrategyId].wins} L=${fast2MartingaleLive[t.sandboxStrategyId].losses} (no martingale)`);
       }
     }
+    // Fast3 LIVE settlement — DIGITODD contracts settle 1 tick after open.
+    // Advance the live ladder, mirror the closed trade into fast3Paper's
+    // closed-trades log so the UI shows it (but DON'T touch the paper
+    // balance — live P&L flows through the Deriv account balance).
+    if (t.sandbox === "fast3" && t.sandboxStrategyId) {
+      const before = fast3MartingaleLive[t.sandboxStrategyId] ?? emptyMartingaleState();
+      const sCfgLive = fast3ConfigFor(t.sandboxStrategyId);
+      const pnl = t.profit ?? 0;
+      const params: MartingaleParams = {
+        baseStake: sCfgLive.baseStake,
+        multiplier: sCfgLive.martingaleMultiplier,
+        maxLevels: sCfgLive.maxLevels,
+        perTradeCap: sCfgLive.perTradeCap,
+      };
+      const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
+      fast3MartingaleLive[t.sandboxStrategyId] = nextLadder;
+      log.info(`fast3 LIVE settled ${t.symbol} DIGITODD ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} contract=${t.contractId}`);
+    }
     persist();
   });
   real.on("capHit", (loss, cap) => { log.warn("daily loss cap hit", { loss, cap }); persist(); });
@@ -1925,7 +1943,7 @@ async function main() {
         maxLevels: cfg.maxLevels,
         perTradeCap: cfg.perTradeCap,
       };
-      const nextLadder = fastMartingaleUpdate(ladder, netPnl > 0 ? "W" : "L", params, "classic");
+      const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
       ladderMap[pending.strategyId] = nextLadder;
 
       if (pending.mode === "paper") {
@@ -1971,11 +1989,27 @@ async function main() {
       // Stake-cap hit → reset to L0 base stake
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
       if (mode === "live") {
-        // LIVE wiring stub: route to real.placeTrade with DIGITODD family.
-        // Real engine doesn't yet support DIGIT family — log + skip until that
-        // path is wired. Operator can flip livenoteEnabled=false to use paper.
-        log.warn("fast3 LIVE not yet wired (DIGIT family pending real.ts support)", { symbol: tick.symbol, strategy: strat.id });
-        continue;
+        // LIVE: place a real DIGITODD contract via Deriv. The contract is
+        // 1-tick — Deriv settles it itself; we listen via the existing
+        // real.on("settled") handler which advances the live ladder.
+        real.placeTrade({
+          symbol: tick.symbol as SymbolCode,
+          side: "BUY", // arbitrary — DIGITODD encodes prediction in contractType
+          family: "DIGIT",
+          digitContractType: "DIGITODD",
+          detector: FAST3_DETECTOR_TAG,
+          stakeOverride: finalStake,
+          signalFiredAt: Date.now(),
+          sandbox: "fast3",
+          sandboxStrategyId: strat.id,
+          entryPriceHint: tick.quote,
+        }).then((trade) => {
+          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+        }).catch((e) => {
+          log.warn(`fast3 LIVE placeTrade failed ${tick.symbol}: ${(e as Error).message}`);
+        });
+        // Don't set fast3Pending in live — settlement comes via real.on("settled")
+        break;
       }
       fast3Pending.set(tick.symbol, {
         entryEpoch: tick.epoch,
