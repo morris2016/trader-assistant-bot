@@ -162,6 +162,39 @@ export class DerivClient extends EventEmitter {
     await this.send({ balance: 1, subscribe: 1 });
   }
 
+  /**
+   * Fetch Deriv's per-account API call limits. Returns the api_call_limits
+   * object from website_status (numbers may vary by region/account-type).
+   * Used at bot boot to dynamically tune the live placeTrade throttle.
+   * Schema (note Deriv typo: max_requestes_general):
+   *   { max_proposal_subscription: { applies_to, max },
+   *     max_requestes_general:    { applies_to, hourly, minutely },
+   *     max_requests_outcome:     { applies_to, hourly, minutely },
+   *     max_requests_pricing:     { applies_to, hourly, minutely } }
+   */
+  async fetchApiCallLimits(): Promise<{
+    pricingPerMinute: number | null;
+    generalPerMinute: number | null;
+    outcomePerMinute: number | null;
+    proposalSubsConcurrent: number | null;
+    raw: unknown;
+  } | null> {
+    try {
+      const resp = await this.send({ website_status: 1 });
+      const limits = (resp as { website_status?: { api_call_limits?: Record<string, { hourly?: number; minutely?: number; max?: number; applies_to?: string }> } }).website_status?.api_call_limits;
+      if (!limits) return null;
+      return {
+        pricingPerMinute: limits.max_requests_pricing?.minutely ?? null,
+        generalPerMinute: (limits as Record<string, { minutely?: number }>).max_requestes_general?.minutely ?? null,
+        outcomePerMinute: limits.max_requests_outcome?.minutely ?? null,
+        proposalSubsConcurrent: limits.max_proposal_subscription?.max ?? null,
+        raw: limits,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async placeRiseFall(params: {
     symbol: SymbolCode;
     contract_type: "CALL" | "PUT";

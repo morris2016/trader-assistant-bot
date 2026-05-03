@@ -123,6 +123,8 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
  *  Picking 100× (max Deriv allows) keeps the validated paper edge while
  *  staying within the live-tradable range. */
 export type Fast2Config = FastSandboxConfig;
+// FAST2 DISABLED 2026-05-04 — user is testing fast3 alone. Force liveTradingEnabled=false
+// in defaults so a fresh deploy can't auto-route fast2 signals to Deriv.
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   // 5-strategy multiplier book defaults (validated 2026-05-03):
   //   $250 acct / $10 stake / 2.0× mart d=3 / 100× mult
@@ -142,7 +144,7 @@ export const DEFAULT_FAST2_CONFIG: Fast2Config = {
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "classic",
-  liveTradingEnabled: true,      // SHIPPED LIVE 2026-05-02 with validated R-stack
+  liveTradingEnabled: false,     // DISABLED 2026-05-04 (was true) — fast3 is sole live-test sandbox
 };
 
 /** Fast3 — DIGITODD tick-level binary contracts on synthetic indices.
@@ -338,11 +340,16 @@ export class BotStorage {
           ?? (parsed as { fast2Martingale?: Record<string, MartingaleState> }).fast2Martingale
           ?? {},
         fast2MartingaleLive: parsed.fast2MartingaleLive ?? {},
-        fast2Config: applyFast2EnvOverrides({
-          ...DEFAULT_FAST2_CONFIG,
-          ...(parsed.fast2Config ?? {}),
-          ...(prefs.fast2Config ?? {}),
-        }),
+        fast2Config: {
+          ...applyFast2EnvOverrides({
+            ...DEFAULT_FAST2_CONFIG,
+            ...(parsed.fast2Config ?? {}),
+            ...(prefs.fast2Config ?? {}),
+          }),
+          // FAST2 DISABLED 2026-05-04 — override any persisted true to false.
+          // Re-enable by removing this line + uncommenting FAST2_STRATEGIES.
+          liveTradingEnabled: false,
+        },
         fast3Paper: parsed.fast3Paper ?? emptyPaperState(41),
         fast3MartingalePaper: parsed.fast3MartingalePaper ?? {},
         fast3MartingaleLive: parsed.fast3MartingaleLive ?? {},

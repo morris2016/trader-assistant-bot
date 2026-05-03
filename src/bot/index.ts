@@ -215,23 +215,29 @@ async function main() {
   // Plus: per-symbol min gap (1.5s) so a single noisy symbol doesn't hog
   // the burst budget, and a hard cooldown if Deriv responds with RateLimit
   // (signal that we're still over the line — back off harder).
-  // PER-STRATEGY time-based duty cycle: each strategy independently runs
-  // BURST_DURATION_MS → COOLDOWN_DURATION_MS → repeat. Strategies' cycles
-  // run on their own clocks, so when one is cooling down the others keep
-  // trading. CRITICAL: if a strategy's burst window expires while its
-  // martingale ladder is active (level > 0), cooldown is DEFERRED until
-  // the ladder resets (win at any level OR max-level reached) — we never
-  // abandon a recovery sequence mid-ladder.
+  // PER-STRATEGY duty cycle, retuned to Deriv's actual sliding-window limits
+  // (researched 2026-05-03):
+  //   max_requests_pricing  = 80/min (proposal + proposal_open_contract)
+  //   max_requestes_general = 180/min (buy/sell/ticks/etc)
+  //   sliding 60s window — clears as old requests age out
   //
-  // Plus a GLOBAL stagger gate so when multiple strategies' burst windows
-  // overlap, the combined rate stays under Deriv's ~60 buys/min ceiling.
+  // Each fast3 buy consumes 2 pricing slots (proposal + POC subscribe), so
+  // effective ceiling is 40 buys/min from fast3 alone. With fast2 sharing
+  // the same account bucket, real ceiling is ~25-30 buys/min for fast3.
   //
-  // Defaults: 5 min burst, 4 min cooldown, 1.5s global gap. All env-tunable.
-  const FAST3_BURST_DURATION_MS = Number(process.env.FAST3_BURST_DURATION_MS ?? 5 * 60_000);
-  const FAST3_COOLDOWN_DURATION_MS = Number(process.env.FAST3_COOLDOWN_DURATION_MS ?? 4 * 60_000);
-  const FAST3_GLOBAL_MIN_GAP_MS = Number(process.env.FAST3_GLOBAL_MIN_GAP_MS ?? 1500);
+  // Defaults: 60s burst (fills the pricing bucket), 65s cooldown (clears
+  // it via sliding window), 1.5s global gap (~40 buys/min when fast3 alone).
+  // The boot-time website_status fetch dynamically narrows the gap if
+  // Deriv reports a tighter limit than the documented defaults.
+  const FAST3_BURST_DURATION_MS = Number(process.env.FAST3_BURST_DURATION_MS ?? 60_000);
+  const FAST3_COOLDOWN_DURATION_MS = Number(process.env.FAST3_COOLDOWN_DURATION_MS ?? 65_000);
+  let FAST3_GLOBAL_MIN_GAP_MS = Number(process.env.FAST3_GLOBAL_MIN_GAP_MS ?? 1500);
   const FAST3_PER_SYMBOL_GAP_MS = Number(process.env.FAST3_PER_SYMBOL_GAP_MS ?? 1500);
-  const FAST3_HARD_COOLDOWN_MS = Number(process.env.FAST3_HARD_COOLDOWN_MS ?? 60_000);
+  const FAST3_HARD_COOLDOWN_MS = Number(process.env.FAST3_HARD_COOLDOWN_MS ?? 65_000);
+  // ── SHARED LIVE rate-limit state (fast2 + fast3 share Deriv's per-account
+  //    sliding-window bucket, so they must coordinate cooldowns) ──
+  let liveSharedCooldownUntil = 0;
+  let liveLastGlobalBuyAt = 0;
   const fast3StratBurstStartedAt = new Map<string, number>();   // strategyId → ms (0 = pending fresh)
   const fast3StratCooldownUntil = new Map<string, number>();    // strategyId → ms
   const fast3StratBuysThisBurst = new Map<string, number>();    // strategyId → count
@@ -1446,7 +1452,15 @@ async function main() {
               if (liveStake !== stake) {
                 log.warn(`fast2 LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD})`);
               }
+              // Respect the shared rate-limit cooldown so fast2 doesn't hammer
+              // Deriv while fast3 has been throttled (and vice versa).
+              if (Date.now() < liveSharedCooldownUntil) {
+                log.info(`fast2 LIVE skip — shared rate-limit cooldown active for ${Math.ceil((liveSharedCooldownUntil - Date.now()) / 1000)}s more`);
+                handledFast2 = true;
+                continue;
+              }
               try {
+                liveLastGlobalBuyAt = Date.now();
                 const trade = await real.placeTrade({
                   symbol: sig.symbol as SymbolCode,
                   side: sig.action,
@@ -1467,7 +1481,12 @@ async function main() {
                 });
                 log.info(`fast2 LIVE opened ${trade.symbol} ${trade.side} strategy=${fast2Match.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${liveMult}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
               } catch (e) {
-                log.error(`fast2 LIVE placeTrade failed`, { err: (e as Error).message, symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
+                const msg = (e as Error).message;
+                if (msg.includes("RateLimit") || msg.includes("rate limit")) {
+                  liveSharedCooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
+                  log.warn(`fast2 LIVE rate-limited by Deriv → shared cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s (also blocks fast3)`);
+                }
+                log.error(`fast2 LIVE placeTrade failed`, { err: msg, symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
               }
               handledFast2 = true;
             }
@@ -1651,6 +1670,31 @@ async function main() {
           }
         } catch (e) {
           log.warn("restoreFromDeriv failed", { err: (e as Error).message });
+        }
+        // Fetch Deriv's actual per-account rate limits and dynamically tune
+        // the global gap. Each fast3 buy consumes 2 pricing-bucket slots
+        // (proposal + proposal_open_contract), so target rate = pricing/2.
+        // Add 20% safety margin so a tick or two of clock drift doesn't trip.
+        try {
+          const limits = await deriv.fetchApiCallLimits();
+          if (limits) {
+            log.info(`Deriv api_call_limits: pricing=${limits.pricingPerMinute}/min general=${limits.generalPerMinute}/min outcome=${limits.outcomePerMinute}/min proposalSubs=${limits.proposalSubsConcurrent}`);
+            if (limits.pricingPerMinute && limits.pricingPerMinute > 0) {
+              const buysPerMin = Math.floor(limits.pricingPerMinute / 2);     // proposal + POC
+              const safe = Math.floor(buysPerMin * 0.8);                       // 20% margin
+              const dynGap = Math.max(1000, Math.ceil(60_000 / safe));
+              if (dynGap > FAST3_GLOBAL_MIN_GAP_MS) {
+                log.info(`fast3 throttle TIGHTENED: gap ${FAST3_GLOBAL_MIN_GAP_MS}ms → ${dynGap}ms (Deriv pricing limit ${limits.pricingPerMinute}/min ÷ 2 calls/buy × 80% safety)`);
+                FAST3_GLOBAL_MIN_GAP_MS = dynGap;
+              } else {
+                log.info(`fast3 throttle gap ${FAST3_GLOBAL_MIN_GAP_MS}ms is conservative vs Deriv's ${limits.pricingPerMinute}/min pricing limit`);
+              }
+            }
+          } else {
+            log.info(`Deriv api_call_limits unavailable — using documented defaults (80/min pricing, gap=${FAST3_GLOBAL_MIN_GAP_MS}ms)`);
+          }
+        } catch (e) {
+          log.warn(`fetchApiCallLimits failed: ${(e as Error).message} — using defaults`);
         }
         log.info("bot ready", { liveTrading: cfg.liveTradingEnabled, strategies: STRATEGIES.length, subs: subscribedKeys.size });
       }
@@ -2036,6 +2080,11 @@ async function main() {
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
       if (mode === "live") {
         const now = Date.now();
+        // ── SHARED cooldown: blocks fast2 + fast3 together when Deriv has
+        // signaled rate-limit. Both sandboxes share the same per-account
+        // pricing/general buckets, so a sole-fast3 cooldown was getting
+        // re-tripped immediately by fast2 trades from the SAME account. ──
+        if (now < liveSharedCooldownUntil) break;
         // ── PER-STRATEGY duty cycle ──
         // Each strategy has its own burst/cooldown. Other strategies keep
         // trading while this one is in cooldown.
@@ -2071,9 +2120,9 @@ async function main() {
             continue;  // try the next strategy that may still be in burst
           }
         }
-        // GLOBAL stagger gate (across all strategies) — keeps combined rate
-        // under Deriv's ~60 buys/min ceiling when multiple bursts overlap.
-        if (now - fast3LastGlobalBuyAt < FAST3_GLOBAL_MIN_GAP_MS) continue;
+        // GLOBAL stagger gate (shared with fast2) — keeps combined rate
+        // under Deriv's ~80 pricing-calls/min ceiling.
+        if (now - liveLastGlobalBuyAt < FAST3_GLOBAL_MIN_GAP_MS) continue;
         const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
         if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
         if (fast3LiveInFlight.has(tick.symbol)) continue;
@@ -2081,7 +2130,7 @@ async function main() {
 
         fast3LiveInFlight.add(tick.symbol);
         fast3LiveLastBuyAt.set(tick.symbol, now);
-        fast3LastGlobalBuyAt = now;
+        liveLastGlobalBuyAt = now;
         const buyCount = (fast3StratBuysThisBurst.get(strat.id) ?? 0) + 1;
         fast3StratBuysThisBurst.set(strat.id, buyCount);
         const elapsedMs = now - stratBurstStartedAt;
@@ -2102,16 +2151,16 @@ async function main() {
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {
-            // Hard cooldown ALL strategies briefly so Deriv's rate window
-            // can clear, then resume per-strategy timers.
-            const allStratsInCooldownAlready = Array.from(fast3StratCooldownUntil.values()).every((t) => Date.now() < t);
+            // Trip the shared cooldown so fast2 also pauses (same account).
+            const wasShared = Date.now() < liveSharedCooldownUntil;
+            liveSharedCooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
             for (const s of FAST3_STRATEGIES) {
               fast3StratCooldownUntil.set(s.id, Date.now() + FAST3_HARD_COOLDOWN_MS);
               fast3StratBurstStartedAt.set(s.id, 0);
               fast3StratPendingCooldown.delete(s.id);
             }
-            if (!allStratsInCooldownAlready) {
-              log.warn(`fast3 LIVE rate-limited by Deriv → hard cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s ALL strategies; bursts closed early`);
+            if (!wasShared) {
+              log.warn(`fast3 LIVE rate-limited by Deriv → SHARED cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s (also blocks fast2); bursts closed early`);
             }
           } else {
             log.warn(`fast3 LIVE placeTrade failed ${tick.symbol}: ${msg}`);

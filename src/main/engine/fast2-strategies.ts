@@ -441,20 +441,27 @@ export const fast2Boom300nDriftDown: StrategyDescriptor = {
   },
 };
 
+// FAST2 SANDBOX DISABLED 2026-05-04
+// User requested fast2 be commented out while fast3 (DIGITODD) is the sole
+// live-test sandbox. Fast2 strategies and dispatch remain in the codebase
+// but the registry export is empty so:
+//   - subscribeAll skips fast2 sym/gr pairs (no extra candle subscriptions)
+//   - fast2 signal dispatch loop sees no matching strategies (no live placeTrade)
+//   - fast2 paper engine still loads but receives no signals
+//   - HTTP /api/fast2-* endpoints return empty data
+// To re-enable: uncomment the array below and redeploy.
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
-  // Original RDBEAR/RDBULL paper-only — Deriv account does NOT offer MULT for
-  // these symbols; LIVE placeTrade returns OfferingsValidationError. Kept for
-  // paper-mode signal flow (validated +$40k 9-month paper book).
-  fast2RdbearMeanRev,
-  fast2RdbullMeanRev,
-  fast2RdbearDrift,
-  fast2RdbullDrift,
-  // Multiplier-capable port (LIVE-tradable, validated 2026-05-03):
-  fast2Boom300nFadeUp,
-  fast2Jd75FadeUp,
-  fast2Jd75FadeDown,
-  fast2Crash300nFadeDown,
-  fast2Boom300nDriftDown,
+  // ── RDBEAR/RDBULL paper-only (no MULT contracts available on Deriv) ──
+  // fast2RdbearMeanRev,
+  // fast2RdbullMeanRev,
+  // fast2RdbearDrift,
+  // fast2RdbullDrift,
+  // ── Multiplier-capable port (validated 2026-05-03) ──
+  // fast2Boom300nFadeUp,
+  // fast2Jd75FadeUp,
+  // fast2Jd75FadeDown,
+  // fast2Crash300nFadeDown,
+  // fast2Boom300nDriftDown,
 ];
 
 export function fast2StrategiesForSymbol(symbol: string): StrategyDescriptor[] {
