@@ -580,12 +580,14 @@ export function startHttpServer(opts: {
           // Returns the most recent log entries in chronological order (oldest
           // first). Optional filters: level (min level to include), q (substring
           // match against the JSON-stringified entry), limit (cap on returned
-          // count). The buffer is capped at 2000 entries server-side.
-          const limit = clamp(Number(url.searchParams.get("limit") ?? 500), 1, 2000);
+          // count). Buffer is sized via LOG_BUFFER_SIZE env (default 50_000).
+          const LOG_FETCH_CAP = 50_000;
+          const limit = clamp(Number(url.searchParams.get("limit") ?? 500), 1, LOG_FETCH_CAP);
           const minLevel = url.searchParams.get("level") ?? "";
           const q = (url.searchParams.get("q") ?? "").toLowerCase();
           const order: Record<string, number> = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
-          let entries = opts.getRecentLogs(2000);
+          const all = opts.getRecentLogs(LOG_FETCH_CAP);
+          let entries = all;
           if (minLevel && order[minLevel] != null) {
             const min = order[minLevel];
             entries = entries.filter((e) => (order[e.level] ?? 0) >= min);
@@ -594,7 +596,7 @@ export function startHttpServer(opts: {
             entries = entries.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
           }
           if (entries.length > limit) entries = entries.slice(-limit);
-          json(res, 200, { logs: entries, totalBuffered: opts.getRecentLogs(2000).length });
+          json(res, 200, { logs: entries, totalBuffered: all.length });
           return;
         }
         if (path0 === "/api/diag") {

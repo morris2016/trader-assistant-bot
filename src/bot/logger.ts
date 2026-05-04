@@ -16,7 +16,13 @@ export type LogEntry = {
 
 const LEVEL_ORDER: Record<LogLevel, number> = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
 
-const MAX_BUFFER = 2000;
+// In-memory ring buffer size. At ~10-20 lines/sec under fast3 the old 2000
+// cap was filling in ~2-3 minutes — too small to retrace a real-strategy
+// signal that fired hours earlier. 50_000 entries ≈ 25-50 min at peak fast3
+// load and many hours during quiet metals-only periods, while staying
+// comfortably under Railway's per-process memory ceiling (each entry is a
+// short JSON object, ~200 bytes → ~10 MB total).
+const MAX_BUFFER = Number(process.env.LOG_BUFFER_SIZE ?? 50_000);
 
 export class Logger {
   private readonly buffer: LogEntry[] = [];
