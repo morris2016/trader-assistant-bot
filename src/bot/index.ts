@@ -200,11 +200,11 @@ async function main() {
     mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
   const fast3ActiveMode = (): "paper" | "live" =>
     fast3Config.liveTradingEnabled ? "live" : "paper";
-  // Per-(symbol, strategy) pending bet. Key = `${symbol}|${strategyId}` so
-  // multiple DIGIT-family variants on the same symbol can have simultaneous
-  // pending bets — paper mode runs the full universe in parallel for
-  // empirical screening. Each is settled the moment a newer tick arrives.
-  type Fast3Pending = { symbol: string; entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
+  // Per-symbol pending bet: tracks DIGITODD bets that have been placed at
+  // tick T and are waiting for tick T+1 to settle. Key = symbol; value =
+  // { entryEpoch, stake, strategyId, mode }. The next tick on the same
+  // symbol settles it.
+  type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
   const fast3Pending = new Map<string, Fast3Pending>();
   // ── Fast3 LIVE concurrency guards ──
   // No client-side throttling. Deriv enforces its own rate limits server-
@@ -2063,72 +2063,20 @@ async function main() {
     const s = price.toFixed(decimals);
     return Number(s.slice(-1));
   };
-  // ── DIGIT contract resolver: returns true iff the contract is a winner
-  // given the next-tick last digit. Centralises the per-type win logic.
-  const fast3IsWin = (
-    contractType: NonNullable<StrategyDescriptor["digitContractType"]>,
-    digit: number,
-    barrier: number | undefined,
-  ): boolean => {
-    switch (contractType) {
-      case "DIGITODD":   return digit % 2 !== 0;
-      case "DIGITEVEN":  return digit % 2 === 0;
-      case "DIGITOVER":  return digit > (barrier ?? 0);
-      case "DIGITUNDER": return digit < (barrier ?? 9);
-      case "DIGITMATCH": return digit === (barrier ?? 0);
-      case "DIGITDIFF":  return digit !== (barrier ?? 0);
-    }
-  };
-  // Representative Deriv payout per (contractType, barrier). Real proposal
-  // payouts vary slightly by symbol/volatility; these are the median quotes
-  // observed across the synthetics. Used ONLY for paper P&L; live P&L
-  // comes from Deriv's settlement.
-  const fast3Payout = (
-    contractType: NonNullable<StrategyDescriptor["digitContractType"]>,
-    barrier: number | undefined,
-    symbol: string,
-  ): number => {
-    if (contractType === "DIGITODD" || contractType === "DIGITEVEN") {
-      return symbol === "R_100" ? 1.92 : 1.95;     // ~50% chance, fair = 2.0×
-    }
-    if (contractType === "DIGITOVER") {
-      // OVER N wins on (9-N)/10 digits → fair payout 10/(9-N).
-      const fair = 10 / Math.max(1, 9 - (barrier ?? 0));
-      return Number((fair * 0.93).toFixed(2));     // 7% house edge typical
-    }
-    if (contractType === "DIGITUNDER") {
-      // UNDER N wins on N/10 digits → fair payout 10/N.
-      const fair = 10 / Math.max(1, (barrier ?? 9));
-      return Number((fair * 0.93).toFixed(2));
-    }
-    if (contractType === "DIGITMATCH") {
-      return 9.50;                                  // 1/10 chance, fair=10×
-    }
-    if (contractType === "DIGITDIFF") {
-      return 1.115;                                 // 9/10 chance, fair=1.111×
-    }
-    return 1.95;
-  };
   deriv.on("tick", (tick) => {
     // Find all Fast3 strategies for this symbol
     const stratsForSym = FAST3_STRATEGIES.filter((s) => s.symbols.includes(tick.symbol));
     if (stratsForSym.length === 0) return;
 
-    // ── Settle every pending bet on this symbol whose entry epoch is older
-    // than the current tick. With multiple variants per symbol there can
-    // be many pending bets at once; settle them all.
-    const settleDigit = fast3LastDigitFor(tick.quote, tick.symbol);
-    for (const [key, pending] of Array.from(fast3Pending.entries())) {
-      if (pending.symbol !== tick.symbol) continue;
-      if (pending.entryEpoch >= tick.epoch) continue;
-      fast3Pending.delete(key);
-      const strat = FAST3_STRATEGIES.find((s) => s.id === pending.strategyId);
-      const ctype = strat?.digitContractType ?? "DIGITODD";
-      const barrier = strat?.digitBarrier;
-      const isWin = fast3IsWin(ctype, settleDigit, barrier);
+    // ── Settle any pending bet on this symbol ──
+    const pending = fast3Pending.get(tick.symbol);
+    if (pending && pending.entryEpoch < tick.epoch) {
+      fast3Pending.delete(tick.symbol);
+      const isOdd = fast3LastDigitFor(tick.quote, tick.symbol) % 2 !== 0;
       const cfg = fast3ConfigFor(pending.strategyId);
-      const payoutRatio = fast3Payout(ctype, barrier, tick.symbol);
-      const netPnl = isWin ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
+      // DIGITODD payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
+      const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
+      const netPnl = isOdd ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
       const ladderMap = pending.mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[pending.strategyId] ?? emptyMartingaleState();
       const params: MartingaleParams = {
@@ -2141,11 +2089,12 @@ async function main() {
       ladderMap[pending.strategyId] = nextLadder;
 
       if (pending.mode === "paper") {
+        // Apply pnl to fast3 paper balance directly (no SL/TP geometry).
         const ps = fast3Paper.getState();
         const newBal = Number((ps.balance + netPnl).toFixed(2));
         fast3Paper.applyDelta(netPnl, {
           symbol: tick.symbol,
-          side: "BUY",
+          side: "BUY",  // arbitrary tag — DIGITODD is a digit prediction, not directional
           detector: FAST3_DETECTOR_TAG,
           strategyId: pending.strategyId,
           stake: pending.stake,
@@ -2156,49 +2105,44 @@ async function main() {
           entryPrice: 0,
           exitPrice: tick.quote,
         });
-        log.debug(`fast3Paper settled ${pending.strategyId} ${ctype}${barrier != null ? ` ${barrier}` : ""} digit=${settleDigit} ${isWin ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
+        log.debug(`fast3Paper settled ${tick.symbol} ${netPnl > 0 ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
       }
       // (live settlement is handled via real.on("settled") elsewhere)
     }
 
-    // ── Place new bets for the next tick ──
-    const mode = fast3ActiveMode();
-    let liveFiredThisTick = false;
+    // ── Place a new bet for the next tick ──
+    if (fast3Pending.has(tick.symbol)) return; // still busy waiting on settle from last tick
     for (const strat of stratsForSym) {
       const cfg = fast3ConfigFor(strat.id);
       const enabled = (fast3Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
       if (!enabled) continue;
-      // Skip if a bet on this strategy is already pending for this symbol
-      // (must wait for settle before re-betting).
-      if (fast3Pending.has(`${tick.symbol}|${strat.id}`)) continue;
+      const mode = fast3ActiveMode();
       const ladderMap = mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
       const stake = Number((cfg.baseStake * Math.pow(cfg.martingaleMultiplier, ladder.level)).toFixed(2));
+      // Affordability + stake cap
       const cappedStake = Math.min(stake, cfg.perTradeCap);
       const ps = fast3Paper.getState();
       if (mode === "paper" && ps.balance < cappedStake) {
+        // Reset ladder, can't afford this level
         if (ladder.level > 0) ladderMap[strat.id] = emptyMartingaleState();
         continue;
       }
+      // Stake-cap hit → reset to L0 base stake
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
-      const ctype = strat.digitContractType ?? "DIGITODD";
-      const barrier = strat.digitBarrier;
       if (mode === "live") {
-        // LIVE: only one contract per symbol per tick (Deriv rate-limit
-        // realism — running 17 syms × 4 variants in parallel would crush
-        // the 80/min pricing bucket). Paper screens all variants in
-        // parallel; live = pick the first enabled one per symbol.
-        if (liveFiredThisTick) continue;
+        // No client-side throttling — Deriv enforces server-side rate limits
+        // and surfaces "RateLimit" errors when the bucket is exceeded; we
+        // log+drop and the next tick retries.
         if (fast3LiveInFlight.has(tick.symbol)) continue;
         if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
+
         fast3LiveInFlight.add(tick.symbol);
-        liveFiredThisTick = true;
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
           side: "BUY",
           family: "DIGIT",
-          digitContractType: ctype,
-          digitBarrier: barrier,
+          digitContractType: "DIGITODD",
           detector: FAST3_DETECTOR_TAG,
           stakeOverride: finalStake,
           signalFiredAt: Date.now(),
@@ -2206,7 +2150,7 @@ async function main() {
           sandboxStrategyId: strat.id,
           entryPriceHint: tick.quote,
         }).then((trade) => {
-          log.info(`fast3 LIVE opened ${ctype}${barrier != null ? ` ${barrier}` : ""} ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {
@@ -2217,16 +2161,18 @@ async function main() {
         }).finally(() => {
           fast3LiveInFlight.delete(tick.symbol);
         });
-        continue;
+        break;
       }
-      // PAPER: every enabled variant on this symbol fires its own bet.
-      fast3Pending.set(`${tick.symbol}|${strat.id}`, {
-        symbol: tick.symbol,
+      fast3Pending.set(tick.symbol, {
         entryEpoch: tick.epoch,
         stake: finalStake,
         strategyId: strat.id,
         mode,
       });
+      // Only one strategy fires per symbol per tick (first match wins);
+      // multiple Fast3 strategies on same symbol would collide on the
+      // pending slot anyway.
+      break;
     }
   });
 

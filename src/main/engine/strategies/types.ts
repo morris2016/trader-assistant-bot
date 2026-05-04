@@ -49,19 +49,6 @@ export type StrategyDescriptor = {
    *  would burn the edge by amplifying rare losing streaks. */
   useMartingale?: boolean;
 
-  /** Tick-level DIGIT contract metadata (granularity=0 only). Selects which
-   *  DIGIT family contract the bot dispatches per tick:
-   *    DIGITODD  — wins if last digit is odd (no barrier)
-   *    DIGITEVEN — wins if last digit is even (no barrier)
-   *    DIGITOVER — wins if last digit > digitBarrier (barrier 0..8)
-   *    DIGITUNDER — wins if last digit < digitBarrier (barrier 1..9)
-   *    DIGITMATCH — wins if last digit == digitBarrier (0..9)
-   *    DIGITDIFF — wins if last digit != digitBarrier (0..9)
-   *  Ignored unless granularity===0 (tick-level dispatch). */
-  digitContractType?: "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER" | "DIGITMATCH" | "DIGITDIFF";
-  /** Barrier digit for DIGITOVER/UNDER/MATCH/DIFF. */
-  digitBarrier?: number;
-
   /** Snapshot of the validation run that promoted this strategy from "tuning" to "tradeable". */
   validation: {
     /** ISO date (YYYY-MM-DD) of the validation run. */

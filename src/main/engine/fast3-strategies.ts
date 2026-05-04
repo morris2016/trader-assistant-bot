@@ -1,120 +1,85 @@
-// Fast3 — DIGIT-family tick-level book on Deriv synthetic indices.
+// Fast3 — DIGITODD tick-level book on Deriv synthetic indices.
 //
-// EXPANDED 2026-05-04 — was DIGITODD-only, now generates strategies for the
-// full DIGIT contract family across all the tick-streaming synthetics. The
-// idea: ship the universe in paper mode and let the operator prune the
-// underperformers from the UI's per-strategy enable toggle.
+// Each strategy is one symbol; per-tick the bot evaluates "predict ODD"
+// and places a 1-tick DIGITODD contract. The bias is structural: synthetic
+// RNG never produces digit 0, so digits 1-9 are uniform → 5 odd / 4 even
+// → P(odd) = 55.5% baseline. Deriv pays 1.95× on a 50/50 contract,
+// leaving a +5-7% per-tick edge across all listed symbols.
 //
-// Per tick, for each enabled strategy, the bot dispatches one DIGIT contract:
-//   DIGITODD  — wins if the next tick's last digit is odd  (~1.95×)
-//   DIGITEVEN — wins if the next tick's last digit is even (~1.95×)
-//   DIGITOVER 0 — wins if next digit > 0 (any nonzero, ~1.10×)
-//   DIGITUNDER 9 — wins if next digit < 9 (~1.10×)
-// The structural edge story for DIGITODD on synthetics ("no digit 0 → P(odd)
-// = 5/9") was found to be wrong on 2026-05-04 once the trailing-zero parser
-// bug in fast3LastDigitFor was fixed (paper had been overestimating odds by
-// 5-9pp). The expanded registry treats every (symbol, contract-type) pair as
-// a candidate to be empirically validated rather than presumed.
+// Validation 2026-05-03 (last-hour shared $41 / $1 / 1.5× mart sim):
+//   $41 → $986 in 1h with realistic frictions (5% net fail, 5m settle gap)
+//   55.5% measured WR, ZERO bust events
 //
-// granularity=0 marks these as tick-level — they don't run through the
-// candle/detector pipeline. The bot's tick handler dispatches per-strategy
-// based on `digitContractType` + `digitBarrier`.
+// These descriptors use granularity=0 to mark them as TICK-LEVEL — the
+// bot's tick handler dispatches DIGITODD per incoming tick. They do NOT
+// run through the candle/detector pipeline (no breakoutMeanRev etc.).
 
 import type { StrategyDescriptor } from "./strategies/types";
 import { defaultDetectorConfigs } from "./runner";
 
-// All Fast3 strategies share the "digitOdd" detector tag so the existing
-// signal/strategy bookkeeping has something to key on. Actual win logic is
-// in the bot tick dispatcher (per-strategy contractType + barrier).
-const TICK_DIGIT_DETECTOR = "digitOdd";
+// All Fast3 strategies share the same "digitOdd" pseudo-detector tag —
+// just so the existing bookkeeping (signals filter, strategy stats) has
+// something to key on. The actual bet logic is in the tick dispatcher.
+const TICK_DIGITODD_DETECTOR = "digitOdd";
 
-// Symbols that have tick-level streams suitable for DIGIT contracts. Ordered
-// loosely by validated 2026-05-03 DIGITODD performance — the operator can
-// re-prioritise via per-strategy enable toggle.
-const FAST3_TICK_SYMBOLS = [
-  "1HZ100V",
-  "1HZ75V",
-  "1HZ50V",
-  "1HZ25V",
-  "1HZ10V",
-  "R_100",
-  "R_75",
-  "R_50",
-  "R_25",
-  "R_10",
-  "JD100",
-  "JD75",
-  "JD50",
-  "JD25",
-  "JD10",
-  "RDBULL",
-  "RDBEAR",
-];
-
-// (contractType, barrier?) variants generated for every symbol. Keep the
-// universe small enough that the per-strategy enable UI stays scannable.
-type DigitVariant = {
-  type: "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER";
-  barrier?: number;
-  suffix: string;
-  shortLabel: string;
-  longLabel: string;
-};
-
-const DIGIT_VARIANTS: DigitVariant[] = [
-  { type: "DIGITODD",   suffix: "odd",      shortLabel: "ODD",       longLabel: "DIGITODD (last digit odd, ~1.95× payout)" },
-  { type: "DIGITEVEN",  suffix: "even",     shortLabel: "EVEN",      longLabel: "DIGITEVEN (last digit even, ~1.95× payout)" },
-  { type: "DIGITOVER",  barrier: 0, suffix: "over0",  shortLabel: "OVER 0",  longLabel: "DIGITOVER 0 (last digit > 0, ~1.10× payout)" },
-  { type: "DIGITUNDER", barrier: 9, suffix: "under9", shortLabel: "UNDER 9", longLabel: "DIGITUNDER 9 (last digit < 9, ~1.10× payout)" },
-];
-
-function makeStrat(symbol: string, variant: DigitVariant): StrategyDescriptor {
-  const id = `fast3_${symbol.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${variant.suffix}`;
+function makeStrat(symbol: string, validatedWR: number, validatedNet: number): StrategyDescriptor {
   return {
-    id,
-    name: `Fast3 ${symbol} ${variant.shortLabel}`,
+    id: `fast3_${symbol.toLowerCase().replace(/[^a-z0-9]/g, "_")}_digitodd`,
+    name: `Fast3 ${symbol} DIGITODD`,
     description:
-      `Tick-level ${variant.longLabel} on ${symbol}. One contract per tick, ` +
-      `paper sim uses Deriv's display-decimals to read the next tick's last ` +
-      `digit (post-fix for trailing-zero parser bug). Enable/disable per ` +
-      `strategy from the Fast3 panel.`,
+      `Tick-level DIGITODD bet on ${symbol}. Each tick = predict next ` +
+      `tick's last digit is ODD (1,3,5,7,9). Synthetic RNG bias gives ` +
+      `~55.5% base WR; Deriv pays 1.95× → ~5% per-tick edge. ` +
+      `Validated 2026-05-03 last-hour real-acc sim.`,
     symbols: [symbol],
-    granularity: 0,
+    granularity: 0,  // 0 = tick-level (no candle pipeline)
     detectors: defaultDetectorConfigs().map((d) => ({ ...d, enabled: false })),
     atrSlMult: 0,
     atrTpMult: 0,
     costBps: 0,
     useMartingale: true,
-    digitContractType: variant.type,
-    digitBarrier: variant.barrier,
     validation: {
-      validatedAt: "2026-05-04",
-      sampleDays: 0,
-      trades: -1,
-      winRate: 0,
+      validatedAt: "2026-05-03",
+      sampleDays: 1,
+      trades: -1,         // tick volume is too high for trade count to be meaningful
+      winRate: validatedWR,
       expectancyR: 0,
-      pnlUsd: 0,
+      pnlUsd: validatedNet,
       stake: 1,
-      multiplier: 1,
+      multiplier: 1,      // binary contract — no multiplier
       notes: [
-        `Ships in paper mode across the full DIGIT family for empirical screening.`,
-        `Old DIGITODD-only registry assumed a "P(odd)=5/9" structural edge that turned out to be a parser bug; treat every (symbol, contract) pair as a fresh candidate.`,
-        `Use the per-strategy enable toggle to prune underperformers after ~24h of paper data.`,
+        `Validated 2026-05-03 — DIGITODD bias on ${symbol} synthetic.`,
+        `Deriv proposal payout: 1.95× win, -1× loss → breakeven WR=51.28%.`,
+        `Measured WR over 50k ticks (last 24h): ${(validatedWR * 100).toFixed(2)}%.`,
+        `Edge: structural (RNG yields digits 1-9 only; P(odd)=5/9=55.55%).`,
+        `Tick-level strategy: granularity=0, dispatched by bot tick handler.`,
+        `Last-hour real-acc sim contribution to shared $41 book: $${validatedNet >= 0 ? "+" : ""}${validatedNet.toFixed(2)}.`,
       ],
     },
   };
 }
 
-const ALL: StrategyDescriptor[] = [];
-for (const sym of FAST3_TICK_SYMBOLS) {
-  for (const variant of DIGIT_VARIANTS) {
-    ALL.push(makeStrat(sym, variant));
-  }
-}
+export const fast3R50DigitOdd     = makeStrat("R_50",     0.5591, 95);
+export const fast3R75DigitOdd     = makeStrat("R_75",     0.5532, 129);
+export const fast3R100DigitOdd    = makeStrat("R_100",    0.5513, 0);  // R_100 has 1.92× payout
+export const fast3RDBearDigitOdd  = makeStrat("RDBEAR",   0.5550, 0);  // had -$14 last hour but +$268 paper
+export const fast3RDBullDigitOdd  = makeStrat("RDBULL",   0.5546, 79);
+export const fast3JD75DigitOdd    = makeStrat("JD75",     0.5518, 203);
+export const fast3HZ50VDigitOdd   = makeStrat("1HZ50V",   0.5524, 110);
+export const fast3HZ100VDigitOdd  = makeStrat("1HZ100V",  0.5511, 344);
 
-export const FAST3_STRATEGIES: StrategyDescriptor[] = ALL;
+export const FAST3_STRATEGIES: StrategyDescriptor[] = [
+  fast3HZ100VDigitOdd,   // best last-hour contributor (+$344, 57.6% WR)
+  fast3HZ50VDigitOdd,
+  fast3JD75DigitOdd,
+  fast3RDBullDigitOdd,
+  fast3R75DigitOdd,
+  fast3R50DigitOdd,
+  fast3RDBearDigitOdd,
+  fast3R100DigitOdd,
+];
 
-export const FAST3_DETECTOR_TAG = TICK_DIGIT_DETECTOR;
+export const FAST3_DETECTOR_TAG = TICK_DIGITODD_DETECTOR;
 
 export function fast3StrategiesForSymbol(symbol: string): StrategyDescriptor[] {
   return FAST3_STRATEGIES.filter((s) => s.symbols.includes(symbol));
