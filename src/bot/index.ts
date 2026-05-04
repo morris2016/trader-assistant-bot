@@ -231,11 +231,29 @@ async function main() {
   // Deriv reports a tighter limit than the documented defaults.
   const FAST3_BURST_DURATION_MS = Number(process.env.FAST3_BURST_DURATION_MS ?? 60_000);
   const FAST3_COOLDOWN_DURATION_MS = Number(process.env.FAST3_COOLDOWN_DURATION_MS ?? 65_000);
-  let FAST3_GLOBAL_MIN_GAP_MS = Number(process.env.FAST3_GLOBAL_MIN_GAP_MS ?? 1500);
-  const FAST3_PER_SYMBOL_GAP_MS = Number(process.env.FAST3_PER_SYMBOL_GAP_MS ?? 1500);
+  let FAST3_GLOBAL_MIN_GAP_MS = Number(process.env.FAST3_GLOBAL_MIN_GAP_MS ?? 0);
+  // Per-symbol gap kept low so the bot can fire on consecutive ticks of
+  // the same symbol when budget is available. Sliding window governs
+  // total rate; this just prevents 2-buys-in-the-same-millisecond races.
+  const FAST3_PER_SYMBOL_GAP_MS = Number(process.env.FAST3_PER_SYMBOL_GAP_MS ?? 250);
   const FAST3_HARD_COOLDOWN_MS = Number(process.env.FAST3_HARD_COOLDOWN_MS ?? 65_000);
   // ── SHARED LIVE rate-limit state (fast2 + fast3 share Deriv's per-account
   //    sliding-window bucket, so they must coordinate cooldowns) ──
+  //
+  // Token-bucket replaces the fixed inter-buy gap. Deriv enforces 80 pricing
+  // calls per rolling 60s window; each fast3 buy consumes 2 (proposal +
+  // proposal_open_contract subscribe). We keep a timestamp ring of recent
+  // buy attempts and admit a new buy only when the 60s rolling count is
+  // under (80 - safety_margin) / 2 = 32 buys.
+  //
+  // This lets the bot fire on every tick when the account has budget AND
+  // throttles only when the bucket actually fills — vs the old fixed gap
+  // that wasted half the tick stream during quiet periods.
+  const PRICING_LIMIT_PER_MIN = Number(process.env.PRICING_LIMIT_PER_MIN ?? 80);
+  const PRICING_CALLS_PER_BUY = 2;
+  const PRICING_SAFETY_MARGIN = 0.85;
+  const FAST3_MAX_BUYS_PER_MIN = Math.floor(PRICING_LIMIT_PER_MIN * PRICING_SAFETY_MARGIN / PRICING_CALLS_PER_BUY);
+  const liveBuyTimestamps: number[] = [];   // ring of recent buy ms (sliding window)
   let liveSharedCooldownUntil = 0;
   let liveLastGlobalBuyAt = 0;
   const fast3StratBurstStartedAt = new Map<string, number>();   // strategyId → ms (0 = pending fresh)
@@ -1677,19 +1695,9 @@ async function main() {
           const limits = await deriv.fetchApiCallLimits();
           if (limits) {
             log.info(`Deriv api_call_limits: pricing=${limits.pricingPerMinute}/min general=${limits.generalPerMinute}/min outcome=${limits.outcomePerMinute}/min proposalSubs=${limits.proposalSubsConcurrent}`);
-            if (limits.pricingPerMinute && limits.pricingPerMinute > 0) {
-              const buysPerMin = Math.floor(limits.pricingPerMinute / 2);     // proposal + POC
-              const safe = Math.floor(buysPerMin * 0.8);                       // 20% margin
-              const dynGap = Math.max(1000, Math.ceil(60_000 / safe));
-              if (dynGap > FAST3_GLOBAL_MIN_GAP_MS) {
-                log.info(`fast3 throttle TIGHTENED: gap ${FAST3_GLOBAL_MIN_GAP_MS}ms → ${dynGap}ms (Deriv pricing limit ${limits.pricingPerMinute}/min ÷ 2 calls/buy × 80% safety)`);
-                FAST3_GLOBAL_MIN_GAP_MS = dynGap;
-              } else {
-                log.info(`fast3 throttle gap ${FAST3_GLOBAL_MIN_GAP_MS}ms is conservative vs Deriv's ${limits.pricingPerMinute}/min pricing limit`);
-              }
-            }
+            log.info(`fast3 sliding-window limiter: max ${FAST3_MAX_BUYS_PER_MIN} buys/min (= ${PRICING_LIMIT_PER_MIN}-call pricing ÷ ${PRICING_CALLS_PER_BUY}/buy × ${(PRICING_SAFETY_MARGIN*100).toFixed(0)}% safety)`);
           } else {
-            log.info(`Deriv api_call_limits unavailable — using documented defaults (80/min pricing, gap=${FAST3_GLOBAL_MIN_GAP_MS}ms)`);
+            log.info(`Deriv api_call_limits unavailable — using documented default (${PRICING_LIMIT_PER_MIN}/min pricing → max ${FAST3_MAX_BUYS_PER_MIN} buys/min)`);
           }
         } catch (e) {
           log.warn(`fetchApiCallLimits failed: ${(e as Error).message} — using defaults`);
@@ -2143,9 +2151,15 @@ async function main() {
             continue;  // try the next strategy that may still be in burst
           }
         }
-        // GLOBAL stagger gate (shared with fast2) — keeps combined rate
-        // under Deriv's ~80 pricing-calls/min ceiling.
-        if (now - liveLastGlobalBuyAt < FAST3_GLOBAL_MIN_GAP_MS) continue;
+        // ── Sliding-window rate gate ──
+        // Deriv allows 80 pricing calls per rolling 60s; each buy uses 2.
+        // Admit only if the count of buys placed in the last 60s is under
+        // FAST3_MAX_BUYS_PER_MIN (~34 with 85% safety margin). Lets the
+        // bot fire flat-out within budget instead of the fixed-gap delay
+        // that would skip ticks even when budget was available.
+        const oneMinAgo = now - 60_000;
+        while (liveBuyTimestamps.length > 0 && liveBuyTimestamps[0] < oneMinAgo) liveBuyTimestamps.shift();
+        if (liveBuyTimestamps.length >= FAST3_MAX_BUYS_PER_MIN) continue;
         const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
         if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
         if (fast3LiveInFlight.has(tick.symbol)) continue;
@@ -2164,6 +2178,7 @@ async function main() {
         fast3LiveInFlight.add(tick.symbol);
         fast3LiveLastBuyAt.set(tick.symbol, now);
         liveLastGlobalBuyAt = now;
+        liveBuyTimestamps.push(now);
         const buyCount = (fast3StratBuysThisBurst.get(strat.id) ?? 0) + 1;
         fast3StratBuysThisBurst.set(strat.id, buyCount);
         const elapsedMs = now - stratBurstStartedAt;
