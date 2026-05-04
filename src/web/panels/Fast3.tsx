@@ -10,6 +10,9 @@ const MART_MULT_OPTIONS = [1.3, 1.5, 1.7, 2.0, 2.2];
 const DERIV_MIN_STAKE = 1;
 const DERIV_MAX_STAKE = 2000;
 
+type SortKey = "rating" | "pnl" | "wr" | "trades" | "default";
+type RatingFilter = "all" | "enabled" | "A_or_B" | "positive" | "zero_busts";
+
 export function Fast3Panel({ state, doAction, pending }: {
   state: StateResp | null;
   doAction: (label: string, fn: () => Promise<unknown>) => void;
@@ -24,6 +27,13 @@ export function Fast3Panel({ state, doAction, pending }: {
   const [error, setError] = useState<string | null>(null);
   const [resetTo, setResetTo] = useState<string>("41");
   const [pendingCfg, setPendingCfg] = useState<Fast3Config | null>(null);
+  // Sort + filter state for the per-strategy rater. Declared at the top of
+  // the component (alongside the other useState calls) so the hook order
+  // stays stable across the early-return below — moving these after the
+  // `if (!paper) return …` guard tripped React error #310 (more hooks on
+  // second render than the first).
+  const [sortBy, setSortBy] = useState<SortKey>("rating");
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>("all");
 
   useEffect(() => {
     const load = async () => {
@@ -142,11 +152,6 @@ export function Fast3Panel({ state, doAction, pending }: {
     else if (pts >= 30) grade = "D";
     return { grade, score: pts, reason: `WR=${(wr * 100).toFixed(1)}% · $/bet=${pnlPerBet >= 0 ? "+" : ""}${pnlPerBet.toFixed(3)} · busts=${busts}` };
   }
-
-  type SortKey = "rating" | "pnl" | "wr" | "trades" | "default";
-  type RatingFilter = "all" | "enabled" | "A_or_B" | "positive" | "zero_busts";
-  const [sortBy, setSortBy] = useState<SortKey>("rating");
-  const [ratingFilter, setRatingFilter] = useState<RatingFilter>("all");
 
   const enrichedStrategies = strategies.map((s) => {
     const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
