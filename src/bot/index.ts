@@ -216,6 +216,19 @@ async function main() {
   //   - open-contract: DIGITODD settles next tick, so don't stack bets on
   //     the same symbol
   const fast3LiveInFlight = new Set<string>();
+  // Per-symbol decimal places for DIGITODD digit extraction. Populated at
+  // boot from Deriv's active_symbols (pip_size → display_decimals). The
+  // paper-mode settle path uses this to read the LAST digit of the quote
+  // including trailing zeros — e.g. R_75's quote "213.4570" must be read
+  // as digit 0, not digit 7. Number.toString() strips the trailing zero,
+  // so we must pad via toFixed(decimals) before slicing.
+  // Bug history (2026-05-04): paper engine's settle was using
+  // `quote.toString()` and got the wrong digit for any quote ending in 0,
+  // making paper estimate P(odd)≈55% when live is closer to 50% — paper
+  // balance diverged sharply upward from live. Without active_symbols
+  // populated the fallback uses sensible defaults: synthetics are 2-5dp,
+  // metals are 5dp.
+  const pipDecimalsBySymbol = new Map<string, number>();
   log.info("fast3Paper: state loaded", {
     balance: fast3Paper.getState().balance,
     closed: fast3Paper.getState().closed.length,
@@ -1654,6 +1667,21 @@ async function main() {
       log.info("authorized", { loginid: info.loginid, currency: info.currency, virtual: info.is_virtual === 1, balance: info.balance });
       await deriv.subscribeBalance().catch((e) => log.warn("subscribeBalance failed", { err: (e as Error).message }));
 
+      // Populate per-symbol decimals from Deriv's authoritative active_symbols
+      // pip_size. fast3 paper-mode settle uses this to read the FULL digit
+      // string from the quote (Number.toString strips trailing zeros).
+      try {
+        const syms = await deriv.fetchActiveSymbols();
+        for (const s of syms) {
+          const pipSize = s.pip_size ?? s.pip ?? 0.0001;
+          const decimals = s.display_decimals ?? Math.max(0, Math.round(-Math.log10(pipSize)));
+          pipDecimalsBySymbol.set(s.symbol, Math.round(decimals));
+        }
+        log.info(`active_symbols: ${syms.length} symbols, fast3 decimals=${FAST3_STRATEGIES.map((st) => `${st.symbols[0]}:${pipDecimalsBySymbol.get(st.symbols[0]) ?? "?"}`).join(",")}`);
+      } catch (e) {
+        log.warn("fetchActiveSymbols failed — fast3 paper digit extraction may misread trailing zeros", { err: (e as Error).message });
+      }
+
       if (reconnect) {
         // DerivClient's resubscribeAll() already handled it. Don't double-subscribe.
         // Record the reconnect timestamp so the post-reconnect heal can detect
@@ -2024,13 +2052,16 @@ async function main() {
   //   2. Place a new DIGITODD bet for the next tick (per-strategy ladder stake).
   // The "next-tick" model: we bet at tick T on whether tick T+1 will be ODD.
   // The pending map holds the in-flight bet until the next tick arrives.
-  const fast3LastDigitFor = (price: number): number => {
-    const s = price.toString();
-    const dot = s.indexOf(".");
-    if (dot < 0) return 0;
-    const dec = s.slice(dot + 1);
-    if (dec.length === 0) return 0;
-    return Number(dec[dec.length - 1]);
+  // Read the last decimal digit of `price` at the symbol's pip precision.
+  // Uses Deriv's per-symbol display_decimals so trailing zeros are NOT
+  // dropped — Number.toString(213.4570) returns "213.457", which would
+  // mis-report digit 7 instead of digit 0. Falls back to a 4dp default if
+  // the symbol isn't in pipDecimalsBySymbol yet (e.g. active_symbols not
+  // loaded), which is enough for 1HZ*V / R_*  / RDB*** / JD*.
+  const fast3LastDigitFor = (price: number, symbol: string): number => {
+    const decimals = pipDecimalsBySymbol.get(symbol) ?? 4;
+    const s = price.toFixed(decimals);
+    return Number(s.slice(-1));
   };
   deriv.on("tick", (tick) => {
     // Find all Fast3 strategies for this symbol
@@ -2041,7 +2072,7 @@ async function main() {
     const pending = fast3Pending.get(tick.symbol);
     if (pending && pending.entryEpoch < tick.epoch) {
       fast3Pending.delete(tick.symbol);
-      const isOdd = fast3LastDigitFor(tick.quote) % 2 !== 0;
+      const isOdd = fast3LastDigitFor(tick.quote, tick.symbol) % 2 !== 0;
       const cfg = fast3ConfigFor(pending.strategyId);
       // DIGITODD payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
       const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
@@ -2162,13 +2193,9 @@ async function main() {
     const pending = fast2TickPending.get(tick.symbol);
     if (pending && pending.entryEpoch < tick.epoch) {
       fast2TickPending.delete(tick.symbol);
-      const settleDigit = (() => {
-        const s = tick.quote.toString();
-        const dot = s.indexOf(".");
-        if (dot < 0) return 0;
-        const dec = s.slice(dot + 1);
-        return dec.length > 0 ? Number(dec[dec.length - 1]) : 0;
-      })();
+      // Same trailing-zero issue as fast3: read the digit at pip precision
+      // so a quote like "213.4570" doesn't get its trailing 0 dropped.
+      const settleDigit = fast3LastDigitFor(tick.quote, tick.symbol);
       const isWin = settleDigit > 0;  // DIGITOVER 0 → win when digit > 0
       const cfg = fast2ConfigFor(pending.strategyId);
       const payout = 1.09;            // DIGITOVER 0 broker price
