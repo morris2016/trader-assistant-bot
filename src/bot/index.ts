@@ -24,7 +24,7 @@ import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DEFAULT_REAL_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config, type RealConfig } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -52,7 +52,7 @@ async function main() {
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, resetFast3Paper: () => {}, updateFast3Config: () => {}, updateFast3StrategyConfig: () => {}, closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, resetFast3Paper: () => {}, updateFast3Config: () => {}, updateFast3StrategyConfig: () => {}, updateRealConfig: () => {}, getRealConfig: () => ({ liveTradingEnabled: false }), closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -222,6 +222,22 @@ async function main() {
     config: fast3Config,
   });
 
+  // ── Real-strategy book runtime config ───────────────────────────────────
+  // Mutable at runtime via /api/control/update-real-config so the operator can
+  // flip silver/gold/plat strategies between paper and live without
+  // redeploying. Initial value: env LIVE_TRADING wins on first boot, then
+  // persisted realConfig takes over.
+  let realConfig: RealConfig = {
+    ...DEFAULT_REAL_CONFIG,
+    ...persisted.realConfig,
+    // First-boot bootstrap: if the persisted state has no realConfig and the
+    // env says LIVE_TRADING=true, start live. After that, the toggle is the
+    // source of truth.
+    liveTradingEnabled: persisted.realConfig?.liveTradingEnabled ?? cfg.liveTradingEnabled,
+  };
+  const realActiveMode = (): "paper" | "live" => realConfig.liveTradingEnabled ? "live" : "paper";
+  log.info("realConfig: loaded", { config: realConfig });
+
   const deriv = new DerivClient({ appId: cfg.derivAppId });
   // One Engine instance per (symbol, granularity). Engine state (detector pools,
   // ATR/ADX windows, recent signals) is symbol-keyed internally — running two
@@ -315,6 +331,7 @@ async function main() {
       fast3MartingalePaper,
       fast3MartingaleLive,
       fast3Config,
+      realConfig,
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
   paper.onChange(() => persist());
@@ -573,6 +590,15 @@ async function main() {
         persist();
         log.warn("fast3Config updated via API", { before, after: next });
       },
+      updateRealConfig: (patch: Partial<RealConfig>) => {
+        const before = { ...realConfig };
+        const next: RealConfig = { ...realConfig, ...patch };
+        if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
+        realConfig = next;
+        persist();
+        log.warn("realConfig updated via API", { before, after: next });
+      },
+      getRealConfig: () => realConfig,
       updateFast3StrategyConfig: (strategyId: string, patch: Partial<Fast3Config> | null) => {
         const beforePerStrat = { ...(fast3Config.perStrategy ?? {}) };
         if (patch === null) {
@@ -1527,12 +1553,13 @@ async function main() {
     const realState = real.state();
     const liveOpenSameSide = (realState.open ?? []).some((t) => t.symbol === sig.symbol && t.side === sig.action);
     const paperOpenSameSide = paper.getState().open.some((p) => p.symbol === sig.symbol && p.side === sig.action);
-    if ((cfg.liveTradingEnabled && liveOpenSameSide) || (!cfg.liveTradingEnabled && paperOpenSameSide)) {
-      log.info("signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action, mode: cfg.liveTradingEnabled ? "live" : "paper" });
+    const realLiveMode = realConfig.liveTradingEnabled;
+    if ((realLiveMode && liveOpenSameSide) || (!realLiveMode && paperOpenSameSide)) {
+      log.info("signal skipped — same-side position already open", { symbol: sig.symbol, side: sig.action, mode: realLiveMode ? "live" : "paper" });
       return;
     }
 
-    if (!cfg.liveTradingEnabled) {
+    if (!realLiveMode) {
       // Paper trade: open a simulated position, settle later via candle stream.
       const pos = paper.openPosition({
         signalId: sig.id,

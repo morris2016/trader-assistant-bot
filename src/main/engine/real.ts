@@ -655,6 +655,11 @@ export class RealEngine extends EventEmitter {
 
     if (info.entry_spot != null && trade.entrySpot == null) trade.entrySpot = info.entry_spot;
 
+    // Capture live unrealized P&L on every tick — used by the Real / Fast3
+    // panel "Open Positions" tables to show whether the trade is currently
+    // winning or losing before it settles.
+    if (info.profit != null) trade.currentProfit = info.profit;
+
     const settled =
       info.is_sold === 1 ||
       info.status === "sold" ||

@@ -234,6 +234,18 @@ export type BotState = {
   fast3MartingalePaper: Record<string, MartingaleState>;
   fast3MartingaleLive: Record<string, MartingaleState>;
   fast3Config: Fast3Config;
+  /** Real-strategy book runtime config — currently just a paper/live toggle
+   *  so the operator can flip the candle-book strategies (silver/gold/plat)
+   *  between paper and live without redeploying with a new LIVE_TRADING env. */
+  realConfig: RealConfig;
+};
+
+export type RealConfig = {
+  liveTradingEnabled: boolean;
+};
+
+export const DEFAULT_REAL_CONFIG: RealConfig = {
+  liveTradingEnabled: false,
 };
 
 const MAX_CLOSED_RETAINED = 500;
@@ -256,6 +268,7 @@ export function emptyBotState(): BotState {
     fast3MartingalePaper: {},
     fast3MartingaleLive: {},
     fast3Config: { ...DEFAULT_FAST3_CONFIG },
+    realConfig: { ...DEFAULT_REAL_CONFIG },
   };
 }
 
@@ -351,6 +364,11 @@ export class BotStorage {
           ...(parsed.fast3Config ?? {}),
           ...(prefs.fast3Config ?? {}),
         },
+        realConfig: {
+          ...DEFAULT_REAL_CONFIG,
+          ...(parsed.realConfig ?? {}),
+          ...(prefs.realConfig ?? {}),
+        },
       };
     } catch (e: any) {
       if (e?.code === "ENOENT") {
@@ -362,13 +380,14 @@ export class BotStorage {
           fast1Config: { ...empty.fast1Config, ...(prefs.fast1Config ?? {}) },
           fast2Config: applyFast2EnvOverrides({ ...empty.fast2Config, ...(prefs.fast2Config ?? {}) }),
           fast3Config: { ...empty.fast3Config, ...(prefs.fast3Config ?? {}) },
+          realConfig: { ...empty.realConfig, ...(prefs.realConfig ?? {}) },
         };
       }
       throw e;
     }
   }
 
-  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; fast3Config?: Partial<Fast3Config> }> {
+  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; fast3Config?: Partial<Fast3Config>; realConfig?: Partial<RealConfig> }> {
     try {
       const raw = await fs.readFile(this.prefsFile, "utf8");
       return JSON.parse(raw);
@@ -405,6 +424,7 @@ export class BotStorage {
         fast1Config: state.fast1Config,
         fast2Config: state.fast2Config,
         fast3Config: state.fast3Config,
+        realConfig: state.realConfig,
       };
       const prefsTmp = this.prefsFile + ".tmp";
       const prefsJson = JSON.stringify(prefs, null, 2);

@@ -64,7 +64,9 @@ export function Fast3Panel({ state, doAction, pending }: {
   // tagged sandbox="fast3"; PAPER reads from the paper engine state.
   const stats = (paper.stats ?? {}) as Partial<{ balance: number; startingBalance: number; totalPnl: number; pnlPct: number; trades: number; wins: number; losses: number; winRate: number; avgR: number; peak: number; ddPct: number; open: number }>;
   const liveClosed = liveTrades.filter((t) => t.closedAt != null);
-  const liveOpenCount = liveTrades.length - liveClosed.length;
+  const liveOpen = liveTrades.filter((t) => t.closedAt == null);
+  const liveOpenCount = liveOpen.length;
+  const liveOpenUnrealized = liveOpen.reduce((acc, t) => acc + (t.currentProfit ?? 0), 0);
   const liveWins = liveClosed.filter((t) => (t.profit ?? 0) > 0).length;
   const liveLosses = liveClosed.length - liveWins;
   const liveTotalPnl = liveClosed.reduce((acc, t) => acc + (t.profit ?? 0), 0);
@@ -262,6 +264,37 @@ export function Fast3Panel({ state, doAction, pending }: {
           </tbody>
         </table>
       </div>
+
+      {isLive && liveOpen.length > 0 && (
+        <>
+          <h3 className="section-title">Open Positions ({liveOpenCount}) · live unrealized {liveOpenUnrealized >= 0 ? "+" : ""}${liveOpenUnrealized.toFixed(2)}</h3>
+          <div className="card table-card" style={{ marginBottom: 16 }}>
+            <table>
+              <thead>
+                <tr><th>Opened</th><th>Symbol</th><th>Strategy</th><th>Stake</th><th>Live P&amp;L</th><th>Age</th></tr>
+              </thead>
+              <tbody>
+                {liveOpen.map((t) => {
+                  const cp = t.currentProfit ?? null;
+                  const ageSec = Math.floor((Date.now() - t.openedAt) / 1000);
+                  return (
+                    <tr key={t.id}>
+                      <td className="mono faint">{fmtTime(t.openedAt)}</td>
+                      <td className="mono">{t.symbol}</td>
+                      <td className="faint" style={{ fontSize: 11 }}>{t.sandboxStrategyId ?? "—"}</td>
+                      <td className="mono">${t.stake.toFixed(2)}</td>
+                      <td className={`mono ${cp != null && cp > 0 ? "pos" : cp != null && cp < 0 ? "neg" : "muted"}`}>
+                        {cp != null ? `${cp >= 0 ? "+" : ""}$${cp.toFixed(2)}` : "…"}
+                      </td>
+                      <td className="faint">{ageSec < 60 ? `${ageSec}s` : `${Math.floor(ageSec / 60)}m`}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
       <h3 className="section-title">Recent {isLive ? "Live" : "Paper"} Trades ({isLive ? liveClosed.length : paperTrades.length})</h3>
       <div className="card table-card">

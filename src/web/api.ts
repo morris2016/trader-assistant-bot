@@ -21,6 +21,8 @@ export type Account = {
 
 export type Health = { wsConnected: boolean; authorized: boolean; uptimeSec: number };
 
+export type RealConfig = { liveTradingEnabled: boolean };
+
 export type RealTrade = {
   id: string;
   contractId: number;
@@ -41,9 +43,12 @@ export type RealTrade = {
   closedAt: number | null;
   status: string;
   profit: number | null;
+  /** Live unrealized P&L while the contract is open (updated each
+   *  proposal_open_contract tick). After settle, prefer `profit`. */
+  currentProfit?: number | null;
   detector: string;
-  /** Origin sandbox: "real" (default), "fast", or "fast2". */
-  sandbox?: "real" | "fast" | "fast2";
+  /** Origin sandbox: "real" (default), "fast", "fast2", or "fast3". */
+  sandbox?: "real" | "fast" | "fast2" | "fast3";
   sandboxStrategyId?: string;
   signalFiredAt?: number | null;
   signalEntry?: number | null;
@@ -285,6 +290,15 @@ export const api = {
       }
     }
     return post<{ ok: boolean }>(`/api/control/update-fast2-config?${p.toString()}`);
+  },
+  // ── Real-strategy book (silver/gold/plat candle book) runtime config ──
+  realConfig: () => get<{ config: RealConfig }>("/api/real-config"),
+  updateRealConfig: (patch: Partial<RealConfig>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) {
+      if (typeof v === "boolean") p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-real-config?${p.toString()}`);
   },
   // ── Fast3 (DIGITODD tick-level) ──
   fast3Paper: () => get<Fast3PaperResp>("/api/fast3-paper"),

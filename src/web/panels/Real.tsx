@@ -16,6 +16,7 @@ import {
   fmtTime,
   type ClosedPaperPosition,
   type PaperResp,
+  type RealConfig,
   type RealTrade,
   type Signal,
   type StateResp,
@@ -30,6 +31,8 @@ export function RealPanel({ state, strategies }: {
   const [paper, setPaper] = useState<PaperResp | null>(null);
   const [paperTrades, setPaperTrades] = useState<ClosedPaperPosition[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
+  const [realCfg, setRealCfg] = useState<RealConfig | null>(null);
+  const [toggleBusy, setToggleBusy] = useState(false);
   const [expandedTrade, setExpandedTrade] = useState<string | null>(null);
   const [sigFilterSym, setSigFilterSym] = useState("ALL");
   const [sigFilterSide, setSigFilterSide] = useState<"ALL" | "BUY" | "SELL">("ALL");
@@ -37,16 +40,18 @@ export function RealPanel({ state, strategies }: {
   useEffect(() => {
     const load = async () => {
       try {
-        const [t, p, pt, sig] = await Promise.all([
+        const [t, p, pt, sig, rc] = await Promise.all([
           api.trades(100, "real"),
           api.paper(),
           api.paperTrades(100),
           api.signals(100),
+          api.realConfig(),
         ]);
         setLiveTrades(t.trades);
         setPaper(p);
         setPaperTrades(pt.trades);
         setSignals(sig.signals);
+        setRealCfg(rc.config);
       } catch {}
     };
     load();
@@ -54,9 +59,25 @@ export function RealPanel({ state, strategies }: {
     return () => clearInterval(id);
   }, []);
 
+  const toggleMode = async () => {
+    if (!realCfg || toggleBusy) return;
+    const next = !realCfg.liveTradingEnabled;
+    const verb = next ? "ENABLE LIVE TRADING" : "switch to PAPER";
+    if (!confirm(`${verb}? Real strategies will route to ${next ? "Deriv (real money)" : "the paper sandbox"} from now.`)) return;
+    setToggleBusy(true);
+    try {
+      await api.updateRealConfig({ liveTradingEnabled: next });
+      const rc = await api.realConfig();
+      setRealCfg(rc.config);
+    } catch (e) {
+      alert(`Failed: ${(e as Error).message}`);
+    } finally {
+      setToggleBusy(false);
+    }
+  };
+
   // ── KPI computations ──
   const account = state?.account ?? null;
-  const live = state?.account ?? null;
   const daily = state?.daily ?? null;
   const liveClosed = liveTrades.filter((t) => t.closedAt != null);
   const liveOpen = liveTrades.filter((t) => t.closedAt == null);
@@ -64,9 +85,11 @@ export function RealPanel({ state, strategies }: {
   const liveLosses = liveClosed.length - liveWins;
   const liveWR = liveClosed.length > 0 ? liveWins / liveClosed.length : 0;
   const liveTotalPnl = liveClosed.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+  const openUnrealized = liveOpen.reduce((acc, t) => acc + (t.currentProfit ?? 0), 0);
   const accountBalance = account?.balance ?? 0;
   const accountLogin = account?.loginid ?? "—";
   const accountIsVirtual = account?.isVirtual ?? false;
+  const liveMode = realCfg?.liveTradingEnabled ?? false;
 
   // Signal filters
   const sigSymbols = Array.from(new Set(signals.map((s) => s.symbol))).sort();
@@ -77,19 +100,68 @@ export function RealPanel({ state, strategies }: {
 
   return (
     <>
-      {/* Status banner */}
-      <div className={`banner ${accountIsVirtual ? "banner-info" : "banner-warn"}`} style={{ marginBottom: 12, fontWeight: 600 }}>
-        {accountIsVirtual ? "🟢" : "🔴"} Real account: <strong>{accountLogin}</strong> · {account?.currency ?? ""} ${accountBalance.toFixed(2)} · {accountIsVirtual ? "DEMO" : "LIVE money"}
-        {state?.paused && <span style={{ marginLeft: 8 }} className="pill pill-amber">PAUSED</span>}
+      {/* Status banner with mode toggle */}
+      <div className={`banner ${accountIsVirtual ? "banner-info" : "banner-warn"}`} style={{ marginBottom: 12, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          {accountIsVirtual ? "🟢" : "🔴"} Real account: <strong>{accountLogin}</strong> · {account?.currency ?? ""} ${accountBalance.toFixed(2)} · {accountIsVirtual ? "DEMO" : "LIVE money"}
+          {state?.paused && <span style={{ marginLeft: 8 }} className="pill pill-amber">PAUSED</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span className={`pill ${liveMode ? "pill-red" : "pill-blue"}`}>
+            <span className="pill-dot" />
+            {liveMode ? "LIVE TRADING" : "PAPER MODE"}
+          </span>
+          <button
+            className={liveMode ? "btn-secondary" : "btn-primary"}
+            disabled={toggleBusy || !realCfg}
+            onClick={toggleMode}
+          >
+            {toggleBusy ? "switching…" : liveMode ? "Switch to PAPER" : "Enable LIVE"}
+          </button>
+        </div>
       </div>
 
       {/* KPI grid */}
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
         <Card title="Deriv Balance" value={`$${accountBalance.toFixed(2)}`} sub={accountIsVirtual ? "demo account" : "real money"} tone={accountBalance > 0 ? "pos" : "muted"} />
         <Card title="Today's P&L" value={`${(daily?.profit ?? 0) >= 0 ? "+" : ""}$${(daily?.profit ?? 0).toFixed(2)}`} sub={`${daily?.tradesOpened ?? 0} opened today${daily?.capHit ? " · CAP HIT" : ""}`} tone={(daily?.profit ?? 0) > 0 ? "pos" : (daily?.profit ?? 0) < 0 ? "neg" : "muted"} />
-        <Card title="Open / Closed" value={`${state?.openCount ?? 0} / ${state?.totalClosed ?? 0}`} sub={`${liveOpen.length} fast3-tagged open`} tone="muted" />
+        <Card title="Open Positions" value={`${liveOpen.length}`} sub={liveOpen.length > 0 ? `unrealized ${openUnrealized >= 0 ? "+" : ""}$${openUnrealized.toFixed(2)}` : "no open trades"} tone={openUnrealized > 0 ? "pos" : openUnrealized < 0 ? "neg" : "muted"} />
         <Card title="Live Win Rate" value={liveClosed.length > 0 ? `${(liveWR * 100).toFixed(1)}%` : "—"} sub={`${liveWins}W / ${liveLosses}L · net ${liveTotalPnl >= 0 ? "+" : ""}$${liveTotalPnl.toFixed(2)}`} tone={liveWR >= 0.55 ? "pos" : liveClosed.length > 5 ? "neg" : "muted"} />
       </div>
+
+      {/* ── Open Positions ── */}
+      {liveOpen.length > 0 && (
+        <>
+          <h3 className="section-title">Open Positions ({liveOpen.length}) · live unrealized {openUnrealized >= 0 ? "+" : ""}${openUnrealized.toFixed(2)}</h3>
+          <div className="card table-card" style={{ marginBottom: 16 }}>
+            <table>
+              <thead>
+                <tr><th>Opened</th><th>Symbol</th><th>Side</th><th>Detector</th><th>Stake</th><th>Entry</th><th>Live P&amp;L</th><th>Age</th></tr>
+              </thead>
+              <tbody>
+                {liveOpen.map((t) => {
+                  const cp = t.currentProfit ?? null;
+                  const ageSec = Math.floor((Date.now() - t.openedAt) / 1000);
+                  return (
+                    <tr key={t.id}>
+                      <td className="mono faint">{fmtTime(t.openedAt)}</td>
+                      <td className="mono">{t.symbol}</td>
+                      <td><span className={`pill ${t.side === "BUY" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
+                      <td><span className="strat-chip">{t.detector}</span></td>
+                      <td className="mono">${t.stake.toFixed(2)}</td>
+                      <td className="mono">{t.entrySpot != null ? t.entrySpot.toFixed(5) : "—"}</td>
+                      <td className={`mono ${cp != null && cp > 0 ? "pos" : cp != null && cp < 0 ? "neg" : "muted"}`}>
+                        {cp != null ? `${cp >= 0 ? "+" : ""}$${cp.toFixed(2)}` : "…"}
+                      </td>
+                      <td className="faint">{ageSec < 60 ? `${ageSec}s` : `${Math.floor(ageSec / 60)}m`}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
       {/* ── Per-Strategy ── */}
       <h3 className="section-title">Per-Strategy ({strategies.length})</h3>

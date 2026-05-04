@@ -174,7 +174,12 @@ export type RealTrade = {
   openedAt: number;
   closedAt: number | null;
   status: "open" | "won" | "lost" | "cancelled";
-  profit: number | null;        // in account currency
+  profit: number | null;        // in account currency (final, set on settlement)
+  /** Live unrealized P&L for an OPEN contract — updated from each
+   *  proposal_open_contract tick. Null until first POC message arrives, and
+   *  stale (still set to last value) after the trade settles. UIs should
+   *  prefer `profit` once `closedAt != null`. */
+  currentProfit?: number | null;
   detector: string;             // "manual" for user-initiated
   // ── Production telemetry (paper-vs-live drift diagnostics) ────────────
   /** Wall-clock ms when the signal fired (bar close). null for manual trades. */

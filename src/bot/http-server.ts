@@ -6,7 +6,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { BotState, Fast1Config, Fast2Config, Fast3Config } from "./storage";
+import type { BotState, Fast1Config, Fast2Config, Fast3Config, RealConfig } from "./storage";
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
@@ -48,6 +48,10 @@ export type ManualControls = {
   updateFast3Config: (patch: Partial<Fast3Config>) => void;
   /** Patch a per-strategy Fast3 override; null clears. */
   updateFast3StrategyConfig: (strategyId: string, patch: Partial<Fast3Config> | null) => void;
+  /** Patch the Real-strategy book runtime config (paper/live toggle, etc.). */
+  updateRealConfig: (patch: Partial<RealConfig>) => void;
+  /** Read the current Real-strategy runtime config. */
+  getRealConfig: () => RealConfig;
   /** Manually close an open Fast2 position. `id` is the paper position id
    *  or live trade id depending on mode. Throws if the position can't be
    *  found or close fails (Deriv sell error, etc.). */
@@ -292,6 +296,12 @@ export function startHttpServer(opts: {
             } else {
               opts.manualControls.updateFast3Config(patch);
             }
+          }
+          else if (path0 === "/api/control/update-real-config") {
+            const patch: Partial<RealConfig> = {};
+            const lt = url.searchParams.get("liveTradingEnabled");
+            if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
+            opts.manualControls.updateRealConfig(patch);
           }
           else if (path0 === "/api/control/close-fast2-position") {
             const id = url.searchParams.get("id");
@@ -574,6 +584,10 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/fast3-config") {
           json(res, 200, { config: opts.getFast3Config() });
+          return;
+        }
+        if (path0 === "/api/real-config") {
+          json(res, 200, { config: opts.manualControls.getRealConfig() });
           return;
         }
         if (path0 === "/api/logs") {
