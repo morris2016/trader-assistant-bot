@@ -229,11 +229,14 @@ async function main() {
   // persisted realConfig takes over.
   let realConfig: RealConfig = {
     ...DEFAULT_REAL_CONFIG,
-    ...persisted.realConfig,
-    // First-boot bootstrap: if the persisted state has no realConfig and the
-    // env says LIVE_TRADING=true, start live. After that, the toggle is the
-    // source of truth.
+    // First-boot bootstrap: if no persisted realConfig, seed from env so a
+    // freshly-deployed bot still honors STAKE / MULTIPLIER / DAILY_MAX_LOSS
+    // / LIVE_TRADING. After the user touches the UI, persisted state wins.
+    baseStake: persisted.realConfig?.baseStake ?? cfg.stake,
+    multiplier: persisted.realConfig?.multiplier ?? cfg.multiplier,
+    dailyMaxLoss: persisted.realConfig?.dailyMaxLoss ?? cfg.dailyMaxLoss,
     liveTradingEnabled: persisted.realConfig?.liveTradingEnabled ?? cfg.liveTradingEnabled,
+    ...persisted.realConfig,
   };
   const realActiveMode = (): "paper" | "live" => realConfig.liveTradingEnabled ? "live" : "paper";
   log.info("realConfig: loaded", { config: realConfig });
@@ -249,7 +252,10 @@ async function main() {
   const real = new RealEngine(deriv);
   real.load(persisted);
   real.loadAdaptiveShift(persisted.adaptiveShift);
-  real.setCaps(cfg.stake, cfg.dailyMaxLoss);
+  // setCaps takes (stakePerTrade, dailyMaxLoss). Read from realConfig so the
+  // UI can retune them at runtime without a redeploy. The realConfig values
+  // are seeded from env (STAKE / DAILY_MAX_LOSS) on first boot above.
+  real.setCaps(realConfig.baseStake, realConfig.dailyMaxLoss);
   // Production safety: price-tolerance gate before any live placeTrade. 5bps
   // (0.05% of price) is a conservative default for 1m synthetic strategies.
   // Set via env DERIV_PRICE_TOL_BPS to override (0 disables).
@@ -594,7 +600,16 @@ async function main() {
         const before = { ...realConfig };
         const next: RealConfig = { ...realConfig, ...patch };
         if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
+        if (!isFinite(next.baseStake) || next.baseStake < DERIV_MIN_STAKE_USD) next.baseStake = before.baseStake;
+        if (next.baseStake > DERIV_MAX_STAKE_USD) next.baseStake = DERIV_MAX_STAKE_USD;
+        if (!isFinite(next.multiplier) || next.multiplier <= 0) next.multiplier = before.multiplier;
+        next.multiplier = clampDerivMultiplier(next.multiplier);
+        if (!isFinite(next.dailyMaxLoss) || next.dailyMaxLoss < 0) next.dailyMaxLoss = before.dailyMaxLoss;
         realConfig = next;
+        // Re-apply the per-trade stake + daily loss cap so the engine's
+        // gates use the new numbers immediately (otherwise the UI shows
+        // the new cap but trades still fire on the old one until restart).
+        real.setCaps(realConfig.baseStake, realConfig.dailyMaxLoss);
         persist();
         log.warn("realConfig updated via API", { before, after: next });
       },
@@ -1570,10 +1585,10 @@ async function main() {
         atr,
         atrTpMult: match.atrTpMult,
         atrSlMult: match.atrSlMult,
-        multiplier: cfg.multiplier,
+        multiplier: realConfig.multiplier,
         granularity,
         candleEpoch: candle.epoch,
-        baseStake: cfg.stake,
+        baseStake: realConfig.baseStake,
         minStake: 1,
         nowMs: Date.now(),
         signalStopPrice: sig.stopPrice,
@@ -1597,7 +1612,8 @@ async function main() {
         side: sig.action,
         family: cfg.contractFamily,
         durationTicks: cfg.durationTicks,
-        multiplier: cfg.multiplier,
+        multiplier: realConfig.multiplier,
+        stakeOverride: realConfig.baseStake,
         tpSlMode: cfg.tpSlMode,
         takeProfitPct: cfg.takeProfitPct,
         stopLossPct: cfg.stopLossPct,

@@ -242,10 +242,25 @@ export type BotState = {
 
 export type RealConfig = {
   liveTradingEnabled: boolean;
+  /** Base stake per real-strategy trade (USD). Multiplier-family contracts
+   *  get this stake; final size is also subject to adaptive sizing in
+   *  RealEngine if enabled. Mirrors fast3Config.baseStake naming. */
+  baseStake: number;
+  /** Deriv multiplier on MULTIPLIER-family contracts (10/20/30/50/100/etc.).
+   *  Read at placeTrade time — falls back to clamp inside RealEngine if
+   *  Deriv rejects the value. */
+  multiplier: number;
+  /** Daily realized P&L floor in USD. Once cumulative losses for the UTC
+   *  day exceed this, the cap-hit gate blocks further opens until next
+   *  day rollover. */
+  dailyMaxLoss: number;
 };
 
 export const DEFAULT_REAL_CONFIG: RealConfig = {
   liveTradingEnabled: false,
+  baseStake: 40,
+  multiplier: 30,
+  dailyMaxLoss: 50,
 };
 
 const MAX_CLOSED_RETAINED = 500;

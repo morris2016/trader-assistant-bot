@@ -301,6 +301,12 @@ export function startHttpServer(opts: {
             const patch: Partial<RealConfig> = {};
             const lt = url.searchParams.get("liveTradingEnabled");
             if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
+            const bs = url.searchParams.get("baseStake");
+            if (bs != null && Number.isFinite(Number(bs))) patch.baseStake = Number(bs);
+            const m = url.searchParams.get("multiplier");
+            if (m != null && Number.isFinite(Number(m))) patch.multiplier = Number(m);
+            const dml = url.searchParams.get("dailyMaxLoss");
+            if (dml != null && Number.isFinite(Number(dml))) patch.dailyMaxLoss = Number(dml);
             opts.manualControls.updateRealConfig(patch);
           }
           else if (path0 === "/api/control/close-fast2-position") {

@@ -21,7 +21,12 @@ export type Account = {
 
 export type Health = { wsConnected: boolean; authorized: boolean; uptimeSec: number };
 
-export type RealConfig = { liveTradingEnabled: boolean };
+export type RealConfig = {
+  liveTradingEnabled: boolean;
+  baseStake: number;
+  multiplier: number;
+  dailyMaxLoss: number;
+};
 
 export type RealTrade = {
   id: string;
@@ -297,6 +302,7 @@ export const api = {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
       if (typeof v === "boolean") p.set(k, String(v));
+      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }
     return post<{ ok: boolean }>(`/api/control/update-real-config?${p.toString()}`);
   },

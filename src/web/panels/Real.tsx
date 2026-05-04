@@ -112,7 +112,7 @@ export function RealPanel({ state, strategies }: {
             {liveMode ? "LIVE TRADING" : "PAPER MODE"}
           </span>
           <button
-            className={liveMode ? "btn-secondary" : "btn-primary"}
+            className={`btn ${liveMode ? "btn-warn" : "btn-danger"}`}
             disabled={toggleBusy || !realCfg}
             onClick={toggleMode}
           >
@@ -128,6 +128,26 @@ export function RealPanel({ state, strategies }: {
         <Card title="Open Positions" value={`${liveOpen.length}`} sub={liveOpen.length > 0 ? `unrealized ${openUnrealized >= 0 ? "+" : ""}$${openUnrealized.toFixed(2)}` : "no open trades"} tone={openUnrealized > 0 ? "pos" : openUnrealized < 0 ? "neg" : "muted"} />
         <Card title="Live Win Rate" value={liveClosed.length > 0 ? `${(liveWR * 100).toFixed(1)}%` : "—"} sub={`${liveWins}W / ${liveLosses}L · net ${liveTotalPnl >= 0 ? "+" : ""}$${liveTotalPnl.toFixed(2)}`} tone={liveWR >= 0.55 ? "pos" : liveClosed.length > 5 ? "neg" : "muted"} />
       </div>
+
+      {/* ── Configuration ── */}
+      {realCfg && (
+        <RealConfigCard
+          cfg={realCfg}
+          onApply={async (patch) => {
+            setToggleBusy(true);
+            try {
+              await api.updateRealConfig(patch);
+              const rc = await api.realConfig();
+              setRealCfg(rc.config);
+            } catch (e) {
+              alert(`Failed: ${(e as Error).message}`);
+            } finally {
+              setToggleBusy(false);
+            }
+          }}
+          busy={toggleBusy}
+        />
+      )}
 
       {/* ── Open Positions ── */}
       {liveOpen.length > 0 && (
@@ -342,6 +362,69 @@ function Card({ title, value, sub, tone }: { title: string; value: string; sub?:
       <div className="card-title">{title}</div>
       <div className={`card-value ${toneClass}`}>{value}</div>
       {sub && <div className="card-sub">{sub}</div>}
+    </div>
+  );
+}
+
+const REAL_MULT_OPTIONS = [10, 20, 30, 50, 100, 200, 300, 400, 500];
+
+function RealConfigCard({ cfg, onApply, busy }: {
+  cfg: RealConfig;
+  onApply: (patch: Partial<RealConfig>) => void;
+  busy: boolean;
+}) {
+  const [pending, setPending] = useState<RealConfig>(cfg);
+  // Re-sync local form state when the persisted config changes (e.g. after a
+  // successful apply or another tab updates it).
+  useEffect(() => { setPending(cfg); }, [cfg]);
+  const dirty =
+    pending.baseStake !== cfg.baseStake ||
+    pending.multiplier !== cfg.multiplier ||
+    pending.dailyMaxLoss !== cfg.dailyMaxLoss;
+  const set = (patch: Partial<RealConfig>) => setPending({ ...pending, ...patch });
+  return (
+    <>
+      <h3 className="section-title">Configuration</h3>
+      <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
+        Real-strategy book runs MULTIPLIER-family contracts on metals (silver/gold/plat). Base stake + Deriv multiplier set position size; per-strategy ATR/SL geometry comes from the validated strategy descriptors (not editable here). Use the LIVE/PAPER toggle above to switch routing without redeploying.
+      </div>
+      <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+        <div className="grid grid-3" style={{ gap: 12, marginBottom: 12 }}>
+          <ConfigField label="Base Stake (USD)">
+            <input className="filter-input" type="number" step="0.5" min={0.5} max={2000} value={pending.baseStake}
+              onChange={(e) => set({ baseStake: Number(e.target.value) })} />
+          </ConfigField>
+          <ConfigField label="Deriv Multiplier">
+            <select className="filter-select" value={pending.multiplier} onChange={(e) => set({ multiplier: Number(e.target.value) })}>
+              {REAL_MULT_OPTIONS.map((m) => <option key={m} value={m}>{m}×</option>)}
+            </select>
+          </ConfigField>
+          <ConfigField label="Daily Max Loss (USD)">
+            <input className="filter-input" type="number" step="1" min={0} value={pending.dailyMaxLoss}
+              onChange={(e) => set({ dailyMaxLoss: Number(e.target.value) })} />
+          </ConfigField>
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn btn-sm" disabled={!dirty || busy} onClick={() => setPending(cfg)}>cancel</button>
+          <button className="btn btn-primary btn-sm" disabled={!dirty || busy}
+            onClick={() => onApply({
+              baseStake: pending.baseStake,
+              multiplier: pending.multiplier,
+              dailyMaxLoss: pending.dailyMaxLoss,
+            })}>
+            {busy ? "applying…" : "apply"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ConfigField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>{label}</div>
+      {children}
     </div>
   );
 }
