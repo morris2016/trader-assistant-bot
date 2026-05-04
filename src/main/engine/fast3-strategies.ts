@@ -59,30 +59,24 @@ function makeStrat(symbol: string, validatedWR: number, validatedNet: number): S
   };
 }
 
-export const fast3R10DigitOdd     = makeStrat("R_10",     0.5569, 0);  // added 2026-05-04: P(odd)=55.69%, +$0.086/$1 EV
-export const fast3R25DigitOdd     = makeStrat("R_25",     0.5529, 0);  // added 2026-05-04: P(odd)=55.29%, +$0.078/$1 EV
 export const fast3R50DigitOdd     = makeStrat("R_50",     0.5591, 95);
 export const fast3R75DigitOdd     = makeStrat("R_75",     0.5532, 129);
 export const fast3R100DigitOdd    = makeStrat("R_100",    0.5513, 0);  // R_100 has 1.92× payout
-export const fast3RDBearDigitOdd  = makeStrat("RDBEAR",   0.5550, 0);
+export const fast3RDBearDigitOdd  = makeStrat("RDBEAR",   0.5550, 0);  // had -$14 last hour but +$268 paper
 export const fast3RDBullDigitOdd  = makeStrat("RDBULL",   0.5546, 79);
-// fast3JD75DigitOdd REMOVED 2026-05-04 — underperformed in live (52.5% WR
-// across 162 trades), structural edge is fine but realized P&L thin.
+export const fast3JD75DigitOdd    = makeStrat("JD75",     0.5518, 203);
 export const fast3HZ50VDigitOdd   = makeStrat("1HZ50V",   0.5524, 110);
-export const fast3HZ75VDigitOdd   = makeStrat("1HZ75V",   0.5538, 0);  // added 2026-05-04: P(odd)=55.38%, +$0.080/$1 EV
 export const fast3HZ100VDigitOdd  = makeStrat("1HZ100V",  0.5511, 344);
 
 export const FAST3_STRATEGIES: StrategyDescriptor[] = [
-  fast3HZ100VDigitOdd,
-  fast3HZ75VDigitOdd,    // NEW
+  fast3HZ100VDigitOdd,   // best last-hour contributor (+$344, 57.6% WR)
   fast3HZ50VDigitOdd,
+  fast3JD75DigitOdd,
   fast3RDBullDigitOdd,
-  fast3R100DigitOdd,
   fast3R75DigitOdd,
   fast3R50DigitOdd,
-  fast3R25DigitOdd,      // NEW
-  fast3R10DigitOdd,      // NEW
   fast3RDBearDigitOdd,
+  fast3R100DigitOdd,
 ];
 
 export const FAST3_DETECTOR_TAG = TICK_DIGITODD_DETECTOR;

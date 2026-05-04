@@ -2,10 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, type LogEntry } from "../api";
 
 const REFRESH_MS = 2000;
-// Bumped from 2000 → 10000 so multi-hour live sessions don't truncate.
-// The bot's in-memory buffer is now 50000 (LOG_MAX_BUFFER); the UI fetches
-// the most recent 10000 to keep render snappy. Increase if needed.
-const MAX_LIMIT = 10000;
+const MAX_LIMIT = 2000;
 
 type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
