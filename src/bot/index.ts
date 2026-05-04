@@ -1436,7 +1436,7 @@ async function main() {
             //   • openLatencyMs feeds the latency circuit breaker
             // The fast2 ladder advances when real.on("settled") fires for
             // a contract tagged sandbox="fast2" (see listener below).
-            const realGate = real.canOpen();
+            const realGate = real.canOpen({ sandbox: "fast2" });
             if (!realGate.ok) {
               log.warn(`fast2 LIVE blocked by real-engine gate: ${realGate.reason}`);
               handledFast2 = true;

@@ -332,7 +332,7 @@ export class RealEngine extends EventEmitter {
     if (this.daily.date !== today) this.daily = emptyDaily();
   }
 
-  canOpen(): { ok: true } | { ok: false; reason: string } {
+  canOpen(opts?: { sandbox?: "real" | "fast" | "fast2" | "fast3" }): { ok: true } | { ok: false; reason: string } {
     this.rollDayIfNeeded();
     if (!this.account) return { ok: false, reason: "No account (authorize first)" };
     if (this.perTradeMaxStake <= 0) return { ok: false, reason: "Per-trade max stake not set" };
@@ -342,7 +342,16 @@ export class RealEngine extends EventEmitter {
       this.daily.capHit = true;
       return { ok: false, reason: "Daily loss cap reached" };
     }
-    if (this.open.length >= 3) return { ok: false, reason: "Max 3 concurrent real positions" };
+    // Concurrent-positions cap: applies to the multi-strategy real book
+    // (Silver OB, Silver FVG, Gold FVG, Plat FVG) and to fast2/fast1.
+    // fast3 is exempt because:
+    //   • DIGITODD contracts settle in 1 tick — open count clears in seconds
+    //   • Each fast3 strategy has its own per-symbol concurrency gate already
+    //   • Stale "real"-sandbox open contracts from before fast3 should not
+    //     starve the live tick book
+    if (opts?.sandbox === "fast3") return { ok: true };
+    const nonFast3Open = this.open.filter((t) => t.sandbox !== "fast3").length;
+    if (nonFast3Open >= 3) return { ok: false, reason: "Max 3 concurrent real positions" };
     return { ok: true };
   }
 
@@ -381,7 +390,7 @@ export class RealEngine extends EventEmitter {
      *  bot currently uses (no barrier needed). 1-tick duration is hardcoded. */
     digitContractType?: "DIGITODD" | "DIGITEVEN";
   }): Promise<RealTrade> {
-    const gate = this.canOpen();
+    const gate = this.canOpen({ sandbox: params.sandbox });
     if (!gate.ok) throw new Error(gate.reason);
     if (!this.account) throw new Error("No account");
 

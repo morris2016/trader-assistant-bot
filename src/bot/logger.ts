@@ -16,7 +16,11 @@ export type LogEntry = {
 
 const LEVEL_ORDER: Record<LogLevel, number> = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
 
-const MAX_BUFFER = 2000;
+// In-memory ring buffer for the /api/logs endpoint. Sized so a long live
+// session (10+ hours of fast3 firehose at ~30 events/min) doesn't truncate.
+// Memory cost: ~500 bytes/entry × 50000 = ~25MB peak. Tunable via env so
+// memory-constrained deploys can dial back without code changes.
+const MAX_BUFFER = Number(process.env.LOG_MAX_BUFFER ?? 50000);
 
 export class Logger {
   private readonly buffer: LogEntry[] = [];
