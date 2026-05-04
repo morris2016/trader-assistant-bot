@@ -108,6 +108,88 @@ export function Fast3Panel({ state, doAction, pending }: {
   };
   const setCfg = (patch: Partial<Fast3Config>) => setPendingCfg({ ...cfg, ...patch });
 
+  // ── Per-strategy rater ──
+  // Score (0-100) blends three signals the operator cares about:
+  //   - WR vs DIGIT-style breakeven (~50%): 45 pts
+  //   - $/bet (the actual edge after Deriv's house cut): 35 pts
+  //   - Bust safety (martingale ladder reaching maxLevels): 20 pts
+  // Letter grade falls out of score AND requires safety floors:
+  //   A — score ≥85 AND 0 busts AND positive $ net
+  //   B — score ≥70 AND positive $ net
+  //   C — score ≥50
+  //   D — score ≥30
+  //   F — anything lower
+  // Strategies with <30 closed bets get "—" instead of a grade — sample is
+  // too small to judge consistency and would mislead the sort.
+  type Rating = { grade: "A" | "B" | "C" | "D" | "F" | "—"; score: number; reason: string };
+  function rate(trades: number, wr: number, pnlUsd: number, busts: number): Rating {
+    if (trades < 30) return { grade: "—", score: -1, reason: `${trades}/30 bets — sample too small to grade` };
+    let pts = 0;
+    if (wr >= 0.55) pts += 45;
+    else if (wr >= 0.52) pts += 30;
+    else if (wr >= 0.50) pts += 15;
+    const pnlPerBet = pnlUsd / trades;
+    if (pnlPerBet >= 0.05) pts += 35;
+    else if (pnlPerBet >= 0.02) pts += 25;
+    else if (pnlPerBet > 0) pts += 15;
+    else if (pnlPerBet > -0.02) pts += 5;
+    if (busts === 0) pts += 20;
+    else if (busts === 1) pts += 10;
+    let grade: Rating["grade"] = "F";
+    if (pts >= 85 && busts === 0 && pnlUsd > 0) grade = "A";
+    else if (pts >= 70 && pnlUsd > 0) grade = "B";
+    else if (pts >= 50) grade = "C";
+    else if (pts >= 30) grade = "D";
+    return { grade, score: pts, reason: `WR=${(wr * 100).toFixed(1)}% · $/bet=${pnlPerBet >= 0 ? "+" : ""}${pnlPerBet.toFixed(3)} · busts=${busts}` };
+  }
+
+  type SortKey = "rating" | "pnl" | "wr" | "trades" | "default";
+  type RatingFilter = "all" | "enabled" | "A_or_B" | "positive" | "zero_busts";
+  const [sortBy, setSortBy] = useState<SortKey>("rating");
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>("all");
+
+  const enrichedStrategies = strategies.map((s) => {
+    const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
+    const isOff = ov.enabled === false;
+    const m = martingale[s.id];
+    const busts = m?.circuitBreakers ?? 0;
+    let trades: number, wins: number, losses: number, pnlUsd: number, lastTradeAt: number | null;
+    if (isLive) {
+      const myTrades = liveClosed.filter((t) => t.sandboxStrategyId === s.id);
+      trades = myTrades.length;
+      wins = myTrades.filter((t) => (t.profit ?? 0) > 0).length;
+      losses = trades - wins;
+      pnlUsd = myTrades.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+      lastTradeAt = myTrades.length > 0 ? Math.max(...myTrades.map((t) => t.closedAt ?? 0)) : null;
+    } else {
+      trades = s.live.trades ?? 0;
+      wins = s.live.wins ?? 0;
+      losses = s.live.losses ?? 0;
+      pnlUsd = s.live.pnlUsd ?? 0;
+      lastTradeAt = s.live.lastTradeAt ?? null;
+    }
+    const wr = trades > 0 ? wins / trades : 0;
+    const rating = rate(trades, wr, pnlUsd, busts);
+    return { s, trades, wins, losses, pnlUsd, lastTradeAt, wr, busts, rating, isOff, m };
+  });
+
+  const filteredStrategies = enrichedStrategies.filter(({ isOff, rating, pnlUsd, busts }) => {
+    if (ratingFilter === "enabled") return !isOff;
+    if (ratingFilter === "A_or_B") return rating.grade === "A" || rating.grade === "B";
+    if (ratingFilter === "positive") return pnlUsd > 0;
+    if (ratingFilter === "zero_busts") return busts === 0;
+    return true;
+  });
+
+  const sortedStrategies = [...filteredStrategies].sort((a, b) => {
+    if (sortBy === "default") return 0;
+    if (sortBy === "rating") return b.rating.score - a.rating.score;
+    if (sortBy === "pnl") return b.pnlUsd - a.pnlUsd;
+    if (sortBy === "wr") return b.wr - a.wr;
+    if (sortBy === "trades") return b.trades - a.trades;
+    return 0;
+  });
+
   return (
     <>
       {isLive && (
@@ -204,39 +286,41 @@ export function Fast3Panel({ state, doAction, pending }: {
 
       <h3 className="section-title">Per-Strategy</h3>
       <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
-        Toggle the ON/OFF checkbox to silence a strategy without removing it from the registry.
+        Toggle the ON/OFF checkbox to silence a strategy without removing it from the registry. The Rating column scores each strategy on WR, $ net per bet, and martingale busts (≥30 bets needed before a grade is shown). Sort by Rating to surface the consistent ones.
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+        <span className="muted">Sort by:</span>
+        <select className="filter-select" value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)}>
+          <option value="rating">Rating (best first)</option>
+          <option value="pnl">$ net (best first)</option>
+          <option value="wr">WR (best first)</option>
+          <option value="trades">Bets (most first)</option>
+          <option value="default">Registry order</option>
+        </select>
+        <span className="muted" style={{ marginLeft: 8 }}>Filter:</span>
+        <select className="filter-select" value={ratingFilter} onChange={(e) => setRatingFilter(e.target.value as RatingFilter)}>
+          <option value="all">All ({strategies.length})</option>
+          <option value="enabled">Active only</option>
+          <option value="A_or_B">A or B only</option>
+          <option value="positive">Positive $ only</option>
+          <option value="zero_busts">0 busts only</option>
+        </select>
       </div>
       <div className="card table-card" style={{ marginBottom: 16 }}>
         <table>
           <thead>
             <tr>
-              <th>Active</th><th>Strategy</th><th>Symbol</th><th>Bets</th><th>W/L</th><th>WR</th><th>$ net</th><th>Ladder</th><th>Last bet</th>
+              <th>Active</th><th>Rating</th><th>Strategy</th><th>Symbol</th><th>Bets</th><th>W/L</th><th>WR</th><th>$ net</th><th>$/bet</th><th>Busts</th><th>Ladder</th><th>Last bet</th>
             </tr>
           </thead>
           <tbody>
-            {strategies.map((s) => {
-              const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
-              const isOff = ov.enabled === false;
-              const m = martingale[s.id];
-              // Per-strategy stats: when LIVE, count from real trades tagged
-              // sandbox=fast3+strategyId. When PAPER, use server-computed
-              // stats which read from fast3Paper.closed.
-              let trades: number, wins: number, losses: number, pnlUsd: number, lastTradeAt: number | null;
-              if (isLive) {
-                const myTrades = liveClosed.filter((t) => t.sandboxStrategyId === s.id);
-                trades = myTrades.length;
-                wins = myTrades.filter((t) => (t.profit ?? 0) > 0).length;
-                losses = trades - wins;
-                pnlUsd = myTrades.reduce((acc, t) => acc + (t.profit ?? 0), 0);
-                lastTradeAt = myTrades.length > 0 ? Math.max(...myTrades.map((t) => t.closedAt ?? 0)) : null;
-              } else {
-                trades = s.live.trades ?? 0;
-                wins = s.live.wins ?? 0;
-                losses = s.live.losses ?? 0;
-                pnlUsd = s.live.pnlUsd ?? 0;
-                lastTradeAt = s.live.lastTradeAt ?? null;
-              }
-              const wr = trades > 0 ? wins / trades : 0;
+            {sortedStrategies.map(({ s, trades, wins, losses, pnlUsd, lastTradeAt, wr, busts, rating, isOff, m }) => {
+              const gradeClass =
+                rating.grade === "A" ? "pill-green" :
+                rating.grade === "B" ? "pill-blue" :
+                rating.grade === "C" ? "pill-amber" :
+                rating.grade === "D" ? "pill-amber" :
+                rating.grade === "F" ? "pill-red" : "";
               return (
                 <tr key={s.id} style={{ opacity: isOff ? 0.45 : 1 }}>
                   <td>
@@ -244,6 +328,10 @@ export function Fast3Panel({ state, doAction, pending }: {
                       <input type="checkbox" checked={!isOff} onChange={(e) => api.updateFast3StrategyConfig(s.id, { enabled: e.target.checked })} />
                       <span className={`mono ${isOff ? "neg" : "pos"}`} style={{ fontSize: 11 }}>{isOff ? "OFF" : "ON"}</span>
                     </label>
+                  </td>
+                  <td>
+                    <span className={`pill ${gradeClass}`} style={{ minWidth: 22, justifyContent: "center", fontWeight: 700 }} title={`score=${rating.score} · ${rating.reason}`}>{rating.grade}</span>
+                    {rating.grade !== "—" && <div className="faint mono" style={{ fontSize: 10, marginTop: 2 }}>{rating.score}/100</div>}
                   </td>
                   <td>
                     <div className="bold" style={{ fontSize: 12 }}>{s.id}</div>
@@ -254,6 +342,8 @@ export function Fast3Panel({ state, doAction, pending }: {
                   <td className="mono">{trades > 0 ? `${wins}W/${losses}L` : "—"}</td>
                   <td className="mono">{trades > 0 ? `${(wr * 100).toFixed(1)}%` : "—"}</td>
                   <td className={`mono ${pnlUsd > 0 ? "pos" : pnlUsd < 0 ? "neg" : "muted"}`}>{pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}</td>
+                  <td className={`mono ${trades > 0 && pnlUsd / trades > 0 ? "pos" : trades > 0 && pnlUsd / trades < 0 ? "neg" : "muted"}`}>{trades > 0 ? `${pnlUsd / trades >= 0 ? "+" : ""}${(pnlUsd / trades).toFixed(3)}` : "—"}</td>
+                  <td className={`mono ${busts === 0 ? "muted" : "neg"}`} style={{ fontSize: 11 }}>{busts}</td>
                   <td className="muted" style={{ fontSize: 11 }}>
                     {m ? <>L{m.level ?? 0} · next ${(m.nextStake ?? 0).toFixed(2)}</> : "—"}
                   </td>
