@@ -17,6 +17,7 @@
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
+import { boom300nDrift, rdbullBreakout } from "./synth-strategies";
 
 const RDBULL_MEANREV_PARAMS = {
   lookback: 15,
@@ -509,11 +510,16 @@ export const fast2R75DigitOver0 = makeDigitOver0Strat("R_75", 1.0000);
 // bug inflated apparent P(odd)). Only fast3 (DIGITODD tick book) and the
 // real-account candle book (silver/gold/plat) remain active. Re-enable
 // any strategy by uncommenting below.
+// SYNTH SANDBOX 2026-05-04 — recovered candle-mode synthetic strategies
+// (boom300nDrift / rdbullBreakout) are now wired through the fast2 sandbox
+// infrastructure (paper engine, martingale ladders, paper/live toggle,
+// per-strategy enable, multiplier-family dispatch). The UI tab is renamed
+// "Synth" but internal storage/sandbox tag stays "fast2" to avoid a wider
+// rename. Both strategies are 5m candle-mode on Deriv synthetics with
+// validated 3-window OOS — see synth-strategies.ts for stats.
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
-  // fast2R25DigitOver0, fast2R50DigitOver0, fast2R75DigitOver0,
-  // fast2RdbearMeanRev, fast2RdbullMeanRev, fast2RdbearDrift, fast2RdbullDrift,
-  // fast2Boom300nFadeUp, fast2Jd75FadeUp, fast2Jd75FadeDown,
-  // fast2Crash300nFadeDown, fast2Boom300nDriftDown,
+  boom300nDrift,
+  rdbullBreakout,
 ];
 
 export const FAST2_DIGITOVER0_DETECTOR_TAG = TICK_DIGITOVER0_DETECTOR;

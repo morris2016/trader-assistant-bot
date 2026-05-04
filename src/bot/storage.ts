@@ -363,14 +363,11 @@ export class BotStorage {
           ?? (parsed as { fast2Martingale?: Record<string, MartingaleState> }).fast2Martingale
           ?? {},
         fast2MartingaleLive: parsed.fast2MartingaleLive ?? {},
-        fast2Config: {
-          ...applyFast2EnvOverrides({
-            ...DEFAULT_FAST2_CONFIG,
-            ...(parsed.fast2Config ?? {}),
-            ...(prefs.fast2Config ?? {}),
-          }),
-          liveTradingEnabled: false,    // Force OFF — Fast2 sandbox removed 2026-05-04
-        },
+        fast2Config: applyFast2EnvOverrides({
+          ...DEFAULT_FAST2_CONFIG,
+          ...(parsed.fast2Config ?? {}),
+          ...(prefs.fast2Config ?? {}),
+        }),
         fast3Paper: parsed.fast3Paper ?? emptyPaperState(41),
         fast3MartingalePaper: parsed.fast3MartingalePaper ?? {},
         fast3MartingaleLive: parsed.fast3MartingaleLive ?? {},

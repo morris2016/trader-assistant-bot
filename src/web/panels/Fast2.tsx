@@ -205,7 +205,7 @@ export function Fast2Panel({ state, doAction, pending }: {
       ? " ⚠ LIVE TRADING — REAL MONEY"
       : (liveDelta ? " · returning to paper" : "");
     doAction(
-      `Apply Fast2 config:${liveWarning} MULT=${clamped.tradeMultiplier}× · martingale=${clamped.martingaleMultiplier}×/${clamped.martingaleMode} · forceMart=${clamped.forceMartingale ? "on" : "off"} · sides=${clamped.sideFilter} · base=$${clamped.baseStake} · levels=${clamped.maxLevels} · cap=$${clamped.perTradeCap} · commission=${(clamped.commissionPct * 100).toFixed(2)}% · spread=${clamped.entrySpreadBps}bps`,
+      `Apply Synth config:${liveWarning} MULT=${clamped.tradeMultiplier}× · martingale=${clamped.martingaleMultiplier}×/${clamped.martingaleMode} · forceMart=${clamped.forceMartingale ? "on" : "off"} · sides=${clamped.sideFilter} · base=$${clamped.baseStake} · levels=${clamped.maxLevels} · cap=$${clamped.perTradeCap} · commission=${(clamped.commissionPct * 100).toFixed(2)}% · spread=${clamped.entrySpreadBps}bps`,
       () => api.updateFast2Config(clamped).then(() => setPendingCfg(null)),
     );
   };
@@ -218,12 +218,12 @@ export function Fast2Panel({ state, doAction, pending }: {
     <>
       {paper.config.liveTradingEnabled && (
         <div className="banner banner-danger" style={{ marginBottom: 12, fontWeight: 600 }}>
-          🔴 LIVE TRADING ACTIVE — Fast2 signals are routing to real Deriv contracts. Account balance is at risk.
+          🔴 LIVE TRADING ACTIVE — Synth signals are routing to real Deriv contracts. Account balance is at risk.
           Latency circuit ({/* surfaced via avg latency telemetry on trades table */}set to 800ms) and session-DD circuit (30%) will auto-pause if triggered.
         </div>
       )}
       <div className="banner" style={{ marginBottom: 12 }}>
-        <strong>Fast2 Sandbox</strong> — {paper.config.liveTradingEnabled ? "live mode (real Deriv multipliers)" : "paper-only"}. 4-strategy R-stack: RDBEAR + RDBULL × (mean-rev fade + drift-follow), all 5m.
+        <strong>Synth Sandbox</strong> — {paper.config.liveTradingEnabled ? "live mode (real Deriv multipliers)" : "paper-only"}. Validated 5m candle-mode strategies on Deriv synthetic indices: BOOM 300N drift-pullback (~40 trades/day, 57-61% WR) and RDBULL breakout BUY-only (~12 trades/day, 60-67% WR).
         Runtime-configurable trade leverage and martingale multiplier.
         Currently running at <strong>MULT={paper.config.tradeMultiplier}× · martingale={paper.config.martingaleMultiplier}×</strong> on a ${paper.startingBalance.toFixed(0)} starting balance.
       </div>
@@ -251,7 +251,7 @@ export function Fast2Panel({ state, doAction, pending }: {
           <button
             className="btn btn-warn btn-sm"
             disabled={pending !== null}
-            onClick={() => doAction(`Set Fast2 paper balance to $${resetTo}? Wipes trades, ladders, and equity history (sandbox restart).`, () => api.resetFast2Paper(Number(resetTo)))}
+            onClick={() => doAction(`Set Synth paper balance to $${resetTo}? Wipes trades, ladders, and equity history (sandbox restart).`, () => api.resetFast2Paper(Number(resetTo)))}
           >
             {pending ? "…" : "Set & Restart Sandbox"}
           </button>
@@ -400,7 +400,7 @@ export function Fast2Panel({ state, doAction, pending }: {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <button className="btn btn-primary btn-sm" disabled={!dirty || pending !== null} onClick={applyCfg}>
-            {pending && pending.startsWith("Apply Fast2 config") ? "Applying…" : dirty ? "Apply config" : "No changes"}
+            {pending && pending.startsWith("Apply Synth config") ? "Applying…" : dirty ? "Apply config" : "No changes"}
           </button>
           {dirty && (
             <button className="btn btn-sm" onClick={() => setPendingCfg(null)}>Cancel</button>
@@ -613,7 +613,7 @@ export function Fast2Panel({ state, doAction, pending }: {
             <div className="card table-card" style={{ marginBottom: 16 }}>
               {openRows.length === 0 ? (
                 <div className="empty" style={{ padding: 16, textAlign: "center" }}>
-                  No open positions — Fast2 is flat.
+                  No open positions — Synth is flat.
                 </div>
               ) : (
                 <table className="trades-table">
@@ -779,7 +779,7 @@ export function Fast2Panel({ state, doAction, pending }: {
       <h3 className="section-title" style={{ marginTop: 16 }}>Recent Signals ({signals.length})</h3>
       <div className="card table-card">
         {signals.length === 0 ? (
-          <div className="empty"><span className="empty-emoji">⚡⚡</span>No fast2 signals yet</div>
+          <div className="empty"><span className="empty-emoji">⚡⚡</span>No synth signals yet</div>
         ) : (
           <table>
             <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Detector</th><th>Reason</th></tr></thead>
