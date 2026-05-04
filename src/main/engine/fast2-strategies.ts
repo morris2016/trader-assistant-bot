@@ -504,11 +504,13 @@ export const fast2R25DigitOver0 = makeDigitOver0Strat("R_25", 1.0000);
 export const fast2R50DigitOver0 = makeDigitOver0Strat("R_50", 1.0000);
 export const fast2R75DigitOver0 = makeDigitOver0Strat("R_75", 1.0000);
 
+// FAST2 SANDBOX REMOVED 2026-05-04 — user requested cleanup. The DIGITOVER 0
+// experiment showed no real edge (precision-audit revealed JS trailing-zero
+// bug inflated apparent P(odd)). Only fast3 (DIGITODD tick book) and the
+// real-account candle book (silver/gold/plat) remain active. Re-enable
+// any strategy by uncommenting below.
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
-  fast2R25DigitOver0,
-  fast2R50DigitOver0,
-  fast2R75DigitOver0,
-  // ── Original multiplier R-stack and RDBEAR/RDBULL retained but inactive ──
+  // fast2R25DigitOver0, fast2R50DigitOver0, fast2R75DigitOver0,
   // fast2RdbearMeanRev, fast2RdbullMeanRev, fast2RdbearDrift, fast2RdbullDrift,
   // fast2Boom300nFadeUp, fast2Jd75FadeUp, fast2Jd75FadeDown,
   // fast2Crash300nFadeDown, fast2Boom300nDriftDown,

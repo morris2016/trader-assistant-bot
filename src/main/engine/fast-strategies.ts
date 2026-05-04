@@ -44,11 +44,14 @@ export const fast1RdbullDrift: StrategyDescriptor = {
   description: "Paper-only shadow of fast2_rdbull_drift.",
 };
 
+// FAST1 SANDBOX REMOVED 2026-05-04 — user requested cleanup. Only fast3
+// (DIGITODD tick book on synthetics) and the real-account candle book
+// (silver/gold/plat) remain active. Re-enable by uncommenting below.
 export const FAST_STRATEGIES: StrategyDescriptor[] = [
-  fast1RdbearMeanRev,
-  fast1RdbullMeanRev,
-  fast1RdbearDrift,
-  fast1RdbullDrift,
+  // fast1RdbearMeanRev,
+  // fast1RdbullMeanRev,
+  // fast1RdbearDrift,
+  // fast1RdbullDrift,
 ];
 
 export function fastStrategiesForSymbol(symbol: string): StrategyDescriptor[] {

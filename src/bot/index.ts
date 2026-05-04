@@ -942,7 +942,14 @@ async function main() {
     const pairs = new Set<string>();
     for (const s of STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
     for (const s of FAST_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
-    for (const s of FAST2_STRATEGIES) for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
+    // Skip granularity=0 (tick-level) strategies — those are handled by the
+    // tick subscription block, not the candle pipeline. Including them here
+    // makes subscribePair call deriv.subscribeCandles with granularity=0,
+    // which Deriv rejects with InputValidationFailed: granularity.
+    for (const s of FAST2_STRATEGIES) {
+      if (s.granularity === 0) continue;
+      for (const sym of s.symbols) pairs.add(`${sym}|${s.granularity}`);
+    }
     return pairs;
   }
 
@@ -1034,7 +1041,13 @@ async function main() {
     }
     // Warmup verification: every Fast2 strategy's (sym, gr) pair must be seeded.
     const fast2Pairs = new Set<string>();
-    for (const s of FAST2_STRATEGIES) for (const sym of s.symbols) fast2Pairs.add(`${sym}|${s.granularity}`);
+    // Only candle-based fast2 strategies need to be warmed via subscribeCandles.
+    // Tick-level strategies (granularity=0) get a tick stream from the fast2
+    // tick-subscription block below — they don't have candle pipelines to seed.
+    for (const s of FAST2_STRATEGIES) {
+      if (s.granularity === 0) continue;
+      for (const sym of s.symbols) fast2Pairs.add(`${sym}|${s.granularity}`);
+    }
     const unwarmed: string[] = [];
     for (const key of fast2Pairs) {
       if (!subscribedKeys.has(key) || !engines.has(key)) unwarmed.push(key);

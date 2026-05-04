@@ -326,7 +326,7 @@ export class BotStorage {
         paper: parsed.paper ?? emptyPaperState(),
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
-        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}), ...(prefs.fast1Config ?? {}) },
+        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}), ...(prefs.fast1Config ?? {}), liveTradingEnabled: false },
         fast2Paper: parsed.fast2Paper ?? emptyPaperState(50),
         // Migrate from legacy single fast2Martingale → split paper/live.
         // The legacy state is treated as the paper ladder (it was driven by
@@ -335,11 +335,14 @@ export class BotStorage {
           ?? (parsed as { fast2Martingale?: Record<string, MartingaleState> }).fast2Martingale
           ?? {},
         fast2MartingaleLive: parsed.fast2MartingaleLive ?? {},
-        fast2Config: applyFast2EnvOverrides({
-          ...DEFAULT_FAST2_CONFIG,
-          ...(parsed.fast2Config ?? {}),
-          ...(prefs.fast2Config ?? {}),
-        }),
+        fast2Config: {
+          ...applyFast2EnvOverrides({
+            ...DEFAULT_FAST2_CONFIG,
+            ...(parsed.fast2Config ?? {}),
+            ...(prefs.fast2Config ?? {}),
+          }),
+          liveTradingEnabled: false,    // Force OFF — Fast2 sandbox removed 2026-05-04
+        },
         fast3Paper: parsed.fast3Paper ?? emptyPaperState(41),
         fast3MartingalePaper: parsed.fast3MartingalePaper ?? {},
         fast3MartingaleLive: parsed.fast3MartingaleLive ?? {},
