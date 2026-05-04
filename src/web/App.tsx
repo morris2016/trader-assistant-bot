@@ -2,12 +2,9 @@ import React, { useEffect, useState, useCallback } from "react";
 import { api, fmtUptime, type StateResp, type StrategyStats, type Subscription } from "./api";
 import { OverviewPanel } from "./panels/Overview";
 import { ChartsPanel } from "./panels/Charts";
-import { StrategiesPanel } from "./panels/Strategies";
-import { SignalsPanel } from "./panels/Signals";
-import { TradesPanel } from "./panels/Trades";
+import { RealPanel } from "./panels/Real";
 import { AdaptivePanel } from "./panels/Adaptive";
 import { SettingsPanel } from "./panels/Settings";
-import { PaperPanel } from "./panels/Paper";
 // Fast (sandbox 1) and Fast2 panels removed from sidebar 2026-05-04 — sandboxes
 // inactive (FAST_STRATEGIES + FAST2_STRATEGIES are empty). Files kept for future
 // re-enable; just not mounted.
@@ -18,15 +15,12 @@ import { LogsPanel } from "./panels/Logs";
 
 const REFRESH_MS = 3000;
 
-type TabId = "overview" | "charts" | "strategies" | "signals" | "trades" | "paper" | "fast3" | "adaptive" | "logs" | "settings";
+type TabId = "overview" | "charts" | "real" | "fast3" | "adaptive" | "logs" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
   { id: "charts",     label: "Charts",     icon: "📈" },
-  { id: "strategies", label: "Strategies", icon: "⚙" },
-  { id: "signals",    label: "Signals",    icon: "⚡" },
-  { id: "trades",     label: "Trades",     icon: "$" },
-  { id: "paper",      label: "Paper",      icon: "📝" },
+  { id: "real",       label: "Real",       icon: "$" },
   { id: "fast3",      label: "Fast3",      icon: "🎯" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "logs",       label: "Logs",       icon: "📋" },
@@ -87,10 +81,7 @@ export function App() {
           <>
             {tab === "overview"   && <OverviewPanel state={state} strategies={strategies} doAction={doAction} pending={actionPending} />}
             {tab === "charts"     && <ChartsPanel subs={subs} />}
-            {tab === "strategies" && <StrategiesPanel strategies={strategies} />}
-            {tab === "signals"    && <SignalsPanel />}
-            {tab === "trades"     && <TradesPanel />}
-            {tab === "paper"      && <PaperPanel doAction={doAction} pending={actionPending} />}
+            {tab === "real"       && <RealPanel state={state} strategies={strategies} />}
             {/* Fast + Fast2 panels removed 2026-05-04 — sandboxes inactive. */}
             {tab === "fast3"      && <Fast3Panel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
@@ -124,11 +115,8 @@ function Sidebar({ tab, setTab, state, subs, strategies }: {
           >
             <span className="nav-item-icon">{t.icon}</span>
             <span>{t.label}</span>
-            {t.id === "strategies" && strategies.length > 0 && (
+            {t.id === "real" && strategies.length > 0 && (
               <span className="nav-badge">{strategies.length}</span>
-            )}
-            {t.id === "trades" && state && state.totalClosed > 0 && (
-              <span className="nav-badge">{state.totalClosed}</span>
             )}
             {t.id === "charts" && subs.length > 0 && (
               <span className="nav-badge">{subs.length}</span>
