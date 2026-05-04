@@ -1822,6 +1822,33 @@ async function main() {
     }
   }, 30_000);
 
+  // ─── Fast3 stuck-contract watchdog ───
+  // DIGITODD settles 1 tick after open (~3-5s). If Deriv silently drops the
+  // proposal_open_contract subscription (WS keeps the main connection alive
+  // but stops delivering updates for that contract), the local trade stays
+  // in real.state().open forever, and the fast3 dispatcher's "open-contract
+  // on this symbol" guard then dead-zones that symbol — strategy "dies".
+  // Every 20s, scan for fast3 trades older than 30s and reconcile them
+  // against Deriv (one-shot proposal_open_contract). reconcileOpenContracts
+  // settles finalised contracts and re-subscribes still-live ones.
+  safeInterval("fast3-stuck-watchdog", async () => {
+    const STUCK_THRESHOLD_MS = 30_000;
+    const now = Date.now();
+    const stuck = real.state().open.filter(
+      (t) => t.sandbox === "fast3" && now - t.openedAt > STUCK_THRESHOLD_MS,
+    );
+    if (stuck.length === 0) return;
+    log.warn(`fast3-stuck-watchdog: ${stuck.length} fast3 contracts open >${STUCK_THRESHOLD_MS / 1000}s — reconciling`, {
+      contracts: stuck.map((t) => ({ id: t.contractId, sym: t.symbol, ageSec: Math.floor((now - t.openedAt) / 1000) })),
+    });
+    try {
+      const res = await real.reconcileOpenContracts();
+      log.info("fast3-stuck-watchdog: reconcile complete", res);
+    } catch (e) {
+      log.error("fast3-stuck-watchdog: reconcile threw", { err: (e as Error).message });
+    }
+  }, 20_000);
+
   // ──────── Production risk circuit breakers ────────
   // Latency circuit: if the rolling-average open latency exceeds the threshold,
   // auto-pause the bot. The 800ms default was too aggressive — Railway → Deriv
