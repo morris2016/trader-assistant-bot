@@ -361,7 +361,14 @@ export function startHttpServer(opts: {
           // so the client doesn't pull 500 unrelated trades just to filter them
           // out — Fast2/Fast3 panels were 5× slower without this.
           let combined = [...s.open, ...s.closed];
-          if (sandbox) combined = combined.filter((t) => t.sandbox === sandbox);
+          if (sandbox === "real") {
+            // Legacy real trades (pre-sandbox-tag) carry sandbox=undefined.
+            // Treat missing/null/"real" as the real book; explicit
+            // fast/fast2/fast3 tags are excluded.
+            combined = combined.filter((t) => !t.sandbox || t.sandbox === "real");
+          } else if (sandbox) {
+            combined = combined.filter((t) => t.sandbox === sandbox);
+          }
           const trades = combined.slice(0, limit);
           json(res, 200, { trades });
           return;
