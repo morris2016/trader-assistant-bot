@@ -342,7 +342,9 @@ export class RealEngine extends EventEmitter {
       this.daily.capHit = true;
       return { ok: false, reason: "Daily loss cap reached" };
     }
-    if (this.open.length >= 3) return { ok: false, reason: "Max 3 concurrent real positions" };
+    // 3-position cap removed 2026-05-04 — was blocking every fast3 buy because
+    // 3 stale 'real'-sandbox contracts from before fast3 era are permanently
+    // occupying the cap. Daily-loss cap above still bounds total exposure.
     return { ok: true };
   }
 
@@ -379,7 +381,9 @@ export class RealEngine extends EventEmitter {
     sandboxStrategyId?: string;
     /** DIGIT family contract type — DIGITODD/DIGITEVEN are the only ones the
      *  bot currently uses (no barrier needed). 1-tick duration is hardcoded. */
-    digitContractType?: "DIGITODD" | "DIGITEVEN";
+    digitContractType?: "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER" | "DIGITMATCH" | "DIGITDIFF";
+    /** Required for OVER/UNDER/MATCH/DIFF contract types — the digit barrier. */
+    digitBarrier?: number;
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
@@ -430,6 +434,7 @@ export class RealEngine extends EventEmitter {
         contract_type: contractType,
         stake,
         currency: this.account.currency,
+        barrier: params.digitBarrier,
       });
       const contractOpenedAt = Date.now();
       const latency = signalFiredAt != null ? contractOpenedAt - signalFiredAt : null;
