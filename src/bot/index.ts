@@ -1879,6 +1879,28 @@ async function main() {
   // was the wrong default; the user shouldn't have to babysit every spike.
   // All thresholds are env-configurable (LATENCY_CIRCUIT_MS, LATENCY_MIN_SAMPLES,
   // LATENCY_AUTO_RESUME=0 to disable auto-resume).
+  // Fast3 stuck-contract watchdog: DIGITODD contracts settle in 1 tick
+  // (~1-3s), but Deriv's proposal_open_contract subscription occasionally
+  // drops settlement pushes, leaving contracts stuck "open" in real.state().
+  // The dispatcher's per-symbol dedup gate is now time-bounded (30s), so
+  // stuck contracts no longer block new buys — but they pollute the open[]
+  // array and would eventually trip the latency circuit. Reconcile every
+  // 60s to force-fetch settlements for fast3 contracts older than 30s.
+  safeInterval("fast3-stuck-sweep", async () => {
+    const now = Date.now();
+    const stuck = real.state().open.filter((t) =>
+      t.sandbox === "fast3" && (now - t.openedAt) > 30_000,
+    );
+    if (stuck.length === 0) return;
+    log.info(`fast3 stuck-contract watchdog: ${stuck.length} contracts > 30s old, reconciling`);
+    try {
+      const res = await real.reconcileOpenContracts();
+      log.info(`fast3 stuck-contract sweep complete`, { reconciled: res.reconciled, settled: res.settled, resubscribed: res.resubscribed, errors: res.errors });
+    } catch (e) {
+      log.warn(`fast3 stuck-contract sweep failed: ${(e as Error).message}`);
+    }
+  }, 60_000);
+
   const LATENCY_CIRCUIT_MS = Number(process.env.LATENCY_CIRCUIT_MS ?? 2500);
   const LATENCY_MIN_SAMPLES = Number(process.env.LATENCY_MIN_SAMPLES ?? 5);
   const LATENCY_AUTO_RESUME = (process.env.LATENCY_AUTO_RESUME ?? "1") === "1";
@@ -2127,7 +2149,17 @@ async function main() {
         const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
         if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
         if (fast3LiveInFlight.has(tick.symbol)) continue;
-        if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
+        // Per-symbol dedup, but TIME-BOUNDED — Deriv's proposal_open_contract
+        // subscription occasionally drops settlement pushes, leaving stuck
+        // open contracts in real.state().open. Without this bound, the dedup
+        // would block every subsequent tick on that symbol forever ("idle
+        // off" symptom). Contracts older than 30s no longer block new buys;
+        // the watchdog below sweeps them periodically via reconcileOpenContracts.
+        const STUCK_GATE_MS = 30_000;
+        const recentOpen = real.state().open.some((t) =>
+          t.sandbox === "fast3" && t.symbol === tick.symbol && (now - t.openedAt) < STUCK_GATE_MS,
+        );
+        if (recentOpen) continue;
 
         fast3LiveInFlight.add(tick.symbol);
         fast3LiveLastBuyAt.set(tick.symbol, now);
