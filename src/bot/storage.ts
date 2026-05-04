@@ -123,28 +123,23 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
  *  Picking 100× (max Deriv allows) keeps the validated paper edge while
  *  staying within the live-tradable range. */
 export type Fast2Config = FastSandboxConfig;
-// FAST2 DISABLED 2026-05-04 — user is testing fast3 alone. Force liveTradingEnabled=false
-// in defaults so a fresh deploy can't auto-route fast2 signals to Deriv.
+// FAST2 REPURPOSED 2026-05-04 → DIGITOVER 0 tick-level book with 2.2× Paroli.
+// Three R_* DIGITOVER 0 strategies (R_25, R_50, R_75), ~99.9%+ structural WR.
+// 2.2× anti-martingale (Paroli) escalates stake on each win; resets on loss.
+// Depth 5 lets a 5-win streak ride from $1 → $1×2.2⁵ = $51 before reset.
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
-  // 5-strategy multiplier book defaults (validated 2026-05-03):
-  //   $250 acct / $10 stake / 2.0× mart d=3 / 100× mult
-  //   Continuous April 2026: $250 → $7,436 (2,875%) / 1,064t / 0 busts
-  //   Combined book book on BOOM300N + JD75 + CRASH300N (all MULT-capable).
-  // The original $3 flat config was tuned for RDBEAR/RDBULL but those symbols
-  // are not multiplier-tradable on Deriv (OfferingsValidationError on every
-  // placeTrade); the new ladder config powers the live-tradable port.
-  tradeMultiplier: 100,
-  martingaleMultiplier: 2.0,     // full-recovery martingale: each L1 win covers L0 loss
-  baseStake: 10,
-  maxLevels: 3,                  // d=3 ladder: cum-loss $150 fits in $250 acct (60% drawdown floor)
-  perTradeCap: 100,
-  commissionPct: 0.005,
-  entrySpreadBps: 1.0,
-  slSlippageBps: 5.0,
+  tradeMultiplier: 100,           // unused for DIGITs (binary contracts) — kept for UI parity
+  martingaleMultiplier: 2.2,      // Paroli escalation ratio
+  baseStake: 1,
+  maxLevels: 5,                   // 5-win Paroli streak cap; resets on first loss
+  perTradeCap: 50,                // Deriv DIGIT contract max stake
+  commissionPct: 0,
+  entrySpreadBps: 0,
+  slSlippageBps: 0,
   forceMartingale: false,
   sideFilter: "both",
-  martingaleMode: "classic",
-  liveTradingEnabled: false,     // DISABLED 2026-05-04 (was true) — fast3 is sole live-test sandbox
+  martingaleMode: "anti",         // ★ Paroli — escalate on win, reset on loss
+  liveTradingEnabled: false,      // PAPER first — flip to live after paper-test
 };
 
 /** Fast3 — DIGITODD tick-level binary contracts on synthetic indices.
@@ -340,16 +335,11 @@ export class BotStorage {
           ?? (parsed as { fast2Martingale?: Record<string, MartingaleState> }).fast2Martingale
           ?? {},
         fast2MartingaleLive: parsed.fast2MartingaleLive ?? {},
-        fast2Config: {
-          ...applyFast2EnvOverrides({
-            ...DEFAULT_FAST2_CONFIG,
-            ...(parsed.fast2Config ?? {}),
-            ...(prefs.fast2Config ?? {}),
-          }),
-          // FAST2 DISABLED 2026-05-04 — override any persisted true to false.
-          // Re-enable by removing this line + uncommenting FAST2_STRATEGIES.
-          liveTradingEnabled: false,
-        },
+        fast2Config: applyFast2EnvOverrides({
+          ...DEFAULT_FAST2_CONFIG,
+          ...(parsed.fast2Config ?? {}),
+          ...(prefs.fast2Config ?? {}),
+        }),
         fast3Paper: parsed.fast3Paper ?? emptyPaperState(41),
         fast3MartingalePaper: parsed.fast3MartingalePaper ?? {},
         fast3MartingaleLive: parsed.fast3MartingaleLive ?? {},

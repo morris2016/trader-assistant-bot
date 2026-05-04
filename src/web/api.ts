@@ -211,7 +211,7 @@ export type LogEntry = {
 
 export const api = {
   state: () => get<StateResp>("/api/state"),
-  trades: (limit = 100) => get<{ trades: RealTrade[] }>(`/api/trades?limit=${limit}`),
+  trades: (limit = 100, sandbox?: string) => get<{ trades: RealTrade[] }>(`/api/trades?limit=${limit}${sandbox ? `&sandbox=${sandbox}` : ""}`),
   signals: (limit = 100) => get<{ signals: Signal[] }>(`/api/signals?limit=${limit}`),
   strategies: () => get<{ strategies: StrategyStats[] }>("/api/strategies"),
   subscriptions: () => get<{ subscriptions: Subscription[] }>("/api/subscriptions"),

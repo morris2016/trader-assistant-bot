@@ -46,7 +46,7 @@ export function Fast2Panel({ state, doAction, pending }: {
     const load = async () => {
       try {
         const [p, t, e, s, sig, rt] = await Promise.all([
-          api.fast2Paper(), api.fast2PaperTrades(500), api.fast2PaperEquity(), api.fast2Strategies(), api.fast2Signals(100), api.trades(500),
+          api.fast2Paper(), api.fast2PaperTrades(100), api.fast2PaperEquity(), api.fast2Strategies(), api.fast2Signals(50), api.trades(100, "fast2"),
         ]);
         setPaper(p);
         setPaperTrades(t.trades);

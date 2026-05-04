@@ -29,7 +29,7 @@ export function Fast3Panel({ state, doAction, pending }: {
     const load = async () => {
       try {
         const [p, t, e, s, rt] = await Promise.all([
-          api.fast3Paper(), api.fast3PaperTrades(500), api.fast3PaperEquity(), api.fast3Strategies(), api.trades(500),
+          api.fast3Paper(), api.fast3PaperTrades(100), api.fast3PaperEquity(), api.fast3Strategies(), api.trades(100, "fast3"),
         ]);
         setPaper(p);
         setPaperTrades(t.trades);

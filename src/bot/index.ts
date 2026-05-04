@@ -18,6 +18,7 @@ import { strategiesForSymbol } from "../main/engine/strategies";
 import { FAST_STRATEGIES, isFastSymbol, fastStrategiesForSymbol } from "../main/engine/fast-strategies";
 import { FAST2_STRATEGIES } from "../main/engine/fast2-strategies";
 import { FAST3_STRATEGIES, FAST3_DETECTOR_TAG } from "../main/engine/fast3-strategies";
+import { FAST2_DIGITOVER0_DETECTOR_TAG } from "../main/engine/fast2-strategies";
 import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
@@ -1061,6 +1062,22 @@ async function main() {
       }
     }
     log.info(`✓ Fast3 DIGITODD ready (${FAST3_STRATEGIES.length} strategies / ${fast3Symbols.size} symbols)`);
+    // ── Fast2 tick subscription: same pattern, for granularity=0 strategies ──
+    const fast2TickSymbols = new Set<string>();
+    for (const s of FAST2_STRATEGIES) if (s.granularity === 0) for (const sym of s.symbols) fast2TickSymbols.add(sym);
+    for (const sym of Array.from(fast2TickSymbols)) {
+      if (tickedSymbols.has(sym)) continue;
+      try {
+        await deriv.subscribeTicks(sym as SymbolCode);
+        tickedSymbols.add(sym);
+        log.info(`fast2 tick subscription: ${sym} active`);
+      } catch (e) {
+        log.warn(`fast2 tick subscription failed for ${sym}: ${(e as Error).message}`);
+      }
+    }
+    if (fast2TickSymbols.size > 0) {
+      log.info(`✓ Fast2 DIGITOVER 0 ready (${Array.from(fast2TickSymbols).length} tick-level strategies)`);
+    }
   }
 
   // Candle handler — routes the candle to the (symbol, granularity)-specific
@@ -2180,6 +2197,119 @@ async function main() {
       // Only one strategy fires per symbol per tick (first match wins);
       // multiple Fast3 strategies on same symbol would collide on the
       // pending slot anyway.
+      break;
+    }
+  });
+
+  // ── Fast2 DIGITOVER 0 tick-level dispatcher (added 2026-05-04) ──
+  // Mirrors the fast3 handler but routes to Fast2 paper/live state and
+  // uses DIGITOVER barrier=0 contract type. Shares the rate-limit gates
+  // with fast3 (liveSharedCooldownUntil / liveLastGlobalBuyAt) so the
+  // combined book stays under Deriv's per-account pricing limit.
+  type Fast2TickPending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
+  const fast2TickPending = new Map<string, Fast2TickPending>();
+  const fast2LiveLastBuyAt = new Map<string, number>();
+  const fast2LiveInFlight = new Set<string>();
+  deriv.on("tick", (tick) => {
+    const stratsForSym = FAST2_STRATEGIES.filter((s) => s.granularity === 0 && s.symbols.includes(tick.symbol));
+    if (stratsForSym.length === 0) return;
+    const now = Date.now();
+
+    // Settle any pending bet on this symbol (paper-mode only; live settles
+    // come via real.on("settled")).
+    const pending = fast2TickPending.get(tick.symbol);
+    if (pending && pending.entryEpoch < tick.epoch) {
+      fast2TickPending.delete(tick.symbol);
+      const settleDigit = (() => {
+        const s = tick.quote.toString();
+        const dot = s.indexOf(".");
+        if (dot < 0) return 0;
+        const dec = s.slice(dot + 1);
+        return dec.length > 0 ? Number(dec[dec.length - 1]) : 0;
+      })();
+      const isWin = settleDigit > 0;  // DIGITOVER 0 → win when digit > 0
+      const cfg = fast2ConfigFor(pending.strategyId);
+      const payout = 1.09;            // DIGITOVER 0 broker price
+      const netPnl = isWin ? Number((pending.stake * (payout - 1)).toFixed(2)) : -pending.stake;
+      const ladderMap = pending.mode === "live" ? fast2MartingaleLive : fast2MartingalePaper;
+      const ladder = ladderMap[pending.strategyId] ?? emptyMartingaleState();
+      const params: MartingaleParams = {
+        baseStake: cfg.baseStake,
+        multiplier: cfg.martingaleMultiplier,
+        maxLevels: cfg.maxLevels,
+        perTradeCap: cfg.perTradeCap,
+      };
+      const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
+      ladderMap[pending.strategyId] = nextLadder;
+      if (pending.mode === "paper") {
+        fast2Paper.applyDelta(netPnl, {
+          symbol: tick.symbol,
+          side: "BUY",
+          detector: FAST2_DIGITOVER0_DETECTOR_TAG,
+          strategyId: pending.strategyId,
+          stake: pending.stake,
+          result: netPnl > 0 ? "won" : "lost",
+          pnl: netPnl,
+          openedAt: pending.entryEpoch * 1000,
+          closedAt: tick.epoch * 1000,
+          entryPrice: 0,
+          exitPrice: tick.quote,
+        });
+      }
+    }
+
+    if (fast2TickPending.has(tick.symbol)) return;
+    for (const strat of stratsForSym) {
+      const cfg = fast2ConfigFor(strat.id);
+      const enabled = (fast2Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
+      if (!enabled) continue;
+      const mode = fast2ActiveMode();
+      const ladderMap = mode === "live" ? fast2MartingaleLive : fast2MartingalePaper;
+      const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
+      const stake = Number((cfg.baseStake * Math.pow(cfg.martingaleMultiplier, ladder.level)).toFixed(2));
+      const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
+      const ps = fast2Paper.getState();
+      if (mode === "paper" && ps.balance < finalStake) {
+        if (ladder.level > 0) ladderMap[strat.id] = emptyMartingaleState();
+        continue;
+      }
+      if (mode === "live") {
+        if (now < liveSharedCooldownUntil) break;
+        const lastBuy = fast2LiveLastBuyAt.get(tick.symbol) ?? 0;
+        if (now - lastBuy < FAST3_GLOBAL_MIN_GAP_MS) continue;
+        if (fast2LiveInFlight.has(tick.symbol)) continue;
+        if (real.state().open.some((t) => t.sandbox === "fast2" && t.symbol === tick.symbol)) continue;
+        fast2LiveInFlight.add(tick.symbol);
+        fast2LiveLastBuyAt.set(tick.symbol, now);
+        liveLastGlobalBuyAt = now;
+        real.placeTrade({
+          symbol: tick.symbol as SymbolCode,
+          side: "BUY",
+          family: "DIGIT",
+          digitContractType: "DIGITOVER",
+          digitBarrier: 0,
+          detector: FAST2_DIGITOVER0_DETECTOR_TAG,
+          stakeOverride: finalStake,
+          signalFiredAt: now,
+          sandbox: "fast2",
+          sandboxStrategyId: strat.id,
+          entryPriceHint: tick.quote,
+        }).then((trade) => {
+          log.info(`fast2 LIVE opened DIGITOVER 0 ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+        }).catch((e) => {
+          const msg = (e as Error).message;
+          if (msg.includes("RateLimit") || msg.includes("rate limit")) {
+            liveSharedCooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
+            log.warn(`fast2 LIVE rate-limited by Deriv → shared cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s`);
+          } else {
+            log.warn(`fast2 LIVE placeTrade failed ${tick.symbol}: ${msg}`);
+          }
+        }).finally(() => {
+          fast2LiveInFlight.delete(tick.symbol);
+        });
+        break;
+      }
+      fast2TickPending.set(tick.symbol, { entryEpoch: tick.epoch, stake: finalStake, strategyId: strat.id, mode });
       break;
     }
   });

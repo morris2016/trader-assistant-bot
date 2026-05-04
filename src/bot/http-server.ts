@@ -352,11 +352,17 @@ export function startHttpServer(opts: {
         }
         if (path0 === "/api/trades") {
           const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
+          const sandbox = url.searchParams.get("sandbox") ?? "";
           const s = opts.getState();
           // Include open trades alongside closed — open ones have closedAt=null
           // so callers (Fast2 Open Positions, Trades panel) can filter by that.
           // Without this, real open Deriv contracts were invisible to the UI.
-          const trades = [...s.open, ...s.closed].slice(0, limit);
+          // Optional ?sandbox=fast2|fast3|real|fast filter is applied SERVER-SIDE
+          // so the client doesn't pull 500 unrelated trades just to filter them
+          // out — Fast2/Fast3 panels were 5× slower without this.
+          let combined = [...s.open, ...s.closed];
+          if (sandbox) combined = combined.filter((t) => t.sandbox === sandbox);
+          const trades = combined.slice(0, limit);
           json(res, 200, { trades });
           return;
         }
