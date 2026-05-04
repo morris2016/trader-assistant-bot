@@ -206,45 +206,15 @@ async function main() {
   // symbol settles it.
   type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
   const fast3Pending = new Map<string, Fast3Pending>();
-  // ── Fast3 LIVE rate limiting (burst-then-cooldown duty cycle) ──
-  // Deriv's buy/proposal endpoints rate-limit at ~5-10 calls/min/account.
-  // Strategy: take a burst of trades, then pause; loop. Avoids the hammering
-  // that produces RateLimit errors on every other tick.
-  //
-  // Defaults: 20 buys per burst, then 30s cooldown. Yields ~1200 trades/hr
-  // at peak, well under Deriv's per-minute ceiling.
-  // Plus: per-symbol min gap (1.5s) so a single noisy symbol doesn't hog
-  // the burst budget, and a hard cooldown if Deriv responds with RateLimit
-  // (signal that we're still over the line — back off harder).
-  // PER-STRATEGY duty cycle, retuned to Deriv's actual sliding-window limits
-  // (researched 2026-05-03):
-  //   max_requests_pricing  = 80/min (proposal + proposal_open_contract)
-  //   max_requestes_general = 180/min (buy/sell/ticks/etc)
-  //   sliding 60s window — clears as old requests age out
-  //
-  // Each fast3 buy consumes 2 pricing slots (proposal + POC subscribe), so
-  // effective ceiling is 40 buys/min from fast3 alone. With fast2 sharing
-  // the same account bucket, real ceiling is ~25-30 buys/min for fast3.
-  //
-  // Defaults: 60s burst (fills the pricing bucket), 65s cooldown (clears
-  // it via sliding window), 1.5s global gap (~40 buys/min when fast3 alone).
-  // The boot-time website_status fetch dynamically narrows the gap if
-  // Deriv reports a tighter limit than the documented defaults.
-  const FAST3_BURST_DURATION_MS = Number(process.env.FAST3_BURST_DURATION_MS ?? 60_000);
-  const FAST3_COOLDOWN_DURATION_MS = Number(process.env.FAST3_COOLDOWN_DURATION_MS ?? 65_000);
-  let FAST3_GLOBAL_MIN_GAP_MS = Number(process.env.FAST3_GLOBAL_MIN_GAP_MS ?? 1500);
-  const FAST3_PER_SYMBOL_GAP_MS = Number(process.env.FAST3_PER_SYMBOL_GAP_MS ?? 1500);
-  const FAST3_HARD_COOLDOWN_MS = Number(process.env.FAST3_HARD_COOLDOWN_MS ?? 65_000);
-  // ── SHARED LIVE rate-limit state (fast2 + fast3 share Deriv's per-account
-  //    sliding-window bucket, so they must coordinate cooldowns) ──
-  let liveSharedCooldownUntil = 0;
-  let liveLastGlobalBuyAt = 0;
-  const fast3StratBurstStartedAt = new Map<string, number>();   // strategyId → ms (0 = pending fresh)
-  const fast3StratCooldownUntil = new Map<string, number>();    // strategyId → ms
-  const fast3StratBuysThisBurst = new Map<string, number>();    // strategyId → count
-  const fast3StratPendingCooldown = new Set<string>();          // burst expired but ladder active
-  let fast3LastGlobalBuyAt = 0;
-  const fast3LiveLastBuyAt = new Map<string, number>();
+  // ── Fast3 LIVE concurrency guards ──
+  // No client-side throttling. Deriv enforces its own rate limits server-
+  // side and returns "RateLimit" errors when exceeded; we surface those as
+  // log warnings and the next tick simply tries again.
+  // Two guards remain (correctness, not throttling):
+  //   - per-symbol in-flight: don't double-fire while a placeTrade promise
+  //     is still pending for that symbol
+  //   - open-contract: DIGITODD settles next tick, so don't stack bets on
+  //     the same symbol
   const fast3LiveInFlight = new Set<string>();
   log.info("fast3Paper: state loaded", {
     balance: fast3Paper.getState().balance,
@@ -407,18 +377,6 @@ async function main() {
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
       fast3MartingaleLive[t.sandboxStrategyId] = nextLadder;
       log.info(`fast3 LIVE settled ${t.symbol} DIGITODD ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} contract=${t.contractId}`);
-      // ── Deferred-cooldown close ──
-      // If this strategy's burst window had expired but cooldown was deferred
-      // due to an active ladder, and the ladder is now back at L0, enter
-      // the cooldown. The next dispatch tick will see the cooldown timer
-      // active and skip until it expires.
-      if (fast3StratPendingCooldown.has(t.sandboxStrategyId) && nextLadder.level === 0) {
-        fast3StratCooldownUntil.set(t.sandboxStrategyId, Date.now() + FAST3_COOLDOWN_DURATION_MS);
-        fast3StratBurstStartedAt.set(t.sandboxStrategyId, 0);
-        fast3StratPendingCooldown.delete(t.sandboxStrategyId);
-        const buys = fast3StratBuysThisBurst.get(t.sandboxStrategyId) ?? 0;
-        log.info(`fast3 LIVE deferred cooldown CLOSED [${t.sandboxStrategyId}] (${buys} buys, ladder back to L0) — cooldown ${FAST3_COOLDOWN_DURATION_MS / 60_000}min`);
-      }
     }
     persist();
   });
@@ -1482,13 +1440,7 @@ async function main() {
               if (liveStake !== stake) {
                 log.warn(`fast2 LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD})`);
               }
-              // Respect the shared rate-limit cooldown so fast2 doesn't hammer
-              // Deriv while fast3 has been throttled (and vice versa).
-              if (Date.now() < liveSharedCooldownUntil) {
-                log.info(`fast2 LIVE skip — shared rate-limit cooldown active for ${Math.ceil((liveSharedCooldownUntil - Date.now()) / 1000)}s more`);
-                handledFast2 = true;
-              } else try {
-                liveLastGlobalBuyAt = Date.now();
+              try {
                 const trade = await real.placeTrade({
                   symbol: sig.symbol as SymbolCode,
                   side: sig.action,
@@ -1510,10 +1462,6 @@ async function main() {
                 log.info(`fast2 LIVE opened ${trade.symbol} ${trade.side} strategy=${fast2Match.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${liveMult}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
               } catch (e) {
                 const msg = (e as Error).message;
-                if (msg.includes("RateLimit") || msg.includes("rate limit")) {
-                  liveSharedCooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
-                  log.warn(`fast2 LIVE rate-limited by Deriv → shared cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s (also blocks fast3)`);
-                }
                 log.error(`fast2 LIVE placeTrade failed`, { err: msg, symbol: sig.symbol, side: sig.action, strategy: fast2Match.id });
               }
               handledFast2 = true;
@@ -1698,31 +1646,6 @@ async function main() {
           }
         } catch (e) {
           log.warn("restoreFromDeriv failed", { err: (e as Error).message });
-        }
-        // Fetch Deriv's actual per-account rate limits and dynamically tune
-        // the global gap. Each fast3 buy consumes 2 pricing-bucket slots
-        // (proposal + proposal_open_contract), so target rate = pricing/2.
-        // Add 20% safety margin so a tick or two of clock drift doesn't trip.
-        try {
-          const limits = await deriv.fetchApiCallLimits();
-          if (limits) {
-            log.info(`Deriv api_call_limits: pricing=${limits.pricingPerMinute}/min general=${limits.generalPerMinute}/min outcome=${limits.outcomePerMinute}/min proposalSubs=${limits.proposalSubsConcurrent}`);
-            if (limits.pricingPerMinute && limits.pricingPerMinute > 0) {
-              const buysPerMin = Math.floor(limits.pricingPerMinute / 2);     // proposal + POC
-              const safe = Math.floor(buysPerMin * 0.8);                       // 20% margin
-              const dynGap = Math.max(1000, Math.ceil(60_000 / safe));
-              if (dynGap > FAST3_GLOBAL_MIN_GAP_MS) {
-                log.info(`fast3 throttle TIGHTENED: gap ${FAST3_GLOBAL_MIN_GAP_MS}ms → ${dynGap}ms (Deriv pricing limit ${limits.pricingPerMinute}/min ÷ 2 calls/buy × 80% safety)`);
-                FAST3_GLOBAL_MIN_GAP_MS = dynGap;
-              } else {
-                log.info(`fast3 throttle gap ${FAST3_GLOBAL_MIN_GAP_MS}ms is conservative vs Deriv's ${limits.pricingPerMinute}/min pricing limit`);
-              }
-            }
-          } else {
-            log.info(`Deriv api_call_limits unavailable — using documented defaults (80/min pricing, gap=${FAST3_GLOBAL_MIN_GAP_MS}ms)`);
-          }
-        } catch (e) {
-          log.warn(`fetchApiCallLimits failed: ${(e as Error).message} — using defaults`);
         }
         log.info("bot ready", { liveTrading: cfg.liveTradingEnabled, strategies: STRATEGIES.length, subs: subscribedKeys.size });
       }
@@ -2107,65 +2030,13 @@ async function main() {
       // Stake-cap hit → reset to L0 base stake
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
       if (mode === "live") {
-        const now = Date.now();
-        // ── SHARED cooldown: blocks fast2 + fast3 together when Deriv has
-        // signaled rate-limit. Both sandboxes share the same per-account
-        // pricing/general buckets, so a sole-fast3 cooldown was getting
-        // re-tripped immediately by fast2 trades from the SAME account. ──
-        if (now < liveSharedCooldownUntil) break;
-        // ── PER-STRATEGY duty cycle ──
-        // Each strategy has its own burst/cooldown. Other strategies keep
-        // trading while this one is in cooldown.
-        const stratCooldownUntil = fast3StratCooldownUntil.get(strat.id) ?? 0;
-        if (now < stratCooldownUntil) continue;  // this strategy still cooling
-        let stratBurstStartedAt = fast3StratBurstStartedAt.get(strat.id) ?? 0;
-        if (stratBurstStartedAt === 0) {
-          stratBurstStartedAt = now;
-          fast3StratBurstStartedAt.set(strat.id, now);
-          fast3StratBuysThisBurst.set(strat.id, 0);
-          fast3StratPendingCooldown.delete(strat.id);
-          // Demoted to debug to silence the log flood when 8 strategies
-          // re-open simultaneously after a shared cooldown ends. The first
-          // actual buy will log at info level with the burst progress.
-          log.debug(`fast3 LIVE burst OPEN [${strat.id}] — ${(FAST3_BURST_DURATION_MS / 1000).toFixed(0)}s burst, ${(FAST3_COOLDOWN_DURATION_MS / 1000).toFixed(0)}s cooldown`);
-        }
-        const burstElapsed = now - stratBurstStartedAt >= FAST3_BURST_DURATION_MS;
-        if (burstElapsed) {
-          // ── DEFERRED COOLDOWN: don't stop mid-ladder. ──
-          // If the strategy is in active recovery (level > 0), keep trading
-          // through the burst-window expiry until the ladder resets.
-          // Cooldown will close on a future tick when ladder is back at L0.
-          if (ladder.level > 0) {
-            if (!fast3StratPendingCooldown.has(strat.id)) {
-              fast3StratPendingCooldown.add(strat.id);
-              log.info(`fast3 LIVE burst expired [${strat.id}] but ladder L${ladder.level} active — cooldown DEFERRED until ladder resets`);
-            }
-            // fall through to placement; this trade is a recovery bet
-          } else {
-            // Ladder at L0 (or burst expired with no active ladder). Close out.
-            const buys = fast3StratBuysThisBurst.get(strat.id) ?? 0;
-            fast3StratCooldownUntil.set(strat.id, now + FAST3_COOLDOWN_DURATION_MS);
-            fast3StratBurstStartedAt.set(strat.id, 0);
-            fast3StratPendingCooldown.delete(strat.id);
-            log.info(`fast3 LIVE burst CLOSED [${strat.id}] (${buys} buys) — cooldown ${FAST3_COOLDOWN_DURATION_MS / 60_000}min`);
-            continue;  // try the next strategy that may still be in burst
-          }
-        }
-        // GLOBAL stagger gate (shared with fast2) — keeps combined rate
-        // under Deriv's ~80 pricing-calls/min ceiling.
-        if (now - liveLastGlobalBuyAt < FAST3_GLOBAL_MIN_GAP_MS) continue;
-        const lastBuy = fast3LiveLastBuyAt.get(tick.symbol) ?? 0;
-        if (now - lastBuy < FAST3_PER_SYMBOL_GAP_MS) continue;
+        // No client-side throttling — Deriv enforces server-side rate limits
+        // and surfaces "RateLimit" errors when the bucket is exceeded; we
+        // log+drop and the next tick retries.
         if (fast3LiveInFlight.has(tick.symbol)) continue;
         if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
 
         fast3LiveInFlight.add(tick.symbol);
-        fast3LiveLastBuyAt.set(tick.symbol, now);
-        liveLastGlobalBuyAt = now;
-        const buyCount = (fast3StratBuysThisBurst.get(strat.id) ?? 0) + 1;
-        fast3StratBuysThisBurst.set(strat.id, buyCount);
-        const elapsedMs = now - stratBurstStartedAt;
-        const tag = fast3StratPendingCooldown.has(strat.id) ? " [recovery]" : "";
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
           side: "BUY",
@@ -2173,26 +2044,16 @@ async function main() {
           digitContractType: "DIGITODD",
           detector: FAST3_DETECTOR_TAG,
           stakeOverride: finalStake,
-          signalFiredAt: now,
+          signalFiredAt: Date.now(),
           sandbox: "fast3",
           sandboxStrategyId: strat.id,
           entryPriceHint: tick.quote,
         }).then((trade) => {
-          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level} buy=${buyCount} t=${(elapsedMs / 1000).toFixed(0)}s${tag}`);
+          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {
-            // Trip the shared cooldown so fast2 also pauses (same account).
-            const wasShared = Date.now() < liveSharedCooldownUntil;
-            liveSharedCooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
-            for (const s of FAST3_STRATEGIES) {
-              fast3StratCooldownUntil.set(s.id, Date.now() + FAST3_HARD_COOLDOWN_MS);
-              fast3StratBurstStartedAt.set(s.id, 0);
-              fast3StratPendingCooldown.delete(s.id);
-            }
-            if (!wasShared) {
-              log.warn(`fast3 LIVE rate-limited by Deriv → SHARED cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s (also blocks fast2); bursts closed early`);
-            }
+            log.debug(`fast3 LIVE rate-limited by Deriv on ${tick.symbol} — next tick will retry`);
           } else {
             log.warn(`fast3 LIVE placeTrade failed ${tick.symbol}: ${msg}`);
           }
@@ -2216,12 +2077,10 @@ async function main() {
 
   // ── Fast2 DIGITOVER 0 tick-level dispatcher (added 2026-05-04) ──
   // Mirrors the fast3 handler but routes to Fast2 paper/live state and
-  // uses DIGITOVER barrier=0 contract type. Shares the rate-limit gates
-  // with fast3 (liveSharedCooldownUntil / liveLastGlobalBuyAt) so the
-  // combined book stays under Deriv's per-account pricing limit.
+  // uses DIGITOVER barrier=0 contract type. Per-symbol in-flight + open-
+  // contract guard only; Deriv enforces rate limits server-side.
   type Fast2TickPending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
   const fast2TickPending = new Map<string, Fast2TickPending>();
-  const fast2LiveLastBuyAt = new Map<string, number>();
   const fast2LiveInFlight = new Set<string>();
   deriv.on("tick", (tick) => {
     const stratsForSym = FAST2_STRATEGIES.filter((s) => s.granularity === 0 && s.symbols.includes(tick.symbol));
@@ -2287,14 +2146,9 @@ async function main() {
         continue;
       }
       if (mode === "live") {
-        if (now < liveSharedCooldownUntil) break;
-        const lastBuy = fast2LiveLastBuyAt.get(tick.symbol) ?? 0;
-        if (now - lastBuy < FAST3_GLOBAL_MIN_GAP_MS) continue;
         if (fast2LiveInFlight.has(tick.symbol)) continue;
         if (real.state().open.some((t) => t.sandbox === "fast2" && t.symbol === tick.symbol)) continue;
         fast2LiveInFlight.add(tick.symbol);
-        fast2LiveLastBuyAt.set(tick.symbol, now);
-        liveLastGlobalBuyAt = now;
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
           side: "BUY",
@@ -2312,8 +2166,7 @@ async function main() {
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {
-            liveSharedCooldownUntil = Date.now() + FAST3_HARD_COOLDOWN_MS;
-            log.warn(`fast2 LIVE rate-limited by Deriv → shared cooldown ${FAST3_HARD_COOLDOWN_MS / 1000}s`);
+            log.debug(`fast2 LIVE rate-limited by Deriv on ${tick.symbol} — next tick will retry`);
           } else {
             log.warn(`fast2 LIVE placeTrade failed ${tick.symbol}: ${msg}`);
           }
