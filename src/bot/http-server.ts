@@ -362,10 +362,12 @@ export function startHttpServer(opts: {
           // out — Fast2/Fast3 panels were 5× slower without this.
           let combined = [...s.open, ...s.closed];
           if (sandbox === "real") {
-            // Legacy real trades (pre-sandbox-tag) carry sandbox=undefined.
-            // Treat missing/null/"real" as the real book; explicit
-            // fast/fast2/fast3 tags are excluded.
-            combined = combined.filter((t) => !t.sandbox || t.sandbox === "real");
+            // Real candle book only trades forex/metals (frx*). Synthetics
+            // (R_*, 1HZ*, JD*, RDBEAR/RDBULL, BOOM*, CRASH*) belong to
+            // fast/fast2/fast3 — including legacy "restored" rows that
+            // pre-date the sandbox tag. Filter by symbol prefix to keep
+            // those out regardless of sandbox value.
+            combined = combined.filter((t) => t.symbol.startsWith("frx"));
           } else if (sandbox) {
             combined = combined.filter((t) => t.sandbox === sandbox);
           }
