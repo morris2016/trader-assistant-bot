@@ -61,13 +61,14 @@ function makeStrat(symbol: string, validatedWR: number, validatedNet: number): S
 
 export const fast3R50DigitOdd     = makeStrat("R_50",     0.5591, 95);
 export const fast3R75DigitOdd     = makeStrat("R_75",     0.5532, 129);
-// R_100 switched to DIGITEVEN 2026-05-05 to screen the opposite parity. id +
-// name kept as-is so the persisted martingale ladder, paper-trade history,
-// signals buffer, and UI position survive the switch — only the contract
-// type changes at the dispatch layer.
+// R_100 — flip-on-loss DIGIT strategy 2026-05-05. After every losing tick the
+// runtime side toggles to the opposite, then stays there until the next loss.
+// id + name kept as-is so persisted state survives. The starting side is
+// DIGITODD; the bot tracks the live side per-strategy and flips on losses.
 export const fast3R100DigitOdd: StrategyDescriptor = {
   ...makeStrat("R_100", 0.5513, 0),
-  digitContractType: "DIGITEVEN",
+  digitContractType: "DIGITODD",
+  flipOnLoss: true,
 };
 export const fast3RDBearDigitOdd  = makeStrat("RDBEAR",   0.5550, 0);  // had -$14 last hour but +$268 paper
 export const fast3RDBullDigitOdd  = makeStrat("RDBULL",   0.5546, 79);

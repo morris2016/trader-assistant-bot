@@ -204,7 +204,7 @@ async function main() {
   // tick T and are waiting for tick T+1 to settle. Key = symbol; value =
   // { entryEpoch, stake, strategyId, mode }. The next tick on the same
   // symbol settles it.
-  type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live" };
+  type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live"; side?: "DIGITODD" | "DIGITEVEN" };
   const fast3Pending = new Map<string, Fast3Pending>();
   // ── Fast3 LIVE concurrency guards ──
   // No client-side throttling. Deriv enforces its own rate limits server-
@@ -229,6 +229,20 @@ async function main() {
   const FAST3_STREAK_PAUSE_MS = Number(process.env.FAST3_STREAK_PAUSE_MS ?? 1000);
   const fast3ConsecutiveLosses = new Map<string, number>();
   const fast3StreakPauseUntil = new Map<string, number>();
+  // ── Per-strategy runtime contract-type side ──
+  // For strategies with flipOnLoss=true, track the live side here. Starts
+  // at the descriptor's digitContractType (default DIGITODD); each losing
+  // tick toggles it to the opposite. Resolver: flipOnLoss strategies use
+  // this map; everyone else uses the static descriptor field.
+  const fast3RuntimeSide = new Map<string, "DIGITODD" | "DIGITEVEN">();
+  function fast3SideFor(strat: StrategyDescriptor): "DIGITODD" | "DIGITEVEN" {
+    if (!strat.flipOnLoss) return strat.digitContractType ?? "DIGITODD";
+    const cached = fast3RuntimeSide.get(strat.id);
+    if (cached) return cached;
+    const initial = strat.digitContractType ?? "DIGITODD";
+    fast3RuntimeSide.set(strat.id, initial);
+    return initial;
+  }
   // Per-symbol decimal places for DIGITODD digit extraction. Populated at
   // boot from Deriv's active_symbols (pip_size → display_decimals). The
   // paper-mode settle path uses this to read the LAST digit of the quote
@@ -426,20 +440,28 @@ async function main() {
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
       fast3MartingaleLive[t.sandboxStrategyId] = nextLadder;
       log.info(`fast3 LIVE settled ${t.symbol} DIGITODD ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} contract=${t.contractId}`);
-      // Loss-streak pause: track consecutive losses on this strategy.
-      // After threshold, set pause-until so the dispatch loop skips this
-      // strategy for a brief window — the goal is to sit out the tail of
-      // a bad-parity streak before re-engaging the ladder.
-      if (pnl <= 0) {
-        const streak = (fast3ConsecutiveLosses.get(t.sandboxStrategyId) ?? 0) + 1;
-        fast3ConsecutiveLosses.set(t.sandboxStrategyId, streak);
-        if (streak >= FAST3_STREAK_PAUSE_AFTER_LOSSES) {
-          fast3StreakPauseUntil.set(t.sandboxStrategyId, Date.now() + FAST3_STREAK_PAUSE_MS);
+      const fast3Strat = FAST3_STRATEGIES.find((s) => s.id === t.sandboxStrategyId);
+      // Loss-streak pause: track consecutive losses on this strategy. Skipped
+      // for flipOnLoss strategies — they want to switch sides immediately.
+      if (!fast3Strat?.flipOnLoss) {
+        if (pnl <= 0) {
+          const streak = (fast3ConsecutiveLosses.get(t.sandboxStrategyId) ?? 0) + 1;
+          fast3ConsecutiveLosses.set(t.sandboxStrategyId, streak);
+          if (streak >= FAST3_STREAK_PAUSE_AFTER_LOSSES) {
+            fast3StreakPauseUntil.set(t.sandboxStrategyId, Date.now() + FAST3_STREAK_PAUSE_MS);
+            fast3ConsecutiveLosses.set(t.sandboxStrategyId, 0);
+            log.info(`fast3 LIVE streak pause [${t.sandboxStrategyId}] — ${streak} losses → ${FAST3_STREAK_PAUSE_MS}ms cooldown`);
+          }
+        } else {
           fast3ConsecutiveLosses.set(t.sandboxStrategyId, 0);
-          log.info(`fast3 LIVE streak pause [${t.sandboxStrategyId}] — ${streak} losses → ${FAST3_STREAK_PAUSE_MS}ms cooldown`);
         }
-      } else {
-        fast3ConsecutiveLosses.set(t.sandboxStrategyId, 0);
+      }
+      // Flip-on-loss: toggle the runtime side after a losing live tick.
+      if (fast3Strat?.flipOnLoss && pnl <= 0) {
+        const cur = fast3RuntimeSide.get(t.sandboxStrategyId) ?? (fast3Strat.digitContractType ?? "DIGITODD");
+        const next = cur === "DIGITODD" ? "DIGITEVEN" : "DIGITODD";
+        fast3RuntimeSide.set(t.sandboxStrategyId, next);
+        log.info(`fast3 LIVE flip-on-loss [${t.sandboxStrategyId}] ${cur} → ${next}`);
       }
     }
     persist();
@@ -2106,7 +2128,11 @@ async function main() {
       // EVEN-side strategies win when the next digit is even; ODD-side win
       // when odd. Payout ratio is the same family-wide.
       const stratForPending = FAST3_STRATEGIES.find((s) => s.id === pending.strategyId);
-      const wantOdd = (stratForPending?.digitContractType ?? "DIGITODD") === "DIGITODD";
+      // Use the side that was ACTIVE at the moment the bet was placed —
+      // captured into pending.side at dispatch time. Falls back to the
+      // descriptor for safety if the bet predates this wiring.
+      const sideAtPlacement = pending.side ?? (stratForPending?.digitContractType ?? "DIGITODD");
+      const wantOdd = sideAtPlacement === "DIGITODD";
       const wins = wantOdd ? isOdd : !isOdd;
       // DIGITODD/EVEN payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
       const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
@@ -2123,9 +2149,9 @@ async function main() {
       ladderMap[pending.strategyId] = nextLadder;
 
       // Loss-streak pause (paper-mode tally; live-mode tally is handled in
-      // real.on("settled")). Mirrors the live-side logic so paper and live
-      // behave identically under the same streak.
-      if (pending.mode === "paper") {
+      // real.on("settled")). Skipped for flipOnLoss strategies — they want
+      // to switch sides on the very next tick, not sit out.
+      if (pending.mode === "paper" && !stratForPending?.flipOnLoss) {
         if (netPnl <= 0) {
           const streak = (fast3ConsecutiveLosses.get(pending.strategyId) ?? 0) + 1;
           fast3ConsecutiveLosses.set(pending.strategyId, streak);
@@ -2137,6 +2163,15 @@ async function main() {
         } else {
           fast3ConsecutiveLosses.set(pending.strategyId, 0);
         }
+      }
+
+      // Flip-on-loss: toggle the runtime side after a losing tick. Only
+      // applies to strategies marked flipOnLoss=true; everyone else uses
+      // their static descriptor side.
+      if (stratForPending?.flipOnLoss && netPnl <= 0) {
+        const next = sideAtPlacement === "DIGITODD" ? "DIGITEVEN" : "DIGITODD";
+        fast3RuntimeSide.set(pending.strategyId, next);
+        log.debug(`fast3 flip-on-loss [${pending.strategyId}] ${sideAtPlacement} → ${next} (loss)`);
       }
 
       if (pending.mode === "paper") {
@@ -2167,11 +2202,13 @@ async function main() {
       const cfg = fast3ConfigFor(strat.id);
       const enabled = (fast3Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
       if (!enabled) continue;
-      // Loss-streak cooldown: skip this strategy while its pause window is
-      // active. Set when consecutive losses ≥ FAST3_STREAK_PAUSE_AFTER_LOSSES
-      // in the settle handlers above.
-      const pauseUntil = fast3StreakPauseUntil.get(strat.id) ?? 0;
-      if (Date.now() < pauseUntil) continue;
+      // Loss-streak cooldown: skip while pause window is active. flipOnLoss
+      // strategies bypass this — they want to switch sides on the next tick
+      // immediately, not pause.
+      if (!strat.flipOnLoss) {
+        const pauseUntil = fast3StreakPauseUntil.get(strat.id) ?? 0;
+        if (Date.now() < pauseUntil) continue;
+      }
       const mode = fast3ActiveMode();
       const ladderMap = mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
@@ -2194,7 +2231,7 @@ async function main() {
         if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
 
         fast3LiveInFlight.add(tick.symbol);
-        const liveContractType = strat.digitContractType ?? "DIGITODD";
+        const liveContractType = fast3SideFor(strat);
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
           side: "BUY",
@@ -2225,6 +2262,11 @@ async function main() {
         stake: finalStake,
         strategyId: strat.id,
         mode,
+        // Capture the side at placement time. For flipOnLoss strategies this
+        // is the runtime-toggled side; for everyone else it's the static
+        // descriptor field. Settling uses this to score the bet correctly
+        // even if the runtime side has flipped between placement and settle.
+        side: fast3SideFor(strat),
       });
       // Only one strategy fires per symbol per tick (first match wins);
       // multiple Fast3 strategies on same symbol would collide on the

@@ -55,6 +55,15 @@ export type StrategyDescriptor = {
    *  symbol without changing any other strategy's behavior. */
   digitContractType?: "DIGITODD" | "DIGITEVEN";
 
+  /** When true (DIGIT strategies only), flip the contract type after every
+   *  loss. The starting side is `digitContractType` (or DIGITODD if unset);
+   *  after a losing tick the runtime side toggles to the opposite, and stays
+   *  there until the next loss flips it back. The intent is to sit on the
+   *  side that just won and only switch when the parity-streak that caused
+   *  the loss broke. Memoryless-RNG math says this doesn't improve WR, but
+   *  it can change ladder dynamics noticeably. */
+  flipOnLoss?: boolean;
+
   /** Snapshot of the validation run that promoted this strategy from "tuning" to "tradeable". */
   validation: {
     /** ISO date (YYYY-MM-DD) of the validation run. */
