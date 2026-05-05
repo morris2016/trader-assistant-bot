@@ -2074,9 +2074,15 @@ async function main() {
       fast3Pending.delete(tick.symbol);
       const isOdd = fast3LastDigitFor(tick.quote, tick.symbol) % 2 !== 0;
       const cfg = fast3ConfigFor(pending.strategyId);
-      // DIGITODD payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
+      // Each strategy carries its own digitContractType (default DIGITODD).
+      // EVEN-side strategies win when the next digit is even; ODD-side win
+      // when odd. Payout ratio is the same family-wide.
+      const stratForPending = FAST3_STRATEGIES.find((s) => s.id === pending.strategyId);
+      const wantOdd = (stratForPending?.digitContractType ?? "DIGITODD") === "DIGITODD";
+      const wins = wantOdd ? isOdd : !isOdd;
+      // DIGITODD/EVEN payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
       const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
-      const netPnl = isOdd ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
+      const netPnl = wins ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
       const ladderMap = pending.mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[pending.strategyId] ?? emptyMartingaleState();
       const params: MartingaleParams = {
@@ -2138,11 +2144,12 @@ async function main() {
         if (real.state().open.some((t) => t.sandbox === "fast3" && t.symbol === tick.symbol)) continue;
 
         fast3LiveInFlight.add(tick.symbol);
+        const liveContractType = strat.digitContractType ?? "DIGITODD";
         real.placeTrade({
           symbol: tick.symbol as SymbolCode,
           side: "BUY",
           family: "DIGIT",
-          digitContractType: "DIGITODD",
+          digitContractType: liveContractType,
           detector: FAST3_DETECTOR_TAG,
           stakeOverride: finalStake,
           signalFiredAt: Date.now(),
@@ -2150,7 +2157,7 @@ async function main() {
           sandboxStrategyId: strat.id,
           entryPriceHint: tick.quote,
         }).then((trade) => {
-          log.info(`fast3 LIVE opened DIGITODD ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+          log.info(`fast3 LIVE opened ${liveContractType} ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {

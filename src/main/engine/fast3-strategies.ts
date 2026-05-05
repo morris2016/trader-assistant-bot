@@ -61,7 +61,14 @@ function makeStrat(symbol: string, validatedWR: number, validatedNet: number): S
 
 export const fast3R50DigitOdd     = makeStrat("R_50",     0.5591, 95);
 export const fast3R75DigitOdd     = makeStrat("R_75",     0.5532, 129);
-export const fast3R100DigitOdd    = makeStrat("R_100",    0.5513, 0);  // R_100 has 1.92× payout
+// R_100 switched to DIGITEVEN 2026-05-05 to screen the opposite parity. id +
+// name kept as-is so the persisted martingale ladder, paper-trade history,
+// signals buffer, and UI position survive the switch — only the contract
+// type changes at the dispatch layer.
+export const fast3R100DigitOdd: StrategyDescriptor = {
+  ...makeStrat("R_100", 0.5513, 0),
+  digitContractType: "DIGITEVEN",
+};
 export const fast3RDBearDigitOdd  = makeStrat("RDBEAR",   0.5550, 0);  // had -$14 last hour but +$268 paper
 export const fast3RDBullDigitOdd  = makeStrat("RDBULL",   0.5546, 79);
 export const fast3JD75DigitOdd    = makeStrat("JD75",     0.5518, 203);

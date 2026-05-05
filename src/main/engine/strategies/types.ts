@@ -49,6 +49,12 @@ export type StrategyDescriptor = {
    *  would burn the edge by amplifying rare losing streaks. */
   useMartingale?: boolean;
 
+  /** Optional override for tick-level DIGIT strategies (granularity===0). When
+   *  unset, the fast3 dispatcher defaults to DIGITODD. Setting "DIGITEVEN" on
+   *  one strategy lets the operator screen even-digit performance on a single
+   *  symbol without changing any other strategy's behavior. */
+  digitContractType?: "DIGITODD" | "DIGITEVEN";
+
   /** Snapshot of the validation run that promoted this strategy from "tuning" to "tradeable". */
   validation: {
     /** ISO date (YYYY-MM-DD) of the validation run. */
