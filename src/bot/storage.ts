@@ -191,6 +191,13 @@ export function clampDerivMultiplier(m: number): number {
  *  but $2000 is a safe universal upper bound. */
 export const DERIV_MIN_STAKE_USD = 1;
 export const DERIV_MAX_STAKE_USD = 2000;
+/** Deriv min stake on DIGIT-family contracts (DIGITODD/EVEN/OVER/UNDER/
+ *  MATCH/DIFF) is $0.35 USD on synthetics — verified empirically against
+ *  R_100 proposal endpoint 2026-05-05: $0.35 accepts, $0.34 rejects with
+ *  "Please enter a stake amount that's at least 0.35.". Fast3 (DIGIT-only)
+ *  uses this; Fast2 and the real candle book (both MULTIPLIER) stay on
+ *  the $1 minimum. */
+export const DERIV_MIN_STAKE_DIGIT_USD = 0.35;
 /** Deriv minimum take_profit / stop_loss amount on multiplier contracts.
  *  ContractBuyValidationError fires below this. Universal minimum across
  *  synthetics. */

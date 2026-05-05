@@ -7,7 +7,11 @@ import React, { useEffect, useState } from "react";
 import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast3Config, type Fast3PaperResp, type FastMartingaleSnapshot, type RealTrade, type StateResp, type StrategyStats } from "../api";
 
 const MART_MULT_OPTIONS = [1.3, 1.5, 1.7, 2.0, 2.2];
-const DERIV_MIN_STAKE = 1;
+// Fast3 trades DIGIT-family contracts (DIGITODD/EVEN/OVER/UNDER) which
+// accept a $0.35 USD min stake on synthetics — verified empirically against
+// Deriv's R_100 proposal endpoint 2026-05-05. MULTIPLIER contracts (Fast2,
+// real candle book) require $1 minimum.
+const DERIV_MIN_STAKE = 0.35;
 const DERIV_MAX_STAKE = 2000;
 
 export function Fast3Panel({ state, doAction, pending }: {
@@ -168,7 +172,7 @@ export function Fast3Panel({ state, doAction, pending }: {
             </select>
           </ConfigField>
           <ConfigField label={`Base Stake — Deriv min $${DERIV_MIN_STAKE}`}>
-            <input className="filter-input" type="number" step="0.5" min={DERIV_MIN_STAKE} max={DERIV_MAX_STAKE} value={cfg.baseStake} onChange={(e) => setCfg({ baseStake: Number(e.target.value) })} />
+            <input className="filter-input" type="number" step="0.05" min={DERIV_MIN_STAKE} max={DERIV_MAX_STAKE} value={cfg.baseStake} onChange={(e) => setCfg({ baseStake: Number(e.target.value) })} />
           </ConfigField>
           <ConfigField label="Max Ladder Levels (depth)">
             <input className="filter-input" type="number" step="1" min={1} max={10} value={cfg.maxLevels} onChange={(e) => setCfg({ maxLevels: Number(e.target.value) })} />

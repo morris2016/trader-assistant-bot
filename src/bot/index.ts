@@ -24,7 +24,7 @@ import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DEFAULT_REAL_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config, type RealConfig } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DEFAULT_REAL_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, DERIV_MIN_STAKE_DIGIT_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config, type RealConfig } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -652,9 +652,11 @@ async function main() {
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
-        if (next.baseStake < DERIV_MIN_STAKE_USD) next.baseStake = DERIV_MIN_STAKE_USD;
+        // Fast3 = DIGIT contracts → $0.35 floor (verified empirically against
+        // Deriv's R_100 proposal endpoint 2026-05-05).
+        if (next.baseStake < DERIV_MIN_STAKE_DIGIT_USD) next.baseStake = DERIV_MIN_STAKE_DIGIT_USD;
         if (next.perTradeCap > DERIV_MAX_STAKE_USD) next.perTradeCap = DERIV_MAX_STAKE_USD;
-        if (next.perTradeCap < DERIV_MIN_STAKE_USD) next.perTradeCap = DERIV_MIN_STAKE_USD;
+        if (next.perTradeCap < DERIV_MIN_STAKE_DIGIT_USD) next.perTradeCap = DERIV_MIN_STAKE_DIGIT_USD;
         fast3Config = next;
         persist();
         log.warn("fast3Config updated via API", { before, after: next });
@@ -687,9 +689,10 @@ async function main() {
         }
         const cleaned: Partial<Fast3Config> = {};
         if (patch.martingaleMultiplier != null && isFinite(patch.martingaleMultiplier) && patch.martingaleMultiplier > 1) cleaned.martingaleMultiplier = patch.martingaleMultiplier;
-        if (patch.baseStake != null && isFinite(patch.baseStake) && patch.baseStake >= DERIV_MIN_STAKE_USD) cleaned.baseStake = patch.baseStake;
+        // Fast3 = DIGIT contracts → $0.35 floor.
+        if (patch.baseStake != null && isFinite(patch.baseStake) && patch.baseStake >= DERIV_MIN_STAKE_DIGIT_USD) cleaned.baseStake = patch.baseStake;
         if (patch.maxLevels != null && isFinite(patch.maxLevels) && patch.maxLevels >= 1) cleaned.maxLevels = Math.round(patch.maxLevels);
-        if (patch.perTradeCap != null && isFinite(patch.perTradeCap) && patch.perTradeCap >= DERIV_MIN_STAKE_USD) cleaned.perTradeCap = Math.min(patch.perTradeCap, DERIV_MAX_STAKE_USD);
+        if (patch.perTradeCap != null && isFinite(patch.perTradeCap) && patch.perTradeCap >= DERIV_MIN_STAKE_DIGIT_USD) cleaned.perTradeCap = Math.min(patch.perTradeCap, DERIV_MAX_STAKE_USD);
         if (typeof patch.enabled === "boolean") cleaned.enabled = patch.enabled;
         if (patch.sideFilter === "both" || patch.sideFilter === "BUY" || patch.sideFilter === "SELL") cleaned.sideFilter = patch.sideFilter;
         const merged: Partial<Fast3Config> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
