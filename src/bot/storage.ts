@@ -381,11 +381,18 @@ export class BotStorage {
           ?? (parsed as { fast2Martingale?: Record<string, MartingaleState> }).fast2Martingale
           ?? {},
         fast2MartingaleLive: parsed.fast2MartingaleLive ?? {},
-        fast2Config: applyFast2EnvOverrides({
-          ...DEFAULT_FAST2_CONFIG,
-          ...(parsed.fast2Config ?? {}),
-          ...(prefs.fast2Config ?? {}),
-        }),
+        fast2Config: {
+          ...applyFast2EnvOverrides({
+            ...DEFAULT_FAST2_CONFIG,
+            ...(parsed.fast2Config ?? {}),
+            ...(prefs.fast2Config ?? {}),
+          }),
+          // Synth sandbox always starts paper. Operator can flip to live
+          // via the Synth panel toggle after each restart, but unattended
+          // restarts (Railway redeploy, container OOM) won't auto-resume
+          // live trading on a sandbox that's still being validated.
+          liveTradingEnabled: false,
+        },
         fast3Paper: parsed.fast3Paper ?? emptyPaperState(41),
         fast3MartingalePaper: parsed.fast3MartingalePaper ?? {},
         fast3MartingaleLive: parsed.fast3MartingaleLive ?? {},
