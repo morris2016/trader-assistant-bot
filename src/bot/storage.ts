@@ -415,7 +415,14 @@ export class BotStorage {
         return {
           ...empty,
           fast1Config: { ...empty.fast1Config, ...(prefs.fast1Config ?? {}) },
-          fast2Config: applyFast2EnvOverrides({ ...empty.fast2Config, ...(prefs.fast2Config ?? {}) }),
+          // Synth (fast2) sandbox: force liveTradingEnabled=false on every
+          // boot regardless of persisted state or env. Same reason as the
+          // try-block force above — unattended redeploys must not silently
+          // resume live trading on a sandbox under validation.
+          fast2Config: {
+            ...applyFast2EnvOverrides({ ...empty.fast2Config, ...(prefs.fast2Config ?? {}) }),
+            liveTradingEnabled: false,
+          },
           fast3Config: { ...empty.fast3Config, ...(prefs.fast3Config ?? {}) },
           realConfig: { ...empty.realConfig, ...(prefs.realConfig ?? {}) },
         };
