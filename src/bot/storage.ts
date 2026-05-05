@@ -60,6 +60,12 @@ export type FastSandboxConfig = {
    *  Telemetry counters (wins/losses) always reflect the actual trade
    *  outcome regardless of mode. */
   martingaleMode: "classic" | "anti";
+  /** Optional per-step decay on the martingale multiplier. Each successive
+   *  escalator factor is `multiplier × decay^step`, so the climb slows and
+   *  eventually reverses (stake descends back toward base). Unset or 1.0 =
+   *  classic monotone climb. See MartingaleParams.martingaleDecay for the
+   *  closed-form stake equation. */
+  martingaleDecay?: number;
   /** Live-trading toggle for THIS sandbox specifically. When true, signals
    *  bypass the paper engine and route to real.placeTrade — actual money
    *  on the Deriv account. The paper sandbox stops opening new positions;
@@ -168,6 +174,11 @@ export const DEFAULT_FAST3_CONFIG: Fast3Config = {
   sideFilter: "both",
   martingaleMode: "classic",
   liveTradingEnabled: false,       // PAPER ONLY by default — flip after live wiring
+  // Decay 0.75: each successive escalator factor shrinks by 25%. With base
+  // multiplier 1.5×, factors run 1.50, 1.125, 0.844, 0.633, 0.475, ... so
+  // the ladder climbs slowly then descends naturally — caps single-trade
+  // exposure on long streaks while preserving the recovery shape.
+  martingaleDecay: 0.75,
 };
 
 /** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.

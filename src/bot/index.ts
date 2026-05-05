@@ -19,7 +19,7 @@ import { FAST_STRATEGIES, isFastSymbol, fastStrategiesForSymbol } from "../main/
 import { FAST2_STRATEGIES } from "../main/engine/fast2-strategies";
 import { FAST3_STRATEGIES, FAST3_DETECTOR_TAG } from "../main/engine/fast3-strategies";
 import { FAST2_DIGITOVER0_DETECTOR_TAG } from "../main/engine/fast2-strategies";
-import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
+import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, stakeFactorFor, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
@@ -165,6 +165,7 @@ async function main() {
       multiplier: cfg.martingaleMultiplier,
       maxLevels: cfg.maxLevels,
       perTradeCap: cfg.perTradeCap,
+      martingaleDecay: cfg.martingaleDecay,
     };
   };
   log.info("fast2Paper: state loaded", {
@@ -436,6 +437,7 @@ async function main() {
         multiplier: sCfgLive.martingaleMultiplier,
         maxLevels: sCfgLive.maxLevels,
         perTradeCap: sCfgLive.perTradeCap,
+        martingaleDecay: sCfgLive.martingaleDecay,
       };
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
       fast3MartingaleLive[t.sandboxStrategyId] = nextLadder;
@@ -652,6 +654,7 @@ async function main() {
         if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
+        if (next.martingaleDecay != null && (!isFinite(next.martingaleDecay) || next.martingaleDecay <= 0 || next.martingaleDecay > 1)) next.martingaleDecay = before.martingaleDecay;
         // Fast3 = DIGIT contracts → $0.35 floor (verified empirically against
         // Deriv's R_100 proposal endpoint 2026-05-05).
         if (next.baseStake < DERIV_MIN_STAKE_DIGIT_USD) next.baseStake = DERIV_MIN_STAKE_DIGIT_USD;
@@ -693,6 +696,7 @@ async function main() {
         if (patch.baseStake != null && isFinite(patch.baseStake) && patch.baseStake >= DERIV_MIN_STAKE_DIGIT_USD) cleaned.baseStake = patch.baseStake;
         if (patch.maxLevels != null && isFinite(patch.maxLevels) && patch.maxLevels >= 1) cleaned.maxLevels = Math.round(patch.maxLevels);
         if (patch.perTradeCap != null && isFinite(patch.perTradeCap) && patch.perTradeCap >= DERIV_MIN_STAKE_DIGIT_USD) cleaned.perTradeCap = Math.min(patch.perTradeCap, DERIV_MAX_STAKE_USD);
+        if (patch.martingaleDecay != null && isFinite(patch.martingaleDecay) && patch.martingaleDecay > 0 && patch.martingaleDecay <= 1) cleaned.martingaleDecay = patch.martingaleDecay;
         if (typeof patch.enabled === "boolean") cleaned.enabled = patch.enabled;
         if (patch.sideFilter === "both" || patch.sideFilter === "BUY" || patch.sideFilter === "SELL") cleaned.sideFilter = patch.sideFilter;
         const merged: Partial<Fast3Config> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
@@ -940,7 +944,7 @@ async function main() {
       for (const s of FAST3_STRATEGIES) {
         const m = map[s.id] ?? emptyMartingaleState();
         const cfg = fast3ConfigFor(s.id);
-        const params: MartingaleParams = { baseStake: cfg.baseStake, multiplier: cfg.martingaleMultiplier, maxLevels: cfg.maxLevels, perTradeCap: cfg.perTradeCap };
+        const params: MartingaleParams = { baseStake: cfg.baseStake, multiplier: cfg.martingaleMultiplier, maxLevels: cfg.maxLevels, perTradeCap: cfg.perTradeCap, martingaleDecay: cfg.martingaleDecay };
         out[s.id] = { level: m.level, wins: m.wins, losses: m.losses, circuitBreakers: m.circuitBreakers, lastCircuitBreakerAt: m.lastCircuitBreakerAt, nextStake: fastNextStake(m, params) };
       }
       return out;
@@ -2147,6 +2151,7 @@ async function main() {
         multiplier: cfg.martingaleMultiplier,
         maxLevels: cfg.maxLevels,
         perTradeCap: cfg.perTradeCap,
+        martingaleDecay: cfg.martingaleDecay,
       };
       const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
       ladderMap[pending.strategyId] = nextLadder;
@@ -2215,7 +2220,10 @@ async function main() {
       const mode = fast3ActiveMode();
       const ladderMap = mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
-      const stake = Number((cfg.baseStake * Math.pow(cfg.martingaleMultiplier, ladder.level)).toFixed(2));
+      // Closed-form decaying-multiplier stake: classic climb when decay=1,
+      // self-descending tent when decay<1 (e.g. 0.75). Mirrors the formula
+      // in martingale.ts nextStake() so paper and live agree exactly.
+      const stake = Number((cfg.baseStake * stakeFactorFor(ladder.level, cfg.martingaleMultiplier, cfg.martingaleDecay)).toFixed(2));
       // Affordability + stake cap
       const cappedStake = Math.min(stake, cfg.perTradeCap);
       const ps = fast3Paper.getState();
@@ -2309,6 +2317,7 @@ async function main() {
         multiplier: cfg.martingaleMultiplier,
         maxLevels: cfg.maxLevels,
         perTradeCap: cfg.perTradeCap,
+        martingaleDecay: cfg.martingaleDecay,
       };
       const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
       ladderMap[pending.strategyId] = nextLadder;
@@ -2337,7 +2346,7 @@ async function main() {
       const mode = fast2ActiveMode();
       const ladderMap = mode === "live" ? fast2MartingaleLive : fast2MartingalePaper;
       const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
-      const stake = Number((cfg.baseStake * Math.pow(cfg.martingaleMultiplier, ladder.level)).toFixed(2));
+      const stake = Number((cfg.baseStake * stakeFactorFor(ladder.level, cfg.martingaleMultiplier, cfg.martingaleDecay)).toFixed(2));
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
       const ps = fast2Paper.getState();
       if (mode === "paper" && ps.balance < finalStake) {

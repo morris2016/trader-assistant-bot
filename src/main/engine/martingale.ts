@@ -36,6 +36,18 @@ export type MartingaleParams = {
   maxLevels: number;
   /** Hard cap on any single trade's stake (after multiplier applied). */
   perTradeCap: number;
+  /** Optional per-step decay applied to the multiplier. Each consecutive
+   *  loss multiplies stake by `multiplier × decay^(stepIndex)` instead of
+   *  the static `multiplier`, so each successive escalator factor is
+   *  smaller. Once `multiplier × decay^k` drops below 1.0, the ladder
+   *  starts DESCENDING naturally (slowing the climb, then pulling stake
+   *  back toward base). Closed form:
+   *      stake(L) = base × multiplier^L × decay^(L*(L-1)/2)
+   *  Example with base=$1, multiplier=2.2, decay=0.75:
+   *    L0 $1.00   L1 $2.20   L2 $3.63   L3 $4.49   L4 $4.17
+   *    L5 $2.90   L6 $1.51   L7 $0.59   ← natural descent
+   *  Unset or 1.0 = classic monotone climb. */
+  martingaleDecay?: number;
 };
 
 export const DEFAULT_FAST_MARTINGALE: MartingaleParams = {
@@ -62,9 +74,22 @@ export function emptyMartingaleState(): MartingaleState {
  * trade settles to advance the ladder.
  */
 export function nextStake(state: MartingaleState, params: MartingaleParams): number {
-  const raw = params.baseStake * Math.pow(params.multiplier, state.level);
+  const raw = params.baseStake * stakeFactorFor(state.level, params.multiplier, params.martingaleDecay);
   const capped = Math.min(raw, params.perTradeCap);
   return Math.round(capped * 100) / 100;
+}
+
+/** Closed-form stake factor at ladder level L given a base multiplier and
+ *  optional per-step decay. Decay 1.0 (or unset) = classic monotone climb
+ *  with stake = multiplier^L. Decay < 1.0 makes each successive escalator
+ *  factor smaller, eventually flipping below 1.0 and pulling stake back
+ *  toward base. Exported so call sites that hand-roll the formula (the
+ *  fast3 / fast2 tick dispatchers) produce identical values. */
+export function stakeFactorFor(level: number, multiplier: number, decay: number | undefined): number {
+  const d = decay == null || decay <= 0 ? 1 : decay;
+  if (d === 1) return Math.pow(multiplier, level);
+  // stake(L) = multiplier^L × decay^(L*(L-1)/2)
+  return Math.pow(multiplier, level) * Math.pow(d, (level * (level - 1)) / 2);
 }
 
 /** Ladder advance direction.

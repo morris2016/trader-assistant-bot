@@ -61,7 +61,8 @@ export function Fast3Panel({ state, doAction, pending }: {
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.sideFilter !== paper.config.sideFilter ||
     pendingCfg.martingaleMode !== paper.config.martingaleMode ||
-    pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
+    pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled ||
+    (pendingCfg.martingaleDecay ?? 1) !== (paper.config.martingaleDecay ?? 1)
   );
 
   // ── Mode-aware view: LIVE reads Deriv account balance + real trades
@@ -176,6 +177,18 @@ export function Fast3Panel({ state, doAction, pending }: {
           </ConfigField>
           <ConfigField label="Max Ladder Levels (depth)">
             <input className="filter-input" type="number" step="1" min={1} max={10} value={cfg.maxLevels} onChange={(e) => setCfg({ maxLevels: Number(e.target.value) })} />
+          </ConfigField>
+          <ConfigField label="Multiplier Decay (1 = off)">
+            <input
+              className="filter-input"
+              type="number"
+              step="0.05"
+              min={0.1}
+              max={1}
+              value={cfg.martingaleDecay ?? 1}
+              onChange={(e) => setCfg({ martingaleDecay: Number(e.target.value) || 1 })}
+              title="Per-step decay on the martingale multiplier. Each successive escalator factor is multiplier × decay^step. 1.0 = classic monotone climb. 0.75 = climb slows then naturally descends (e.g. with mult=2.2: 2.20, 1.65, 1.24, 0.93, 0.70, ...)."
+            />
           </ConfigField>
           <ConfigField label={`Per-Trade Cap ($) — Deriv DIGIT max ~$50`}>
             <input className="filter-input" type="number" step="1" min={DERIV_MIN_STAKE} max={DERIV_MAX_STAKE} value={cfg.perTradeCap} onChange={(e) => setCfg({ perTradeCap: Number(e.target.value) })} />

@@ -291,6 +291,11 @@ export function startHttpServer(opts: {
             if (lt != null) patch.liveTradingEnabled = lt === "true" || lt === "1";
             const en = url.searchParams.get("enabled");
             if (en != null) patch.enabled = en === "true" || en === "1";
+            const md = url.searchParams.get("martingaleDecay");
+            if (md != null && md !== "") {
+              const n = Number(md);
+              if (Number.isFinite(n) && n > 0 && n <= 1) patch.martingaleDecay = n;
+            }
             if (strategyId) {
               opts.manualControls.updateFast3StrategyConfig(strategyId, clear ? null : patch);
             } else {
