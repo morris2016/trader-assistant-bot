@@ -205,7 +205,7 @@ async function main() {
   // tick T and are waiting for tick T+1 to settle. Key = symbol; value =
   // { entryEpoch, stake, strategyId, mode }. The next tick on the same
   // symbol settles it.
-  type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live"; side?: "DIGITODD" | "DIGITEVEN" };
+  type Fast3Pending = { entryEpoch: number; stake: number; strategyId: string; mode: "paper" | "live"; side?: "DIGITODD" | "DIGITEVEN"; warmup?: boolean };
   const fast3Pending = new Map<string, Fast3Pending>();
   // ── Fast3 LIVE concurrency guards ──
   // No client-side throttling. Deriv enforces its own rate limits server-
@@ -230,6 +230,15 @@ async function main() {
   const FAST3_STREAK_PAUSE_MS = Number(process.env.FAST3_STREAK_PAUSE_MS ?? 1000);
   const fast3ConsecutiveLosses = new Map<string, number>();
   const fast3StreakPauseUntil = new Map<string, number>();
+  // ── Silent-observation warmup ──
+  // Each strategy watches the digit stream for FAST3_WARMUP_MS after its
+  // first observed tick — no real bets placed (no paper, no live), but
+  // hypothetical W/L is tallied at base stake into a shadow-stats map so
+  // when trading kicks in the panel already has accumulated WR instead of
+  // noisy 1-trade samples. After warmup ends, normal dispatch resumes.
+  const FAST3_WARMUP_MS = Number(process.env.FAST3_WARMUP_MS ?? 180_000);
+  const fast3FirstSeenAt = new Map<string, number>();
+  const fast3ShadowStats = new Map<string, { wins: number; losses: number; pnlUsd: number; lastBetAt: number }>();
   // ── Per-strategy runtime contract-type side ──
   // For strategies with flipOnLoss=true, track the live side here. Starts
   // at the descriptor's digitContractType (default DIGITODD); each losing
@@ -951,22 +960,34 @@ async function main() {
     },
     getFast3Config: () => ({ ...fast3Config }),
     getFast3StrategyStats: () => {
+      const now = Date.now();
       return FAST3_STRATEGIES.map((s) => {
         const sSyms = new Set(s.symbols);
         // Fast3 closed trades have detector === FAST3_DETECTOR_TAG
         const closed = fast3Paper.getState().closed.filter((t) => sSyms.has(t.symbol) && t.detector === FAST3_DETECTOR_TAG);
-        const wins = closed.filter((t) => t.pnl > 0).length;
-        const pnl = closed.reduce((acc, t) => acc + t.pnl, 0);
+        const realWins = closed.filter((t) => t.pnl > 0).length;
+        const realPnl = closed.reduce((acc, t) => acc + t.pnl, 0);
+        // Add shadow-stats from the silent warmup phase so the panel shows
+        // accumulated WR before real trading starts.
+        const shadow = fast3ShadowStats.get(s.id);
+        const wins = realWins + (shadow?.wins ?? 0);
+        const losses = (closed.length - realWins) + (shadow?.losses ?? 0);
+        const trades = wins + losses;
+        const pnl = realPnl + (shadow?.pnlUsd ?? 0);
+        const seenAt = fast3FirstSeenAt.get(s.id) ?? 0;
+        const warming = seenAt > 0 && now - seenAt < FAST3_WARMUP_MS;
         return {
           id: s.id, name: s.name, description: s.description, symbols: s.symbols, granularity: s.granularity,
           validation: { expectancyR: s.validation?.expectancyR, winRate: s.validation?.winRate, pnlUsd: s.validation?.pnlUsd, trades: s.validation?.trades },
           live: {
-            signals: closed.length, trades: closed.length, wins, losses: closed.length - wins,
-            pnlUsd: pnl, winRate: closed.length ? wins / closed.length : 0, expectancyR: 0,
-            lastSignalAt: closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null,
-            lastTradeAt: closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null,
+            signals: trades, trades, wins, losses,
+            pnlUsd: pnl, winRate: trades ? wins / trades : 0, expectancyR: 0,
+            lastSignalAt: shadow?.lastBetAt && shadow.lastBetAt > 0 ? Math.max(shadow.lastBetAt, ...closed.map((t) => t.closedAt ?? 0)) : (closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null),
+            lastTradeAt: shadow?.lastBetAt && shadow.lastBetAt > 0 ? Math.max(shadow.lastBetAt, ...closed.map((t) => t.closedAt ?? 0)) : (closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null),
             barsSeen: 0,
             lastBarSeenAt: null,
+            warmup: warming,
+            warmupRemainingMs: warming ? Math.max(0, FAST3_WARMUP_MS - (now - seenAt)) : 0,
           },
         };
       });
@@ -2144,6 +2165,18 @@ async function main() {
       // DIGITODD/EVEN payout: 1.95× win (1.92× on R_100). Net profit = stake * 0.95.
       const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
       const netPnl = wins ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
+      // Warmup short-circuit: tally into shadow stats only — no paper
+      // balance change, no ladder advance, no streak-pause/flip update.
+      // This way the panel accumulates ~3min of hypothetical WR while the
+      // bot stays silent.
+      if (pending.warmup) {
+        const s = fast3ShadowStats.get(pending.strategyId) ?? { wins: 0, losses: 0, pnlUsd: 0, lastBetAt: 0 };
+        if (wins) s.wins++; else s.losses++;
+        s.pnlUsd = Number((s.pnlUsd + netPnl).toFixed(2));
+        s.lastBetAt = Date.now();
+        fast3ShadowStats.set(pending.strategyId, s);
+        return;
+      }
       const ladderMap = pending.mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[pending.strategyId] ?? emptyMartingaleState();
       const params: MartingaleParams = {
@@ -2210,6 +2243,30 @@ async function main() {
       const cfg = fast3ConfigFor(strat.id);
       const enabled = (fast3Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
       if (!enabled) continue;
+      // Silent-observation warmup: track first-seen-at; for FAST3_WARMUP_MS
+      // after that, fire a shadow bet (no paper, no live) just to accumulate
+      // hypothetical W/L stats. Real placement resumes once warmup elapses.
+      const now = Date.now();
+      if (!fast3FirstSeenAt.has(strat.id)) {
+        fast3FirstSeenAt.set(strat.id, now);
+        log.info(`fast3 warmup START [${strat.id}] — silent observation for ${(FAST3_WARMUP_MS / 1000).toFixed(0)}s`);
+      }
+      const seenAt = fast3FirstSeenAt.get(strat.id) ?? now;
+      const inWarmup = now - seenAt < FAST3_WARMUP_MS;
+      if (inWarmup) {
+        // Shadow bet: record at base stake, no paper.applyDelta, no
+        // real.placeTrade, no ladder advance. Settle handler tallies into
+        // fast3ShadowStats.
+        fast3Pending.set(tick.symbol, {
+          entryEpoch: tick.epoch,
+          stake: cfg.baseStake,
+          strategyId: strat.id,
+          mode: "paper",
+          side: fast3SideFor(strat),
+          warmup: true,
+        });
+        break;
+      }
       // Loss-streak cooldown: skip while pause window is active. flipOnLoss
       // strategies bypass this — they want to switch sides on the next tick
       // immediately, not pause.
