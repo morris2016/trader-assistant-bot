@@ -216,6 +216,19 @@ async function main() {
   //   - open-contract: DIGITODD settles next tick, so don't stack bets on
   //     the same symbol
   const fast3LiveInFlight = new Set<string>();
+  // ── Per-strategy loss-streak pause ──
+  // After N consecutive losses on a strategy, pause that strategy for a short
+  // window. The hypothesis: a string of opposite-parity ticks just clobbered
+  // the ladder; sitting out the next few ticks lets the run end before the
+  // bot starts climbing the ladder again. Math says streaks have no auto-
+  // correlation in a memoryless RNG, but lower bet count = less total $ bled
+  // when the bot is in a bad regime, so it's a safe behavioral guard.
+  // Tunable via env: FAST3_STREAK_PAUSE_AFTER_LOSSES (default 3 consecutive
+  // losses), FAST3_STREAK_PAUSE_MS (default 1000ms cooldown).
+  const FAST3_STREAK_PAUSE_AFTER_LOSSES = Number(process.env.FAST3_STREAK_PAUSE_AFTER_LOSSES ?? 3);
+  const FAST3_STREAK_PAUSE_MS = Number(process.env.FAST3_STREAK_PAUSE_MS ?? 1000);
+  const fast3ConsecutiveLosses = new Map<string, number>();
+  const fast3StreakPauseUntil = new Map<string, number>();
   // Per-symbol decimal places for DIGITODD digit extraction. Populated at
   // boot from Deriv's active_symbols (pip_size → display_decimals). The
   // paper-mode settle path uses this to read the LAST digit of the quote
@@ -413,6 +426,21 @@ async function main() {
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
       fast3MartingaleLive[t.sandboxStrategyId] = nextLadder;
       log.info(`fast3 LIVE settled ${t.symbol} DIGITODD ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} contract=${t.contractId}`);
+      // Loss-streak pause: track consecutive losses on this strategy.
+      // After threshold, set pause-until so the dispatch loop skips this
+      // strategy for a brief window — the goal is to sit out the tail of
+      // a bad-parity streak before re-engaging the ladder.
+      if (pnl <= 0) {
+        const streak = (fast3ConsecutiveLosses.get(t.sandboxStrategyId) ?? 0) + 1;
+        fast3ConsecutiveLosses.set(t.sandboxStrategyId, streak);
+        if (streak >= FAST3_STREAK_PAUSE_AFTER_LOSSES) {
+          fast3StreakPauseUntil.set(t.sandboxStrategyId, Date.now() + FAST3_STREAK_PAUSE_MS);
+          fast3ConsecutiveLosses.set(t.sandboxStrategyId, 0);
+          log.info(`fast3 LIVE streak pause [${t.sandboxStrategyId}] — ${streak} losses → ${FAST3_STREAK_PAUSE_MS}ms cooldown`);
+        }
+      } else {
+        fast3ConsecutiveLosses.set(t.sandboxStrategyId, 0);
+      }
     }
     persist();
   });
@@ -2094,6 +2122,23 @@ async function main() {
       const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
       ladderMap[pending.strategyId] = nextLadder;
 
+      // Loss-streak pause (paper-mode tally; live-mode tally is handled in
+      // real.on("settled")). Mirrors the live-side logic so paper and live
+      // behave identically under the same streak.
+      if (pending.mode === "paper") {
+        if (netPnl <= 0) {
+          const streak = (fast3ConsecutiveLosses.get(pending.strategyId) ?? 0) + 1;
+          fast3ConsecutiveLosses.set(pending.strategyId, streak);
+          if (streak >= FAST3_STREAK_PAUSE_AFTER_LOSSES) {
+            fast3StreakPauseUntil.set(pending.strategyId, Date.now() + FAST3_STREAK_PAUSE_MS);
+            fast3ConsecutiveLosses.set(pending.strategyId, 0);
+            log.debug(`fast3Paper streak pause [${pending.strategyId}] — ${streak} losses → ${FAST3_STREAK_PAUSE_MS}ms cooldown`);
+          }
+        } else {
+          fast3ConsecutiveLosses.set(pending.strategyId, 0);
+        }
+      }
+
       if (pending.mode === "paper") {
         // Apply pnl to fast3 paper balance directly (no SL/TP geometry).
         const ps = fast3Paper.getState();
@@ -2122,6 +2167,11 @@ async function main() {
       const cfg = fast3ConfigFor(strat.id);
       const enabled = (fast3Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
       if (!enabled) continue;
+      // Loss-streak cooldown: skip this strategy while its pause window is
+      // active. Set when consecutive losses ≥ FAST3_STREAK_PAUSE_AFTER_LOSSES
+      // in the settle handlers above.
+      const pauseUntil = fast3StreakPauseUntil.get(strat.id) ?? 0;
+      if (Date.now() < pauseUntil) continue;
       const mode = fast3ActiveMode();
       const ladderMap = mode === "live" ? fast3MartingaleLive : fast3MartingalePaper;
       const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
