@@ -405,18 +405,22 @@ export class RealEngine extends EventEmitter {
 
     // Stake selection: override (martingale ladder) wins over adaptive-shift.
     // Adaptive shift: modulate stake by recent loss-pattern + side-bias + metals burst.
+    // Per-family broker minimum: DIGIT contracts accept $0.35 on Deriv
+    // synthetics; MULTIPLIER (and CALL_PUT) require $1. Verified empirically
+    // 2026-05-05 against R_100 proposal endpoint.
+    const familyMinStake = params.family === "DIGIT" ? 0.35 : this.minBrokerStake;
     let stake: number;
     let mult = 1;
     let reasons: string[] = [];
     if (params.stakeOverride != null && isFinite(params.stakeOverride) && params.stakeOverride > 0) {
-      stake = Math.max(this.minBrokerStake, Math.round(params.stakeOverride * 100) / 100);
+      stake = Math.max(familyMinStake, Math.round(params.stakeOverride * 100) / 100);
       reasons = ["override"];
     } else {
       const baseStake = this.perTradeMaxStake;
       const shift = computeStakeMultiplier(this.adaptiveShift, params.side, params.symbol);
       mult = shift.mult;
       reasons = shift.reasons;
-      stake = Math.max(this.minBrokerStake, Math.round(baseStake * mult * 100) / 100);
+      stake = Math.max(familyMinStake, Math.round(baseStake * mult * 100) / 100);
       if (mult < 1) {
         console.log(`[adaptive-shift] ${params.symbol} ${params.side} stake ${baseStake} → ${stake} (×${mult.toFixed(2)}: ${reasons.join("+")})`);
       }
