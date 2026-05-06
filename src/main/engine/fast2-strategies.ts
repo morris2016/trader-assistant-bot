@@ -17,7 +17,7 @@
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
-import { boom300nDrift, boom300nFadeFast, rdbullBreakout } from "./synth-strategies";
+import { boom300nDrift, rdbullBreakout } from "./synth-strategies";
 
 const RDBULL_MEANREV_PARAMS = {
   lookback: 15,
@@ -519,9 +519,11 @@ export const fast2R75DigitOver0 = makeDigitOver0Strat("R_75", 1.0000);
 // validated 3-window OOS — see synth-strategies.ts for stats.
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
   boom300nDrift,
-  boom300nFadeFast,    // 2026-05-06: Deriv-verified k=1 asym SL/TP @ 1m
   rdbullBreakout,
 ];
+// boom300n_fade_fast moved to FAST_STRATEGIES (Fast tab) 2026-05-06 — the
+// asymmetric-RR config (1m, k=1, 0.3/3.0 SL/TP) needed its own config
+// space separate from the equidistant-SL/TP synth pair.
 
 export const FAST2_DIGITOVER0_DETECTOR_TAG = TICK_DIGITOVER0_DETECTOR;
 

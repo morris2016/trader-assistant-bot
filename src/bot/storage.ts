@@ -66,6 +66,15 @@ export type FastSandboxConfig = {
    *  classic monotone climb. See MartingaleParams.martingaleDecay for the
    *  closed-form stake equation. */
   martingaleDecay?: number;
+  /** Optional ATR-based stop-loss multiplier override. When set in a
+   *  perStrategy[stratId] entry, overrides the strategy descriptor's
+   *  validated atrSlMult. Unset = use descriptor value. Lets the operator
+   *  tune the SL geometry per-strategy from the UI (e.g. boom300n_fade_fast
+   *  defaults to 0.3 but the operator can sweep 0.2-1.0 from the panel). */
+  atrSlMult?: number;
+  /** Optional ATR-based take-profit multiplier override. Default 3.0 for
+   *  boom300n_fade_fast; sweep range 1.0-5.0 covers the productive band. */
+  atrTpMult?: number;
   /** Live-trading toggle for THIS sandbox specifically. When true, signals
    *  bypass the paper engine and route to real.placeTrade — actual money
    *  on the Deriv account. The paper sandbox stops opening new positions;
@@ -100,25 +109,26 @@ export function resolveFastConfig(general: FastSandboxConfig, strategyId: string
   return { ...general, ...override, liveTradingEnabled: general.liveTradingEnabled };
 }
 
-/** Fast (sandbox 1) — defaults targeted at the existing 30× / 2.2× / 5L config
- *  that has been making real money on paper. Fees baked in for realistic P&L. */
+/** Fast (sandbox 1) — repurposed 2026-05-06 to host boom300n_fade_fast.
+ *  Defaults aligned to the validated combo from the 30d perday sweep
+ *  (k=1, sl=0.3×ATR, tp=3.0×ATR @ 1m, MULT=100). Commission set to
+ *  Deriv-verified 3% of stake (not 0.5% which underestimates by 6×).
+ *  Martingale 2.2× depth 5 with 0.75 decay matches the live 3h test. */
 export type Fast1Config = FastSandboxConfig;
 export const DEFAULT_FAST1_CONFIG: Fast1Config = {
-  // Fast1 paper shadow of the R-stack — same params as Fast2 to enable a clean
-  // paper-vs-live comparison. liveTradingEnabled stays false here so all
-  // Fast1 trades land in the paper account.
-  tradeMultiplier: 100,
-  martingaleMultiplier: 1.0,
-  baseStake: 3,
-  maxLevels: 1,
-  perTradeCap: 100,
-  commissionPct: 0.005,
-  entrySpreadBps: 1.0,
+  tradeMultiplier: 100,           // Deriv max valid on BOOM 300N (verified)
+  martingaleMultiplier: 2.2,      // 3h test recovered an L4 streak
+  martingaleDecay: 0.75,          // tent shape, not raw doubling
+  baseStake: 1,                   // start small; user can scale via UI
+  maxLevels: 5,                   // L0..L4 ladder, then circuit-break
+  perTradeCap: 200,               // L4 stake at $1 base = $117; cap at $200
+  commissionPct: 0.030,           // Deriv-verified BOOM 300N MULT fee
+  entrySpreadBps: 0,              // no contract-level spread (verified)
   slSlippageBps: 5.0,
-  forceMartingale: false,
+  forceMartingale: false,         // strategy descriptor doesn't have useMartingale
   sideFilter: "both",
-  martingaleMode: "classic",
-  liveTradingEnabled: false,    // PAPER ONLY — Fast1 is the paper shadow sandbox
+  martingaleMode: "classic",      // escalate on loss
+  liveTradingEnabled: false,      // PAPER ONLY by default — flip via UI
 };
 
 /** Fast2 — same shape as Fast1. Defaults aligned to Deriv's actual contract

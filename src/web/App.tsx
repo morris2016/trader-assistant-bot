@@ -5,8 +5,10 @@ import { ChartsPanel } from "./panels/Charts";
 import { RealPanel } from "./panels/Real";
 import { AdaptivePanel } from "./panels/Adaptive";
 import { SettingsPanel } from "./panels/Settings";
-// Fast (sandbox 1) panel removed 2026-05-04 — FAST_STRATEGIES is empty.
-// import { FastPanel } from "./panels/Fast";
+// Fast (sandbox 1) re-enabled 2026-05-06 — repurposed to host
+// boom300n_fade_fast (1m, k=1, asym 0.3/3.0 SL/TP) with its own config
+// space separate from Synth (fast2). UI label "Fade".
+import { FastPanel } from "./panels/Fast";
 // Synth sandbox 2026-05-04 — re-uses the fast2 sandbox infrastructure
 // (paper engine, ladders, candle dispatch, live toggle) but with the
 // recovered synth-strategies (boom300n drift / rdbull breakout). Internal
@@ -17,13 +19,14 @@ import { LogsPanel } from "./panels/Logs";
 
 const REFRESH_MS = 3000;
 
-type TabId = "overview" | "charts" | "real" | "synth" | "fast3" | "adaptive" | "logs" | "settings";
+type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "adaptive" | "logs" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
   { id: "charts",     label: "Charts",     icon: "📈" },
   { id: "real",       label: "Real",       icon: "$" },
   { id: "synth",      label: "Synth",      icon: "🧬" },
+  { id: "fade",       label: "Fade",       icon: "💥" },
   { id: "fast3",      label: "Fast3",      icon: "🎯" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "logs",       label: "Logs",       icon: "📋" },
@@ -86,6 +89,7 @@ export function App() {
             {tab === "charts"     && <ChartsPanel subs={subs} />}
             {tab === "real"       && <RealPanel state={state} strategies={strategies} />}
             {tab === "synth"      && <Fast2Panel state={state} doAction={doAction} pending={actionPending} />}
+            {tab === "fade"       && <FastPanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "fast3"      && <Fast3Panel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "logs"       && <LogsPanel />}
