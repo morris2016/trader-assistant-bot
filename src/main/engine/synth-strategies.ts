@@ -130,10 +130,66 @@ export const rdbullBreakout: StrategyDescriptor = {
   },
 };
 
+/**
+ * BOOM 300N fade-FAST (1m, k=1, asymmetric SL/TP).
+ *
+ * Validated 2026-05-06 with Deriv-verified fees (3% commission of stake,
+ * MULT capped at 100). 30-day perday sweep over 648 combos found k=1
+ * with TIGHT SL (0.3×ATR) and WIDE TP (3×ATR) dominates:
+ *   30d: +$11.02/day at $1 stake / MULT=100, 100% positive days,
+ *        $1.05 maxDD, 5.4 trades/hour, sharpe-daily +4.68
+ *   3h smoke test: +$62.25 at $5 stake (incl. one L4 mart recovery)
+ *
+ * Geometry: enter SELL at bar i close after 1 up-close (consec=1).
+ *   SL = entry + 0.3×ATR(14)  (tight stop — most trades exit on drift wave)
+ *   TP = entry − 3.0×ATR(14)  (wide target — catches the down-drift moves)
+ *   Time exit after 10 bars if neither hit.
+ *
+ * Per-strategy SL/TP override is supported via FastSandboxConfig.perStrategy.
+ */
+export const boom300nFadeFast: StrategyDescriptor = {
+  id: "boom300n_fade_fast",
+  name: "BOOM 300N fade-FAST (1m, k=1, asym SL/TP)",
+  description:
+    "1m drift fade on BOOM 300N. Enter SELL after a single up-close. " +
+    "Tight SL (0.3×ATR) + wide TP (3×ATR) — most trades take small losses, " +
+    "occasional ones catch the down-drift wave for big TP wins. " +
+    "~5 trades/hour at 44-55% WR.",
+  symbols: ["BOOM300N"],
+  granularity: 60,
+  detectors: defaultDetectorConfigs().map((d) => ({
+    ...d,
+    enabled: d.id === "driftPullback",
+    params: d.id === "driftPullback"
+      ? { driftDirection: -1, consec: 1, atrPeriod: 14, kAtr: 0.5 }
+      : d.params,
+  })),
+  atrSlMult: 0.3,
+  atrTpMult: 3.0,
+  costBps: 30.0,  // 3% of stake commission verified vs Deriv proposal endpoint
+  validation: {
+    validatedAt: "2026-05-06",
+    sampleDays: 30,
+    trades: 3982,
+    winRate: 0.443,
+    expectancyR: 0.083,
+    pnlUsd: 330.57,
+    stake: 1,
+    multiplier: 100,
+    notes: [
+      "Deriv-verified fees: 3% of stake commission (not 0.5%), MULT capped at 100 (500× rejected).",
+      "30d sweep over 648 combos: 100% positive days, sharpe-daily +4.68, $1.05 maxDD.",
+      "3h live smoke test 2026-05-06 14:14-15:14 UTC: +$62.25 at $5 base × 2.2× mart, 56% WR, hit L4 once and recovered.",
+      "Asymmetric geometry — most exits are SL hits ($-0.06 to $-3.75 at $5 stake), but TPs catch +$3-15 range moves.",
+      "BOOM 300N specific — params likely don't transfer to BOOM 500/1000.",
+    ],
+  },
+};
+
 // rdbullBreakout SUPERSEDED 2026-05-02 by fast2_rdbull_drift (same detector,
 // kAtr=2.5 instead of 2.0, validated on 9 months at 60.9% WR). Removed from
 // active list to prevent silent param collision on RDBULL@5m breakoutContinuation.
-export const SYNTH_STRATEGIES: StrategyDescriptor[] = [boom300nDrift];
+export const SYNTH_STRATEGIES: StrategyDescriptor[] = [boom300nDrift, boom300nFadeFast];
 
 export function synthStrategiesForSymbol(symbol: string): StrategyDescriptor[] {
   return SYNTH_STRATEGIES.filter((s) => s.symbols.includes(symbol));

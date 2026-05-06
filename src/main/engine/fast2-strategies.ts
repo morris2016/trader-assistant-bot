@@ -17,7 +17,7 @@
 
 import { defaultDetectorConfigs } from "./runner";
 import type { StrategyDescriptor } from "./strategies/types";
-import { boom300nDrift, rdbullBreakout } from "./synth-strategies";
+import { boom300nDrift, boom300nFadeFast, rdbullBreakout } from "./synth-strategies";
 
 const RDBULL_MEANREV_PARAMS = {
   lookback: 15,
@@ -519,6 +519,7 @@ export const fast2R75DigitOver0 = makeDigitOver0Strat("R_75", 1.0000);
 // validated 3-window OOS — see synth-strategies.ts for stats.
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
   boom300nDrift,
+  boom300nFadeFast,    // 2026-05-06: Deriv-verified k=1 asym SL/TP @ 1m
   rdbullBreakout,
 ];
 
