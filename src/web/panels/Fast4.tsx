@@ -129,7 +129,8 @@ export function Fast4Panel({ state, doAction, pending }: {
       )}
       <div className="banner" style={{ marginBottom: 12 }}>
         <strong>Fast4 Sandbox</strong> — independent copy of Fast3 with an opposite-side probe circuit breaker.
-        After <strong>{cfg.lossStreakTrigger}</strong> consecutive base-side losses, the next <strong>{cfg.probeCount}</strong> trades fire on the OPPOSITE digit side (martingale ladder continues through the probe).
+        After <strong>{cfg.lossStreakTrigger}</strong> consecutive base-side losses, the bot fires <strong>{cfg.probeCount}</strong> probes <em>interleaved</em> with base trades (P, B, P, B, P, then RESUME).
+        Probes use the OPPOSITE digit side; the martingale ladder continues through every trade. Interleaved bases do NOT count toward the streak.
         Currently <strong>{cfg.probeEnabled ? "ENABLED" : "DISABLED"}</strong>.
         {totalProbesFired > 0 && <> · <span className="mono">{totalProbesFired}</span> probe phase{totalProbesFired === 1 ? "" : "s"} fired so far</>}
         {stratsCurrentlyProbing > 0 && <> · <span className="pos">{stratsCurrentlyProbing} strategy{stratsCurrentlyProbing === 1 ? "" : "ies"} currently in probe phase</span></>}
@@ -377,18 +378,30 @@ export function Fast4Panel({ state, doAction, pending }: {
                       </tr>
                     );
                   })
-                : paperTrades.slice(0, 100).map((t) => (
-                    <tr key={t.id} style={{ background: t.isProbe ? "rgba(255, 153, 0, 0.07)" : undefined }}>
-                      <td>{fmtTime(t.closedAt)}</td>
-                      <td>{t.symbol}</td>
-                      <td className="muted" style={{ fontSize: 11 }}>—</td>
-                      <td className="mono" style={{ fontSize: 11 }}>{t.digitSide ? t.digitSide.replace("DIGIT", "") : "—"}</td>
-                      <td className="mono" style={{ fontSize: 11 }}>{t.isProbe ? <span className="pos">PROBE</span> : <span className="muted">base</span>}</td>
-                      <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
-                      <td className={t.pnl > 0 ? "pos" : "neg"}>{t.pnl > 0 ? "WIN" : "LOSS"}</td>
-                      <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}</td>
-                    </tr>
-                  ))}
+                : paperTrades.slice(0, 100).map((t) => {
+                    const inPhase = t.phaseKind === "probe" || t.phaseKind === "interleave";
+                    const bg = t.phaseKind === "probe"
+                      ? "rgba(255, 153, 0, 0.10)"
+                      : t.phaseKind === "interleave"
+                        ? "rgba(255, 200, 0, 0.05)"
+                        : undefined;
+                    const phaseLabel = t.phaseKind === "probe" ? <span className="pos">PROBE</span>
+                      : t.phaseKind === "interleave" ? <span style={{ color: "#cc9900" }}>interleave</span>
+                      : t.phaseKind === "exit" ? <span className="muted">resume</span>
+                      : <span className="muted">base</span>;
+                    return (
+                      <tr key={t.id} style={{ background: bg }}>
+                        <td>{fmtTime(t.closedAt)}</td>
+                        <td>{t.symbol}</td>
+                        <td className="muted" style={{ fontSize: 11 }}>—</td>
+                        <td className="mono" style={{ fontSize: 11 }}>{t.digitSide ? t.digitSide.replace("DIGIT", "") : "—"}</td>
+                        <td className="mono" style={{ fontSize: 11 }}>{phaseLabel}</td>
+                        <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
+                        <td className={t.pnl > 0 ? "pos" : "neg"}>{t.pnl > 0 ? "WIN" : "LOSS"}</td>
+                        <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
             </tbody>
           </table>
         )}

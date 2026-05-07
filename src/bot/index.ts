@@ -314,28 +314,76 @@ async function main() {
     mode: "paper" | "live";
     side: "DIGITODD" | "DIGITEVEN";
     isProbe: boolean;
+    /** State-machine kind at dispatch — needed at settle to distinguish
+     *  interleaved base trades from normal base trades (only normal base
+     *  trades increment baseLossStreak). */
+    phaseKind: "normal" | "probe" | "interleave" | "exit";
     warmup?: boolean;
   };
   const fast4Pending = new Map<string, Fast4Pending>();
   const fast4LiveInFlight = new Set<string>();
-  // Probe state machine — per strategy:
-  //   baseLossStreak  = consecutive losses on the BASE side only
-  //   probeRemaining  = >0 means we are in probe phase, dispatch opposite side
-  // Both reset to 0 in the natural cases described in the dispatcher.
+  /** Per-contract phase tag for live trades — needed at settle time so the
+   *  state machine can distinguish probe / interleave / normal-base outcomes
+   *  (real.placeTrade doesn't carry our phaseKind through to settle). */
+  const fast4LivePhaseByContract = new Map<number, "normal" | "probe" | "interleave" | "exit">();
+  // Probe state machine — per strategy. Pattern (probeCount=3, defaults):
+  //   ... base losses reach trigger ...
+  //   T1 PROBE  (decrements probeRemaining 3→2, sets lastFiredProbe=true)
+  //   T2 BASE   (interleaved — does NOT count toward streak; resets lastFiredProbe=false)
+  //   T3 PROBE  (probeRemaining 2→1, lastFiredProbe=true)
+  //   T4 BASE   (interleaved)
+  //   T5 PROBE  (probeRemaining 1→0, lastFiredProbe=true)
+  //   T6 BASE   (RESUME — probeRemaining=0 + lastFiredProbe=true → exit phase,
+  //              this trade fires as NORMAL base with streak counting active)
   type Fast4ProbeState = {
+    /** Consecutive losses on the BASE side, only counted when NOT in probe phase. */
     baseLossStreak: number;
+    /** Probes still to fire in this phase. >0 = probe phase active. */
     probeRemaining: number;
-    /** For UI/debug — how many probe phases this strategy has triggered. */
+    /** True if the previous trade in this phase was a probe; controls
+     *  alternation between probe and interleaved-base trades. */
+    lastFiredProbe: boolean;
+    /** Total probe phases this strategy has triggered (UI/debug). */
     probesFired: number;
   };
   const fast4ProbeState = new Map<string, Fast4ProbeState>();
   const fast4ProbeFor = (strategyId: string): Fast4ProbeState => {
     let s = fast4ProbeState.get(strategyId);
     if (!s) {
-      s = { baseLossStreak: 0, probeRemaining: 0, probesFired: 0 };
+      s = { baseLossStreak: 0, probeRemaining: 0, lastFiredProbe: false, probesFired: 0 };
       fast4ProbeState.set(strategyId, s);
     }
     return s;
+  };
+  /** Decide whether the next trade in the probe-phase rotation should be a
+   *  PROBE (opposite side) or an INTERLEAVED BASE. Returns:
+   *    - { kind: "normal" } when not in probe phase (counts toward streak)
+   *    - { kind: "probe" } when in phase and last was base (or first)
+   *    - { kind: "interleave" } when in phase and last was probe (still has probes left)
+   *    - { kind: "exit" } when in phase but no probes left and last was probe
+   *      (treat as normal base trade, exit the phase)
+   *  Caller mutates the state after dispatch via fast4PostDispatch(). */
+  const fast4DecideNextTrade = (probe: Fast4ProbeState): { kind: "normal" | "probe" | "interleave" | "exit" } => {
+    if (probe.probeRemaining === 0 && !probe.lastFiredProbe) return { kind: "normal" };
+    if (probe.probeRemaining === 0 && probe.lastFiredProbe)  return { kind: "exit" };
+    // probeRemaining > 0
+    if (!probe.lastFiredProbe) return { kind: "probe" };
+    return { kind: "interleave" };
+  };
+  /** Apply state-machine transition AT DISPATCH time (when we commit to firing
+   *  a trade with a particular kind). Settle handlers call fast4PostSettle()
+   *  for the loss-streak and trigger logic. */
+  const fast4PostDispatch = (probe: Fast4ProbeState, kind: "normal" | "probe" | "interleave" | "exit") => {
+    if (kind === "probe") {
+      probe.probeRemaining = Math.max(0, probe.probeRemaining - 1);
+      probe.lastFiredProbe = true;
+    } else if (kind === "interleave") {
+      probe.lastFiredProbe = false;
+    } else if (kind === "exit") {
+      // Trade dispatches as normal base; clear lingering phase flag.
+      probe.lastFiredProbe = false;
+    }
+    // "normal" kind: no state change at dispatch time.
   };
   const fast4BaseSideFor = (strat: StrategyDescriptor): "DIGITODD" | "DIGITEVEN" =>
     strat.digitContractType ?? "DIGITODD";
@@ -571,26 +619,30 @@ async function main() {
       };
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
       fast4MartingaleLive[t.sandboxStrategyId] = nextLadder;
-      // Advance probe state machine. We need to know whether THIS settled
-      // contract was a probe or base trade; the contract's RealTrade carries
-      // the chosen side via digitContractType — compare against the strat's
-      // base side.
+      // Advance probe state machine. The phase kind chosen at dispatch was
+      // recorded into fast4LivePhaseByContract; only "normal" base outcomes
+      // count toward baseLossStreak. probeRemaining/lastFiredProbe were
+      // already updated at dispatch — settle just adjusts the streak.
       const fast4Strat = FAST4_STRATEGIES.find((s) => s.id === t.sandboxStrategyId);
       const probe = fast4ProbeFor(t.sandboxStrategyId);
+      const phaseKind = fast4LivePhaseByContract.get(t.contractId) ?? "normal";
+      fast4LivePhaseByContract.delete(t.contractId);
       if (fast4Strat) {
         const baseSide = fast4BaseSideFor(fast4Strat);
-        const wasProbeContract = probe.probeRemaining > 0; // pre-settle probeRemaining decides
-        if (wasProbeContract) {
-          probe.probeRemaining = Math.max(0, probe.probeRemaining - 1);
+        if (phaseKind === "probe") {
           log.info(`fast4 LIVE PROBE settled ${t.symbol} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} probeRemaining=${probe.probeRemaining} lvl=${nextLadder.level}`);
+        } else if (phaseKind === "interleave") {
+          log.info(`fast4 LIVE INTERLEAVE settled ${t.symbol} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} probeRemaining=${probe.probeRemaining} lvl=${nextLadder.level}`);
         } else {
+          // "normal" or "exit" — both count toward streak as a normal base.
           if (pnl <= 0) {
             probe.baseLossStreak++;
             if (sCfgLive.probeEnabled && probe.baseLossStreak >= sCfgLive.lossStreakTrigger) {
               probe.probeRemaining = sCfgLive.probeCount;
               probe.probesFired++;
               probe.baseLossStreak = 0;
-              log.warn(`fast4 LIVE PROBE TRIGGERED [${t.sandboxStrategyId}] base-side losses=${sCfgLive.lossStreakTrigger} → flip to ${fast4OppositeSide(baseSide)} for ${sCfgLive.probeCount} trades`);
+              probe.lastFiredProbe = false;
+              log.warn(`fast4 LIVE PROBE TRIGGERED [${t.sandboxStrategyId}] base-side losses=${sCfgLive.lossStreakTrigger} → interleave ${fast4OppositeSide(baseSide)} probes for ${sCfgLive.probeCount} rounds`);
             }
           } else {
             probe.baseLossStreak = 0;
@@ -2616,20 +2668,28 @@ async function main() {
 
       // Advance the probe state machine (paper mode only — live settles
       // route through real.on("settled") with the same logic).
+      // Streak counting only happens for "normal" base trades — interleaved
+      // base trades during a probe phase do NOT count toward the streak.
       if (pending.mode === "paper" && stratForPending) {
         const baseSide = fast4BaseSideFor(stratForPending);
         const probe = fast4ProbeFor(pending.strategyId);
         if (pending.isProbe) {
-          probe.probeRemaining = Math.max(0, probe.probeRemaining - 1);
+          // Probe trade outcome — phase mechanics already advanced at dispatch.
+          // No change to baseLossStreak.
           log.debug(`fast4Paper PROBE settled ${tick.symbol} ${wins ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} probeRemaining=${probe.probeRemaining}`);
+        } else if (pending.phaseKind === "interleave") {
+          // Interleaved base inside probe phase — does NOT count toward streak.
+          log.debug(`fast4Paper INTERLEAVE settled ${tick.symbol} ${wins ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} probeRemaining=${probe.probeRemaining}`);
         } else {
+          // Normal base trade — count toward streak and check trigger.
           if (netPnl <= 0) {
             probe.baseLossStreak++;
             if (cfg.probeEnabled && probe.baseLossStreak >= cfg.lossStreakTrigger) {
               probe.probeRemaining = cfg.probeCount;
               probe.probesFired++;
               probe.baseLossStreak = 0;
-              log.warn(`fast4Paper PROBE TRIGGERED [${pending.strategyId}] base losses=${cfg.lossStreakTrigger} → flip to ${fast4OppositeSide(baseSide)} for ${cfg.probeCount} trades`);
+              probe.lastFiredProbe = false; // ensures next dispatch fires a PROBE
+              log.warn(`fast4Paper PROBE TRIGGERED [${pending.strategyId}] base losses=${cfg.lossStreakTrigger} → interleave ${fast4OppositeSide(baseSide)} probes for ${cfg.probeCount} rounds`);
             }
           } else {
             probe.baseLossStreak = 0;
@@ -2654,8 +2714,13 @@ async function main() {
           exitPrice: tick.quote,
           digitSide: pending.side,
           isProbe: pending.isProbe,
+          phaseKind: pending.phaseKind,
         });
-        log.debug(`fast4Paper settled ${tick.symbol} ${pending.side}${pending.isProbe ? " PROBE" : ""} ${netPnl > 0 ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
+        const phaseTag = pending.phaseKind === "probe" ? " PROBE"
+          : pending.phaseKind === "interleave" ? " INTERLEAVE"
+          : pending.phaseKind === "exit" ? " RESUME"
+          : "";
+        log.debug(`fast4Paper settled ${tick.symbol} ${pending.side}${phaseTag} ${netPnl > 0 ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
       }
     }
 
@@ -2677,13 +2742,23 @@ async function main() {
       }
       const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
 
-      // Decide which digit side this trade fires on. Probe phase wins.
+      // Decide which side & phase this trade fires on. Interleaved bases
+      // during probe phase fire on the BASE side but DON'T count toward
+      // streak. The state-machine transition is applied at dispatch (so
+      // the next tick sees the updated phase).
       const probe = fast4ProbeFor(strat.id);
       const baseSide = fast4BaseSideFor(strat);
-      const isProbeTrade = probe.probeRemaining > 0;
+      const decision = fast4DecideNextTrade(probe);
+      const isProbeTrade = decision.kind === "probe";
       const sideForThisTrade: "DIGITODD" | "DIGITEVEN" = isProbeTrade
         ? fast4OppositeSide(baseSide)
         : baseSide;
+      fast4PostDispatch(probe, decision.kind);
+
+      const phaseTag = decision.kind === "probe" ? " PROBE"
+        : decision.kind === "interleave" ? " INTERLEAVE"
+        : decision.kind === "exit" ? " RESUME"
+        : "";
 
       if (mode === "live") {
         if (fast4LiveInFlight.has(tick.symbol)) continue;
@@ -2701,7 +2776,8 @@ async function main() {
           sandboxStrategyId: strat.id,
           entryPriceHint: tick.quote,
         }).then((trade) => {
-          log.info(`fast4 LIVE opened ${sideForThisTrade}${isProbeTrade ? " PROBE" : ""} ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+          fast4LivePhaseByContract.set(trade.contractId, decision.kind);
+          log.info(`fast4 LIVE opened ${sideForThisTrade}${phaseTag} ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
         }).catch((e) => {
           const msg = (e as Error).message;
           if (msg.includes("RateLimit") || msg.includes("rate limit")) {
@@ -2721,6 +2797,7 @@ async function main() {
         mode,
         side: sideForThisTrade,
         isProbe: isProbeTrade,
+        phaseKind: decision.kind,
       });
       break;
     }

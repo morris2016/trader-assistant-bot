@@ -142,6 +142,8 @@ export type ClosedPaperPosition = PaperPosition & {
   digitSide?: "DIGITODD" | "DIGITEVEN";
   /** True when this trade fired during a Fast4 probe phase. */
   isProbe?: boolean;
+  /** Fast4 phase-machine kind at dispatch (normal/probe/interleave/exit). */
+  phaseKind?: "normal" | "probe" | "interleave" | "exit";
 };
 export type PaperResp = {
   stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;

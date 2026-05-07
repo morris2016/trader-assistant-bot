@@ -63,6 +63,11 @@ export type ClosedPaperPosition = PaperPosition & {
   /** For DIGIT-family contracts: marks trades fired during a probe-phase
    *  (Fast4 circuit-breaker). Lets the UI distinguish probe vs base bets. */
   isProbe?: boolean;
+  /** Fast4 phase-machine kind at dispatch time: "probe" = opposite side,
+   *  "interleave" = base side inside probe phase (does NOT count toward
+   *  streak), "exit" = first base trade after phase ends, "normal" = base
+   *  trade in normal mode. */
+  phaseKind?: "normal" | "probe" | "interleave" | "exit";
 };
 
 export type PaperState = {
@@ -400,6 +405,8 @@ export class PaperEngine {
     digitSide?: "DIGITODD" | "DIGITEVEN";
     /** True when this trade was fired during a probe phase (Fast4). */
     isProbe?: boolean;
+    /** Fast4 phase-machine kind at dispatch (normal/probe/interleave/exit). */
+    phaseKind?: "normal" | "probe" | "interleave" | "exit";
   }): ClosedPaperPosition {
     const closed: ClosedPaperPosition = {
       id: randomUUID(),
@@ -430,6 +437,7 @@ export class PaperEngine {
       rMultiple: opts.stake > 0 ? round2(opts.pnl / opts.stake) : 0,
       digitSide: opts.digitSide,
       isProbe: opts.isProbe,
+      phaseKind: opts.phaseKind,
     };
     this.state.balance = round2(this.state.balance + pnl);
     this.state.daily.profit = round2(this.state.daily.profit + pnl);
