@@ -191,6 +191,49 @@ export const DEFAULT_FAST3_CONFIG: Fast3Config = {
   martingaleDecay: 0.75,
 };
 
+/** Fast4 — Fast3 baseline + opposite-side probe circuit breaker.
+ *
+ *  After `lossStreakTrigger` consecutive losses on the base side, the
+ *  dispatcher flips to the opposite digit side for `probeCount` trades
+ *  (continuing the martingale ladder through the probe — choice "C" from
+ *  the design discussion). Loss-streak counter only counts BASE-side
+ *  losses, resets on any base-side win, and is unaffected by probe
+ *  outcomes. After `probeCount` probe trades the dispatcher resumes
+ *  base-side trading.
+ *
+ *  Same shape as Fast3Config plus three probe knobs. */
+export type Fast4Config = FastSandboxConfig & {
+  /** Master switch for the probe circuit. When false, Fast4 behaves
+   *  identically to Fast3. */
+  probeEnabled: boolean;
+  /** Consecutive base-side losses required to trigger the probe phase.
+   *  Default 3 — matches the user-discovered pattern. */
+  lossStreakTrigger: number;
+  /** Number of opposite-side trades to fire after the streak triggers.
+   *  Default 2. After this many probes, base side resumes regardless of
+   *  probe outcomes. */
+  probeCount: number;
+};
+
+export const DEFAULT_FAST4_CONFIG: Fast4Config = {
+  tradeMultiplier: 100,
+  martingaleMultiplier: 1.5,
+  baseStake: 1,
+  maxLevels: 6,
+  perTradeCap: 50,
+  commissionPct: 0,
+  entrySpreadBps: 0,
+  slSlippageBps: 0,
+  forceMartingale: false,
+  sideFilter: "both",
+  martingaleMode: "classic",
+  liveTradingEnabled: false,
+  martingaleDecay: 0.75,
+  probeEnabled: true,
+  lossStreakTrigger: 3,
+  probeCount: 2,
+};
+
 /** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.
  *  Source: Deriv contracts_for response (multiplier_range field). Anything
  *  outside this set is rejected by the buy endpoint with
@@ -262,6 +305,13 @@ export type BotState = {
   fast3MartingalePaper: Record<string, MartingaleState>;
   fast3MartingaleLive: Record<string, MartingaleState>;
   fast3Config: Fast3Config;
+  /** Fast4 sandbox — Fast3 with opposite-side probe circuit breaker.
+   *  Independent paper balance / ladders / config so probe experiments
+   *  cannot perturb live Fast3. */
+  fast4Paper: PaperState;
+  fast4MartingalePaper: Record<string, MartingaleState>;
+  fast4MartingaleLive: Record<string, MartingaleState>;
+  fast4Config: Fast4Config;
   /** Real-strategy book runtime config — currently just a paper/live toggle
    *  so the operator can flip the candle-book strategies (silver/gold/plat)
    *  between paper and live without redeploying with a new LIVE_TRADING env. */
@@ -311,6 +361,10 @@ export function emptyBotState(): BotState {
     fast3MartingalePaper: {},
     fast3MartingaleLive: {},
     fast3Config: { ...DEFAULT_FAST3_CONFIG },
+    fast4Paper: emptyPaperState(41), // mirrors Fast3 default for apples-to-apples comparison
+    fast4MartingalePaper: {},
+    fast4MartingaleLive: {},
+    fast4Config: { ...DEFAULT_FAST4_CONFIG },
     realConfig: { ...DEFAULT_REAL_CONFIG },
   };
 }
@@ -411,6 +465,16 @@ export class BotStorage {
           ...(parsed.fast3Config ?? {}),
           ...(prefs.fast3Config ?? {}),
         },
+        fast4Paper: parsed.fast4Paper ?? emptyPaperState(41),
+        fast4MartingalePaper: parsed.fast4MartingalePaper ?? {},
+        fast4MartingaleLive: parsed.fast4MartingaleLive ?? {},
+        fast4Config: {
+          ...DEFAULT_FAST4_CONFIG,
+          ...(parsed.fast4Config ?? {}),
+          ...(prefs.fast4Config ?? {}),
+          // Force PAPER on every boot — same safety reasoning as Fast2/Fast3.
+          liveTradingEnabled: false,
+        },
         realConfig: {
           ...DEFAULT_REAL_CONFIG,
           ...(parsed.realConfig ?? {}),
@@ -434,6 +498,7 @@ export class BotStorage {
             liveTradingEnabled: false,
           },
           fast3Config: { ...empty.fast3Config, ...(prefs.fast3Config ?? {}) },
+          fast4Config: { ...empty.fast4Config, ...(prefs.fast4Config ?? {}), liveTradingEnabled: false },
           realConfig: { ...empty.realConfig, ...(prefs.realConfig ?? {}) },
         };
       }
@@ -441,7 +506,7 @@ export class BotStorage {
     }
   }
 
-  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; fast3Config?: Partial<Fast3Config>; realConfig?: Partial<RealConfig> }> {
+  private async loadPrefs(): Promise<{ fast1Config?: Partial<Fast1Config>; fast2Config?: Partial<Fast2Config>; fast3Config?: Partial<Fast3Config>; fast4Config?: Partial<Fast4Config>; realConfig?: Partial<RealConfig> }> {
     try {
       const raw = await fs.readFile(this.prefsFile, "utf8");
       return JSON.parse(raw);
@@ -478,6 +543,7 @@ export class BotStorage {
         fast1Config: state.fast1Config,
         fast2Config: state.fast2Config,
         fast3Config: state.fast3Config,
+        fast4Config: state.fast4Config,
         realConfig: state.realConfig,
       };
       const prefsTmp = this.prefsFile + ".tmp";

@@ -15,11 +15,12 @@ import { FastPanel } from "./panels/Fast";
 // sandbox tag stays "fast2"; UI is renamed "Synth".
 import { Fast2Panel } from "./panels/Fast2";
 import { Fast3Panel } from "./panels/Fast3";
+import { Fast4Panel } from "./panels/Fast4";
 import { LogsPanel } from "./panels/Logs";
 
 const REFRESH_MS = 3000;
 
-type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "adaptive" | "logs" | "settings";
+type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "fast4" | "adaptive" | "logs" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
@@ -28,6 +29,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "synth",      label: "Synth",      icon: "🧬" },
   { id: "fade",       label: "Fade",       icon: "💥" },
   { id: "fast3",      label: "Fast3",      icon: "🎯" },
+  { id: "fast4",      label: "Fast4",      icon: "🔬" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "logs",       label: "Logs",       icon: "📋" },
   { id: "settings",   label: "Settings",   icon: "⚙" },
@@ -91,6 +93,7 @@ export function App() {
             {tab === "synth"      && <Fast2Panel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "fade"       && <FastPanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "fast3"      && <Fast3Panel state={state} doAction={doAction} pending={actionPending} />}
+            {tab === "fast4"      && <Fast4Panel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
             {tab === "logs"       && <LogsPanel />}
             {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}

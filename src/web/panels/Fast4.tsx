@@ -1,25 +1,26 @@
-// Fast3 sandbox panel — DIGITODD tick-level book on synthetic indices.
-// Mirrors Fast2 layout closely: KPI cards, configuration grid, per-strategy
-// overrides table, recent trades. The contract type is binary 1-tick
-// (DIGITODD) so there's no SL/TP geometry or trade multiplier in play.
+// Fast4 sandbox panel — Fast3 + opposite-side probe circuit breaker.
+//
+// Fast4 mirrors Fast3 (DIGITODD tick-level book) but adds three knobs:
+//   probeEnabled        — master switch
+//   lossStreakTrigger   — N base-side losses required to flip to opposite (default 3)
+//   probeCount          — M opposite-side trades to fire after trigger (default 2)
+//
+// The recent-trades table shows ODD/EVEN per row plus a PROBE tag so the
+// operator can spot when a probe phase fired.
 
 import React, { useEffect, useState } from "react";
-import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast3Config, type Fast3PaperResp, type FastMartingaleSnapshot, type RealTrade, type StateResp, type StrategyStats } from "../api";
+import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast4Config, type Fast4PaperResp, type FastMartingaleSnapshot, type RealTrade, type StateResp, type StrategyStats } from "../api";
 
 const MART_MULT_OPTIONS = [1.3, 1.5, 1.7, 2.0, 2.2];
-// Fast3 trades DIGIT-family contracts (DIGITODD/EVEN/OVER/UNDER) which
-// accept a $0.35 USD min stake on synthetics — verified empirically against
-// Deriv's R_100 proposal endpoint 2026-05-05. MULTIPLIER contracts (Fast2,
-// real candle book) require $1 minimum.
 const DERIV_MIN_STAKE = 0.35;
 const DERIV_MAX_STAKE = 2000;
 
-export function Fast3Panel({ state, doAction, pending }: {
+export function Fast4Panel({ state, doAction, pending }: {
   state: StateResp | null;
   doAction: (label: string, fn: () => Promise<unknown>) => void;
   pending: string | null;
 }) {
-  const [paper, setPaper] = useState<Fast3PaperResp | null>(null);
+  const [paper, setPaper] = useState<Fast4PaperResp | null>(null);
   const [paperTrades, setPaperTrades] = useState<ClosedPaperPosition[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
@@ -27,20 +28,20 @@ export function Fast3Panel({ state, doAction, pending }: {
   const [liveTrades, setLiveTrades] = useState<RealTrade[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [resetTo, setResetTo] = useState<string>("41");
-  const [pendingCfg, setPendingCfg] = useState<Fast3Config | null>(null);
+  const [pendingCfg, setPendingCfg] = useState<Fast4Config | null>(null);
 
   useEffect(() => {
     const load = async () => {
       try {
         const [p, t, e, s, rt] = await Promise.all([
-          api.fast3Paper(), api.fast3PaperTrades(100), api.fast3PaperEquity(), api.fast3Strategies(), api.trades(100, "fast3"),
+          api.fast4Paper(), api.fast4PaperTrades(100), api.fast4PaperEquity(), api.fast4Strategies(), api.trades(100, "fast4"),
         ]);
         setPaper(p);
         setPaperTrades(t.trades);
         setEquity(e.equity);
         setStrategies(s.strategies);
         setMartingale(s.martingale);
-        setLiveTrades(rt.trades.filter((rec) => rec.sandbox === "fast3"));
+        setLiveTrades(rt.trades.filter((rec) => rec.sandbox === "fast4"));
         setError(null);
       } catch (err) { setError((err as Error).message); }
     };
@@ -54,6 +55,7 @@ export function Fast3Panel({ state, doAction, pending }: {
 
   const cfg = pendingCfg ?? paper.config;
   const isLive = paper.config.liveTradingEnabled;
+  const probeState = paper.probeState ?? {};
   const dirty = pendingCfg !== null && (
     pendingCfg.martingaleMultiplier !== paper.config.martingaleMultiplier ||
     pendingCfg.baseStake !== paper.config.baseStake ||
@@ -62,11 +64,12 @@ export function Fast3Panel({ state, doAction, pending }: {
     pendingCfg.sideFilter !== paper.config.sideFilter ||
     pendingCfg.martingaleMode !== paper.config.martingaleMode ||
     pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled ||
-    (pendingCfg.martingaleDecay ?? 1) !== (paper.config.martingaleDecay ?? 1)
+    (pendingCfg.martingaleDecay ?? 1) !== (paper.config.martingaleDecay ?? 1) ||
+    pendingCfg.probeEnabled !== paper.config.probeEnabled ||
+    pendingCfg.lossStreakTrigger !== paper.config.lossStreakTrigger ||
+    pendingCfg.probeCount !== paper.config.probeCount
   );
 
-  // ── Mode-aware view: LIVE reads Deriv account balance + real trades
-  // tagged sandbox="fast3"; PAPER reads from the paper engine state.
   const stats = (paper.stats ?? {}) as Partial<{ balance: number; startingBalance: number; totalPnl: number; pnlPct: number; trades: number; wins: number; losses: number; winRate: number; avgR: number; peak: number; ddPct: number; open: number }>;
   const liveClosed = liveTrades.filter((t) => t.closedAt != null);
   const liveOpen = liveTrades.filter((t) => t.closedAt == null);
@@ -109,30 +112,34 @@ export function Fast3Panel({ state, doAction, pending }: {
 
   const applyCfg = () => {
     if (!pendingCfg) return;
-    doAction("update fast3 config", () => api.updateFast3Config(pendingCfg).then(() => setPendingCfg(null)));
+    doAction("update fast4 config", () => api.updateFast4Config(pendingCfg).then(() => setPendingCfg(null)));
   };
-  const setCfg = (patch: Partial<Fast3Config>) => setPendingCfg({ ...cfg, ...patch });
+  const setCfg = (patch: Partial<Fast4Config>) => setPendingCfg({ ...cfg, ...patch });
+
+  // Aggregate probe stats for the header banner.
+  const totalProbesFired = Object.values(probeState).reduce((acc, p) => acc + p.probesFired, 0);
+  const stratsCurrentlyProbing = Object.entries(probeState).filter(([, p]) => p.probeRemaining > 0).length;
 
   return (
     <>
       {isLive && (
         <div className="banner banner-danger" style={{ marginBottom: 12, fontWeight: 600 }}>
-          🔴 LIVE TRADING ACTIVE — every tick fires a real DIGITODD contract on Deriv ({accountLogin}). KPI cards now show your Deriv account balance + live-trade stats, not paper. Per-strategy table below shows live ladder state. Flip OFF to switch back to paper sim.
+          🔴 LIVE TRADING ACTIVE — Fast4 fires real DIGITODD/EVEN contracts on Deriv ({accountLogin}). Probe logic is active live: after {cfg.lossStreakTrigger} consecutive base-side losses, the next {cfg.probeCount} trades flip to the opposite side.
         </div>
       )}
       <div className="banner" style={{ marginBottom: 12 }}>
-        <strong>Fast3 Sandbox</strong> — DIGITODD tick-level book on Deriv synthetic indices.
-        Each tick = one binary 1-tick contract (predict next tick's last digit is ODD).
-        Edge is structural: synthetic RNG never produces digit 0, so digits 1-9 are uniform → P(odd) = 5/9 = 55.5%.
-        Deriv pays 1.95× as if it were a fair coin → ~5%/tick edge.
-        Currently running at <strong>base ${cfg.baseStake.toFixed(2)} · martingale {cfg.martingaleMultiplier.toFixed(1)}× · depth {cfg.maxLevels}</strong> on a ${paperStartingBalance.toFixed(0)} starting balance.
+        <strong>Fast4 Sandbox</strong> — independent copy of Fast3 with an opposite-side probe circuit breaker.
+        After <strong>{cfg.lossStreakTrigger}</strong> consecutive base-side losses, the next <strong>{cfg.probeCount}</strong> trades fire on the OPPOSITE digit side (martingale ladder continues through the probe).
+        Currently <strong>{cfg.probeEnabled ? "ENABLED" : "DISABLED"}</strong>.
+        {totalProbesFired > 0 && <> · <span className="mono">{totalProbesFired}</span> probe phase{totalProbesFired === 1 ? "" : "s"} fired so far</>}
+        {stratsCurrentlyProbing > 0 && <> · <span className="pos">{stratsCurrentlyProbing} strategy{stratsCurrentlyProbing === 1 ? "" : "ies"} currently in probe phase</span></>}
       </div>
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
         <Card title={isLive ? "Live Balance" : "Paper Balance"} value={`$${view.balance.toFixed(2)}`} sub={view.balanceSub} tone={view.balanceTone} />
         <Card title={isLive ? "Live P&L" : "Total P&L"} value={`${view.totalPnl >= 0 ? "+" : ""}$${view.totalPnl.toFixed(2)}`} sub={view.totalPnlSub} tone={view.totalPnl > 0 ? "pos" : view.totalPnl < 0 ? "neg" : "muted"} />
         <Card title="Win Rate" value={view.wrTrades > 0 ? `${(view.wr * 100).toFixed(1)}%` : "—"} sub={view.wrSub} tone={view.wr >= 0.55 ? "pos" : view.wrTrades > 50 ? "neg" : "muted"} />
-        <Card title="Peak / DD" value={`$${view.peak.toFixed(2)}`} sub={view.peakSub} tone={view.ddPct > 20 ? "neg" : view.ddPct > 10 ? "muted" : "pos"} />
+        <Card title="Probes Fired" value={String(totalProbesFired)} sub={`${stratsCurrentlyProbing} active now`} tone={stratsCurrentlyProbing > 0 ? "pos" : "muted"} />
       </div>
 
       {!isLive && (
@@ -151,22 +158,49 @@ export function Fast3Panel({ state, doAction, pending }: {
           <button
             className="btn btn-warn btn-sm"
             disabled={pending !== null}
-            onClick={() => doAction(`Set Fast3 paper balance to $${resetTo}? Wipes trades, ladders, equity.`, () => api.resetFast3Paper(Number(resetTo)))}
+            onClick={() => doAction(`Set Fast4 paper balance to $${resetTo}? Wipes trades, ladders, probe state.`, () => api.resetFast4Paper(Number(resetTo)))}
           >
             {pending ? "…" : "Set & Restart Sandbox"}
           </button>
           <span className="muted" style={{ fontSize: 11, marginLeft: 8 }}>
-            Default $41 = validated 1.5× mart d=6 sweet spot.
+            Default $41 (matches Fast3 — for direct A/B comparison).
           </span>
         </div>
       )}
 
       <h3 className="section-title">Configuration</h3>
-      <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
-        DIGITODD is a binary 1-tick contract — there's no trade multiplier (payout is fixed 1.95×). Stake/martingale/cap apply identically to Fast2.
-      </div>
       <div className="card" style={{ marginBottom: 16, padding: 16 }}>
         <div className="grid grid-3" style={{ gap: 12, marginBottom: 12 }}>
+          <ConfigField label="Probe Enabled (master switch)">
+            <select className="filter-select" value={String(cfg.probeEnabled)} onChange={(e) => setCfg({ probeEnabled: e.target.value === "true" })}>
+              <option value="true">ON — probe after streak</option>
+              <option value="false">OFF — behaves like Fast3</option>
+            </select>
+          </ConfigField>
+          <ConfigField label="Loss Streak Trigger (consec base losses → probe)">
+            <input
+              className="filter-input"
+              type="number"
+              step="1"
+              min={1}
+              max={20}
+              value={cfg.lossStreakTrigger}
+              onChange={(e) => setCfg({ lossStreakTrigger: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+              title="After this many consecutive losses on the base side (DIGITODD), the dispatcher flips to the opposite side for `probeCount` trades. Default 3."
+            />
+          </ConfigField>
+          <ConfigField label="Probe Count (opposite-side trades to fire)">
+            <input
+              className="filter-input"
+              type="number"
+              step="1"
+              min={1}
+              max={10}
+              value={cfg.probeCount}
+              onChange={(e) => setCfg({ probeCount: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+              title="Number of opposite-side trades to fire after the loss streak triggers. Default 2. After this many probes, the base side resumes."
+            />
+          </ConfigField>
           <ConfigField label="Martingale Multiplier">
             <select className="filter-select" value={cfg.martingaleMultiplier} onChange={(e) => setCfg({ martingaleMultiplier: Number(e.target.value) })}>
               {MART_MULT_OPTIONS.map((m) => <option key={m} value={m}>{m.toFixed(1)}×</option>)}
@@ -187,18 +221,10 @@ export function Fast3Panel({ state, doAction, pending }: {
               max={1}
               value={cfg.martingaleDecay ?? 1}
               onChange={(e) => setCfg({ martingaleDecay: Number(e.target.value) || 1 })}
-              title="Per-step decay on the martingale multiplier. Each successive escalator factor is multiplier × decay^step. 1.0 = classic monotone climb. 0.75 = climb slows then naturally descends (e.g. with mult=2.2: 2.20, 1.65, 1.24, 0.93, 0.70, ...)."
             />
           </ConfigField>
           <ConfigField label={`Per-Trade Cap ($) — Deriv DIGIT max ~$50`}>
             <input className="filter-input" type="number" step="1" min={DERIV_MIN_STAKE} max={DERIV_MAX_STAKE} value={cfg.perTradeCap} onChange={(e) => setCfg({ perTradeCap: Number(e.target.value) })} />
-          </ConfigField>
-          <ConfigField label="Side Filter">
-            <select className="filter-select" value={cfg.sideFilter} onChange={(e) => setCfg({ sideFilter: e.target.value as "both" | "BUY" | "SELL" })}>
-              <option value="both">both (DIGITODD)</option>
-              <option value="BUY">BUY only (no effect on DIGIT)</option>
-              <option value="SELL">SELL only (no effect on DIGIT)</option>
-            </select>
           </ConfigField>
           <ConfigField label="Martingale Mode">
             <select className="filter-select" value={cfg.martingaleMode} onChange={(e) => setCfg({ martingaleMode: e.target.value as "classic" | "anti" })}>
@@ -209,7 +235,7 @@ export function Fast3Panel({ state, doAction, pending }: {
           <ConfigField label="Live Trading">
             <select className="filter-select" value={String(cfg.liveTradingEnabled)} onChange={(e) => setCfg({ liveTradingEnabled: e.target.value === "true" })}>
               <option value="false">PAPER (sandbox sim)</option>
-              <option value="true">LIVE (real DIGITODD on Deriv)</option>
+              <option value="true">LIVE (real DIGITODD/EVEN on Deriv)</option>
             </select>
           </ConfigField>
         </div>
@@ -221,13 +247,13 @@ export function Fast3Panel({ state, doAction, pending }: {
 
       <h3 className="section-title">Per-Strategy</h3>
       <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>
-        Toggle the ON/OFF checkbox to silence a strategy without removing it from the registry.
+        Streak / Probe columns surface the live state of the probe circuit per strategy.
       </div>
       <div className="card table-card" style={{ marginBottom: 16 }}>
         <table>
           <thead>
             <tr>
-              <th>Active</th><th>Strategy</th><th>Symbol</th><th>Bets</th><th>W/L</th><th>WR</th><th>$ net</th><th>Ladder</th><th>Last bet</th>
+              <th>Active</th><th>Strategy</th><th>Symbol</th><th>Bets</th><th>W/L</th><th>WR</th><th>$ net</th><th>Ladder</th><th>Streak</th><th>Probe</th><th>Last bet</th>
             </tr>
           </thead>
           <tbody>
@@ -235,9 +261,7 @@ export function Fast3Panel({ state, doAction, pending }: {
               const ov = (paper.config.perStrategy ?? {})[s.id] ?? {};
               const isOff = ov.enabled === false;
               const m = martingale[s.id];
-              // Per-strategy stats: when LIVE, count from real trades tagged
-              // sandbox=fast3+strategyId. When PAPER, use server-computed
-              // stats which read from fast3Paper.closed.
+              const ps = probeState[s.id];
               let trades: number, wins: number, losses: number, pnlUsd: number, lastTradeAt: number | null;
               if (isLive) {
                 const myTrades = liveClosed.filter((t) => t.sandboxStrategyId === s.id);
@@ -254,11 +278,12 @@ export function Fast3Panel({ state, doAction, pending }: {
                 lastTradeAt = s.live.lastTradeAt ?? null;
               }
               const wr = trades > 0 ? wins / trades : 0;
+              const inProbe = (ps?.probeRemaining ?? 0) > 0;
               return (
-                <tr key={s.id} style={{ opacity: isOff ? 0.45 : 1 }}>
+                <tr key={s.id} style={{ opacity: isOff ? 0.45 : 1, background: inProbe ? "rgba(255, 153, 0, 0.07)" : undefined }}>
                   <td>
-                    <label style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }} title="Toggle this strategy on/off">
-                      <input type="checkbox" checked={!isOff} onChange={(e) => api.updateFast3StrategyConfig(s.id, { enabled: e.target.checked })} />
+                    <label style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <input type="checkbox" checked={!isOff} onChange={(e) => api.updateFast4StrategyConfig(s.id, { enabled: e.target.checked })} />
                       <span className={`mono ${isOff ? "neg" : "pos"}`} style={{ fontSize: 11 }}>{isOff ? "OFF" : "ON"}</span>
                     </label>
                   </td>
@@ -274,6 +299,16 @@ export function Fast3Panel({ state, doAction, pending }: {
                   <td className="muted" style={{ fontSize: 11 }}>
                     {m ? <>L{m.level ?? 0} · next ${(m.nextStake ?? 0).toFixed(2)}</> : "—"}
                   </td>
+                  <td className="mono" style={{ fontSize: 11 }}>
+                    {ps ? `${ps.baseLossStreak}/${cfg.lossStreakTrigger}` : "—"}
+                  </td>
+                  <td className="mono" style={{ fontSize: 11 }}>
+                    {inProbe
+                      ? <span className="pos">PROBE {ps!.probeRemaining}/{cfg.probeCount}</span>
+                      : ps && ps.probesFired > 0
+                        ? <span className="muted">{ps.probesFired} fired</span>
+                        : "—"}
+                  </td>
                   <td className="faint" style={{ fontSize: 11 }}>{lastTradeAt ? fmtTime(lastTradeAt) : "—"}</td>
                 </tr>
               );
@@ -288,7 +323,7 @@ export function Fast3Panel({ state, doAction, pending }: {
           <div className="card table-card" style={{ marginBottom: 16 }}>
             <table>
               <thead>
-                <tr><th>Opened</th><th>Symbol</th><th>Strategy</th><th>Stake</th><th>Live P&amp;L</th><th>Age</th></tr>
+                <tr><th>Opened</th><th>Symbol</th><th>Strategy</th><th>Side</th><th>Stake</th><th>Live P&amp;L</th><th>Age</th></tr>
               </thead>
               <tbody>
                 {liveOpen.map((t) => {
@@ -299,6 +334,7 @@ export function Fast3Panel({ state, doAction, pending }: {
                       <td className="mono faint">{fmtTime(t.openedAt)}</td>
                       <td className="mono">{t.symbol}</td>
                       <td className="faint" style={{ fontSize: 11 }}>{t.sandboxStrategyId ?? "—"}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>{(t.contractType ?? "").replace("DIGIT", "") || "—"}</td>
                       <td className="mono">${t.stake.toFixed(2)}</td>
                       <td className={`mono ${cp != null && cp > 0 ? "pos" : cp != null && cp < 0 ? "neg" : "muted"}`}>
                         {cp != null ? `${cp >= 0 ? "+" : ""}$${cp.toFixed(2)}` : "…"}
@@ -316,23 +352,24 @@ export function Fast3Panel({ state, doAction, pending }: {
       <h3 className="section-title">Recent {isLive ? "Live" : "Paper"} Trades ({isLive ? liveClosed.length : paperTrades.length})</h3>
       <div className="card table-card">
         {(isLive ? liveClosed.length : paperTrades.length) === 0 ? (
-          <div className="empty"><span className="empty-emoji">🎯</span>No {isLive ? "live" : "paper"} trades yet — Fast3 is awaiting tick stream. The bot subscribes to ticks for {strategies.length} symbols on startup; trades will appear as ticks arrive.</div>
+          <div className="empty"><span className="empty-emoji">🔬</span>No {isLive ? "live" : "paper"} trades yet — Fast4 awaiting tick stream.</div>
         ) : (
           <table className="trades-table">
             <thead>
-              <tr><th>Closed</th><th>Symbol</th><th>Strategy</th><th>Side</th><th style={{ textAlign: "right" }}>Stake</th><th>Result</th><th style={{ textAlign: "right" }}>P&L</th>{isLive && <th style={{ textAlign: "right" }}>Contract</th>}</tr>
+              <tr><th>Closed</th><th>Symbol</th><th>Strategy</th><th>Side</th><th>Phase</th><th style={{ textAlign: "right" }}>Stake</th><th>Result</th><th style={{ textAlign: "right" }}>P&L</th>{isLive && <th style={{ textAlign: "right" }}>Contract</th>}</tr>
             </thead>
             <tbody>
               {isLive
                 ? liveClosed.slice(0, 100).map((t) => {
                     const pnl = t.profit ?? 0;
-                    const sideTag = t.contractType === "MULTUP" || t.contractType === "MULTDOWN" ? t.contractType : (t.contractType ?? "—");
+                    const sideShort = (t.contractType ?? "").replace("DIGIT", "") || "—";
                     return (
                       <tr key={t.id}>
                         <td>{t.closedAt ? fmtTime(t.closedAt) : "—"}</td>
                         <td>{t.symbol}</td>
                         <td className="muted" style={{ fontSize: 11 }}>{t.sandboxStrategyId ?? "—"}</td>
-                        <td className="mono" style={{ fontSize: 11 }}>{sideTag.replace("DIGIT", "")}</td>
+                        <td className="mono" style={{ fontSize: 11 }}>{sideShort}</td>
+                        <td className="muted" style={{ fontSize: 11 }}>—</td>
                         <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
                         <td className={pnl > 0 ? "pos" : "neg"}>{pnl > 0 ? "WIN" : "LOSS"}</td>
                         <td className={`mono ${pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}</td>
@@ -341,11 +378,12 @@ export function Fast3Panel({ state, doAction, pending }: {
                     );
                   })
                 : paperTrades.slice(0, 100).map((t) => (
-                    <tr key={t.id}>
+                    <tr key={t.id} style={{ background: t.isProbe ? "rgba(255, 153, 0, 0.07)" : undefined }}>
                       <td>{fmtTime(t.closedAt)}</td>
                       <td>{t.symbol}</td>
                       <td className="muted" style={{ fontSize: 11 }}>—</td>
                       <td className="mono" style={{ fontSize: 11 }}>{t.digitSide ? t.digitSide.replace("DIGIT", "") : "—"}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>{t.isProbe ? <span className="pos">PROBE</span> : <span className="muted">base</span>}</td>
                       <td className="mono" style={{ textAlign: "right" }}>${(t.stake ?? 0).toFixed(2)}</td>
                       <td className={t.pnl > 0 ? "pos" : "neg"}>{t.pnl > 0 ? "WIN" : "LOSS"}</td>
                       <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`} style={{ textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}</td>

@@ -52,8 +52,8 @@ export type RealTrade = {
    *  proposal_open_contract tick). After settle, prefer `profit`. */
   currentProfit?: number | null;
   detector: string;
-  /** Origin sandbox: "real" (default), "fast", "fast2", or "fast3". */
-  sandbox?: "real" | "fast" | "fast2" | "fast3";
+  /** Origin sandbox: "real" (default), "fast", "fast2", "fast3", or "fast4". */
+  sandbox?: "real" | "fast" | "fast2" | "fast3" | "fast4";
   sandboxStrategyId?: string;
   signalFiredAt?: number | null;
   signalEntry?: number | null;
@@ -136,6 +136,12 @@ export type PaperPosition = {
 export type ClosedPaperPosition = PaperPosition & {
   closedAt: number; closedAtCandleEpoch: number; exitPrice: number;
   result: "won" | "lost"; pnl: number; rMultiple: number;
+  /** DIGIT-side tag for Fast3/Fast4 trades. UI shows ODD/EVEN per row so
+   *  the operator can spot when a Fast4 probe phase fired. Undefined for
+   *  non-DIGIT trades. */
+  digitSide?: "DIGITODD" | "DIGITEVEN";
+  /** True when this trade fired during a Fast4 probe phase. */
+  isProbe?: boolean;
 };
 export type PaperResp = {
   stats: { startingBalance: number; balance: number; totalPnl: number; pnlPct: number;
@@ -210,6 +216,17 @@ export type Fast2PaperResp = Omit<FastPaperResp, "config"> & {
 export type Fast3Config = FastSandboxConfig;
 export type Fast3PaperResp = Omit<FastPaperResp, "config"> & {
   config: Fast3Config;
+};
+export type Fast4Config = FastSandboxConfig & {
+  probeEnabled: boolean;
+  lossStreakTrigger: number;
+  probeCount: number;
+};
+export type Fast4ProbeState = { baseLossStreak: number; probeRemaining: number; probesFired: number };
+export type Fast4PaperResp = Omit<FastPaperResp, "config"> & {
+  config: Fast4Config;
+  /** Per-strategy probe-circuit state. Keys are strategy ids. */
+  probeState?: Record<string, Fast4ProbeState>;
 };
 
 export type LogEntry = {
@@ -337,6 +354,38 @@ export const api = {
       }
     }
     return post<{ ok: boolean }>(`/api/control/update-fast3-config?${p.toString()}`);
+  },
+  // ── Fast4 (Fast3 + opposite-side probe circuit breaker) ──
+  fast4Paper: () => get<Fast4PaperResp>("/api/fast4-paper"),
+  fast4PaperTrades: (limit = 200) => get<{ trades: ClosedPaperPosition[] }>(`/api/fast4-paper/trades?limit=${limit}`),
+  fast4PaperEquity: () => get<{ equity: EquityPoint[]; startingBalance: number }>("/api/fast4-paper/equity"),
+  fast4Strategies: () => get<{ strategies: StrategyStats[]; martingale: Record<string, FastMartingaleSnapshot>; config: Fast4Config }>("/api/fast4-strategies"),
+  fast4Config: () => get<{ config: Fast4Config }>("/api/fast4-config"),
+  resetFast4Paper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-fast4-paper${balance ? `?balance=${balance}` : ""}`),
+  updateFast4Config: (patch: Partial<Fast4Config>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === "perStrategy") continue;
+      if (typeof v === "boolean") p.set(k, String(v));
+      else if (typeof v === "string") p.set(k, v);
+      else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast4-config?${p.toString()}`);
+  },
+  updateFast4StrategyConfig: (strategyId: string, patch: Partial<Fast4Config> | null) => {
+    const p = new URLSearchParams();
+    p.set("strategyId", strategyId);
+    if (patch === null) {
+      p.set("clear", "1");
+    } else {
+      for (const [k, v] of Object.entries(patch)) {
+        if (k === "perStrategy" || k === "liveTradingEnabled") continue;
+        if (typeof v === "boolean") p.set(k, String(v));
+        else if (typeof v === "string") p.set(k, v);
+        else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
+      }
+    }
+    return post<{ ok: boolean }>(`/api/control/update-fast4-config?${p.toString()}`);
   },
   logs: (opts: { limit?: number; level?: string; q?: string } = {}) => {
     const p = new URLSearchParams();

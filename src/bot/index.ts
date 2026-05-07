@@ -18,13 +18,14 @@ import { strategiesForSymbol } from "../main/engine/strategies";
 import { FAST_STRATEGIES, isFastSymbol, fastStrategiesForSymbol } from "../main/engine/fast-strategies";
 import { FAST2_STRATEGIES } from "../main/engine/fast2-strategies";
 import { FAST3_STRATEGIES, FAST3_DETECTOR_TAG } from "../main/engine/fast3-strategies";
+import { FAST4_STRATEGIES, FAST4_DETECTOR_TAG } from "../main/engine/fast4-strategies";
 import { FAST2_DIGITOVER0_DETECTOR_TAG } from "../main/engine/fast2-strategies";
 import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, stakeFactorFor, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
 import type { AccountInfo, Candle, Granularity, Signal, SymbolCode } from "@shared/types";
 import { loadConfig, describeConfig } from "./config";
 import { Logger } from "./logger";
-import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DEFAULT_REAL_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, DERIV_MIN_STAKE_DIGIT_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config, type RealConfig } from "./storage";
+import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_CONFIG, DEFAULT_FAST4_CONFIG, DEFAULT_REAL_CONFIG, DERIV_MULTIPLIER_OPTIONS, DERIV_MAX_STAKE_USD, DERIV_MIN_STAKE_USD, DERIV_MIN_STAKE_DIGIT_USD, clampDerivMultiplier, resolveFastConfig, type Fast1Config, type Fast2Config, type Fast3Config, type Fast4Config, type FastSandboxConfig, type RealConfig } from "./storage";
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
@@ -52,7 +53,7 @@ async function main() {
       getFastRecentSignals: () => [],
       getFast2RecentSignals: () => [],
       getAdaptiveShiftDescription: () => `config error: ${(e as Error).message}`,
-      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, resetFast3Paper: () => {}, updateFast3Config: () => {}, updateFast3StrategyConfig: () => {}, updateRealConfig: () => {}, getRealConfig: () => ({ liveTradingEnabled: false }), closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
+      manualControls: { isPaused: () => true, setPaused: () => {}, resetAdaptiveShift: () => {}, resetDaily: () => {}, resetPaper: () => {}, resetFastPaper: () => {}, updateFast1Config: () => {}, resetFast2Paper: () => {}, updateFast2Config: () => {}, updateFast2StrategyConfig: () => {}, resetFast3Paper: () => {}, updateFast3Config: () => {}, updateFast3StrategyConfig: () => {}, resetFast4Paper: () => {}, updateFast4Config: () => {}, updateFast4StrategyConfig: () => {}, updateRealConfig: () => {}, getRealConfig: () => ({ liveTradingEnabled: false }), closeFast2Position: async () => {}, forceResubscribe: async () => {}, reconcileContracts: async () => {} },
       getCandles: () => [],
       getStrategyStats: () => [],
       getConfig: () => ({ error: (e as Error).message }),
@@ -74,6 +75,12 @@ async function main() {
       getFast3Martingale: () => ({}),
       getFast3StrategyStats: () => [],
       getFast3Config: () => ({ ...DEFAULT_FAST3_CONFIG }),
+      getFast4PaperState: () => emptyPaperState(),
+      getFast4PaperStats: () => ({}),
+      getFast4Martingale: () => ({}),
+      getFast4StrategyStats: () => [],
+      getFast4Config: () => ({ ...DEFAULT_FAST4_CONFIG }),
+      getFast4ProbeStateFor: () => null,
       getDiagnostics: () => [],
       getLastPriceFor: () => null,
       getRecentLogs: (limit: number) => bootLog.tail(limit),
@@ -272,6 +279,74 @@ async function main() {
     config: fast3Config,
   });
 
+  // ── Fast4: Fast3 + opposite-side probe circuit breaker ──────────────────
+  // After `lossStreakTrigger` consecutive base-side losses, the dispatcher
+  // flips to the opposite digit side for `probeCount` trades. The martingale
+  // ladder continues through the probe (choice "C" — probe stake follows
+  // ladder, probe outcomes advance ladder normally). Loss-streak counter
+  // only counts BASE-side losses; resets on any base-side win.
+  const fast4Paper = new PaperEngine(persisted.fast4Paper);
+  const fast4MartingalePaper: Record<string, MartingaleState> = { ...persisted.fast4MartingalePaper };
+  const fast4MartingaleLive: Record<string, MartingaleState> = { ...persisted.fast4MartingaleLive };
+  for (const s of FAST4_STRATEGIES) {
+    if (!fast4MartingalePaper[s.id]) fast4MartingalePaper[s.id] = emptyMartingaleState();
+    if (!fast4MartingaleLive[s.id]) fast4MartingaleLive[s.id] = emptyMartingaleState();
+  }
+  let fast4Config: Fast4Config = { ...DEFAULT_FAST4_CONFIG, ...persisted.fast4Config, liveTradingEnabled: false };
+  const fast4ConfigFor = (strategyId: string): Fast4Config => {
+    const merged = resolveFastConfig(fast4Config, strategyId);
+    // resolveFastConfig returns FastSandboxConfig — re-stamp the Fast4-specific
+    // probe knobs from the general config since perStrategy overrides don't
+    // touch them (probe behavior is sandbox-wide for now).
+    return {
+      ...merged,
+      probeEnabled: fast4Config.probeEnabled,
+      lossStreakTrigger: fast4Config.lossStreakTrigger,
+      probeCount: fast4Config.probeCount,
+    };
+  };
+  const fast4ActiveMode = (): "paper" | "live" =>
+    fast4Config.liveTradingEnabled ? "live" : "paper";
+  type Fast4Pending = {
+    entryEpoch: number;
+    stake: number;
+    strategyId: string;
+    mode: "paper" | "live";
+    side: "DIGITODD" | "DIGITEVEN";
+    isProbe: boolean;
+    warmup?: boolean;
+  };
+  const fast4Pending = new Map<string, Fast4Pending>();
+  const fast4LiveInFlight = new Set<string>();
+  // Probe state machine — per strategy:
+  //   baseLossStreak  = consecutive losses on the BASE side only
+  //   probeRemaining  = >0 means we are in probe phase, dispatch opposite side
+  // Both reset to 0 in the natural cases described in the dispatcher.
+  type Fast4ProbeState = {
+    baseLossStreak: number;
+    probeRemaining: number;
+    /** For UI/debug — how many probe phases this strategy has triggered. */
+    probesFired: number;
+  };
+  const fast4ProbeState = new Map<string, Fast4ProbeState>();
+  const fast4ProbeFor = (strategyId: string): Fast4ProbeState => {
+    let s = fast4ProbeState.get(strategyId);
+    if (!s) {
+      s = { baseLossStreak: 0, probeRemaining: 0, probesFired: 0 };
+      fast4ProbeState.set(strategyId, s);
+    }
+    return s;
+  };
+  const fast4BaseSideFor = (strat: StrategyDescriptor): "DIGITODD" | "DIGITEVEN" =>
+    strat.digitContractType ?? "DIGITODD";
+  const fast4OppositeSide = (s: "DIGITODD" | "DIGITEVEN"): "DIGITODD" | "DIGITEVEN" =>
+    s === "DIGITODD" ? "DIGITEVEN" : "DIGITODD";
+  log.info("fast4Paper: state loaded", {
+    balance: fast4Paper.getState().balance,
+    closed: fast4Paper.getState().closed.length,
+    config: fast4Config,
+  });
+
   // ── Real-strategy book runtime config ───────────────────────────────────
   // Mutable at runtime via /api/control/update-real-config so the operator can
   // flip silver/gold/plat strategies between paper and live without
@@ -387,6 +462,10 @@ async function main() {
       fast3MartingalePaper,
       fast3MartingaleLive,
       fast3Config,
+      fast4Paper: fast4Paper.getState(),
+      fast4MartingalePaper,
+      fast4MartingaleLive,
+      fast4Config,
       realConfig,
     }).catch((e) => log.error("persist failed", { err: (e as Error).message }));
   };
@@ -394,6 +473,7 @@ async function main() {
   fastPaper.onChange(() => persist());
   fast2Paper.onChange(() => persist());
   fast3Paper.onChange(() => persist());
+  fast4Paper.onChange(() => persist());
 
   // Persist on every state change (settle, open, capHit, adaptive update)
   real.on("opened", (t) => { log.info("trade opened", { symbol: t.symbol, side: t.side, stake: t.stake, detector: t.detector, contractId: t.contractId, sandbox: t.sandbox ?? "real" }); persist(); });
@@ -473,6 +553,50 @@ async function main() {
         const next = cur === "DIGITODD" ? "DIGITEVEN" : "DIGITODD";
         fast3RuntimeSide.set(t.sandboxStrategyId, next);
         log.info(`fast3 LIVE flip-on-loss [${t.sandboxStrategyId}] ${cur} → ${next}`);
+      }
+    }
+    // Fast4 LIVE settlement — same shape as Fast3 but advances probe state
+    // machine (base-side losses count toward streak, probe trades count down
+    // probeRemaining without touching the streak counter).
+    if (t.sandbox === "fast4" && t.sandboxStrategyId) {
+      const before = fast4MartingaleLive[t.sandboxStrategyId] ?? emptyMartingaleState();
+      const sCfgLive = fast4ConfigFor(t.sandboxStrategyId);
+      const pnl = t.profit ?? 0;
+      const params: MartingaleParams = {
+        baseStake: sCfgLive.baseStake,
+        multiplier: sCfgLive.martingaleMultiplier,
+        maxLevels: sCfgLive.maxLevels,
+        perTradeCap: sCfgLive.perTradeCap,
+        martingaleDecay: sCfgLive.martingaleDecay,
+      };
+      const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
+      fast4MartingaleLive[t.sandboxStrategyId] = nextLadder;
+      // Advance probe state machine. We need to know whether THIS settled
+      // contract was a probe or base trade; the contract's RealTrade carries
+      // the chosen side via digitContractType — compare against the strat's
+      // base side.
+      const fast4Strat = FAST4_STRATEGIES.find((s) => s.id === t.sandboxStrategyId);
+      const probe = fast4ProbeFor(t.sandboxStrategyId);
+      if (fast4Strat) {
+        const baseSide = fast4BaseSideFor(fast4Strat);
+        const wasProbeContract = probe.probeRemaining > 0; // pre-settle probeRemaining decides
+        if (wasProbeContract) {
+          probe.probeRemaining = Math.max(0, probe.probeRemaining - 1);
+          log.info(`fast4 LIVE PROBE settled ${t.symbol} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} probeRemaining=${probe.probeRemaining} lvl=${nextLadder.level}`);
+        } else {
+          if (pnl <= 0) {
+            probe.baseLossStreak++;
+            if (sCfgLive.probeEnabled && probe.baseLossStreak >= sCfgLive.lossStreakTrigger) {
+              probe.probeRemaining = sCfgLive.probeCount;
+              probe.probesFired++;
+              probe.baseLossStreak = 0;
+              log.warn(`fast4 LIVE PROBE TRIGGERED [${t.sandboxStrategyId}] base-side losses=${sCfgLive.lossStreakTrigger} → flip to ${fast4OppositeSide(baseSide)} for ${sCfgLive.probeCount} trades`);
+            }
+          } else {
+            probe.baseLossStreak = 0;
+          }
+          log.info(`fast4 LIVE BASE settled ${t.symbol} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} streak=${probe.baseLossStreak}/${sCfgLive.lossStreakTrigger} lvl=${nextLadder.level}`);
+        }
       }
     }
     persist();
@@ -711,6 +835,63 @@ async function main() {
         const merged: Partial<Fast3Config> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
         beforePerStrat[strategyId] = merged;
         fast3Config = { ...fast3Config, perStrategy: beforePerStrat };
+        persist();
+      },
+      // ── Fast4 manual controls ──
+      resetFast4Paper: (balance?: number) => {
+        const newBal = balance ?? 41;
+        fast4Paper.reset(newBal);
+        for (const sId of Object.keys(fast4MartingalePaper)) fast4MartingalePaper[sId] = emptyMartingaleState();
+        for (const sId of Object.keys(fast4MartingaleLive)) fast4MartingaleLive[sId] = emptyMartingaleState();
+        // Clear probe state on reset — operator wants a clean slate.
+        fast4ProbeState.clear();
+        persist();
+        log.warn(`fast4Paper reset via API to $${newBal.toFixed(2)} — ladders + probe state cleared`);
+      },
+      updateFast4Config: (patch: Partial<Fast4Config>) => {
+        const before = { ...fast4Config };
+        const next: Fast4Config = { ...fast4Config, ...patch };
+        if (!isFinite(next.martingaleMultiplier) || next.martingaleMultiplier <= 1) next.martingaleMultiplier = before.martingaleMultiplier;
+        if (!isFinite(next.baseStake) || next.baseStake <= 0) next.baseStake = before.baseStake;
+        if (!isFinite(next.maxLevels) || next.maxLevels < 1) next.maxLevels = before.maxLevels;
+        if (!isFinite(next.perTradeCap) || next.perTradeCap <= 0) next.perTradeCap = before.perTradeCap;
+        if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
+        if (typeof next.forceMartingale !== "boolean") next.forceMartingale = before.forceMartingale;
+        if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
+        if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
+        if (next.martingaleDecay != null && (!isFinite(next.martingaleDecay) || next.martingaleDecay <= 0 || next.martingaleDecay > 1)) next.martingaleDecay = before.martingaleDecay;
+        if (next.baseStake < DERIV_MIN_STAKE_DIGIT_USD) next.baseStake = DERIV_MIN_STAKE_DIGIT_USD;
+        if (next.perTradeCap > DERIV_MAX_STAKE_USD) next.perTradeCap = DERIV_MAX_STAKE_USD;
+        if (next.perTradeCap < DERIV_MIN_STAKE_DIGIT_USD) next.perTradeCap = DERIV_MIN_STAKE_DIGIT_USD;
+        // Probe-specific knobs.
+        if (typeof next.probeEnabled !== "boolean") next.probeEnabled = before.probeEnabled;
+        if (!isFinite(next.lossStreakTrigger) || next.lossStreakTrigger < 1) next.lossStreakTrigger = before.lossStreakTrigger;
+        next.lossStreakTrigger = Math.max(1, Math.round(next.lossStreakTrigger));
+        if (!isFinite(next.probeCount) || next.probeCount < 1) next.probeCount = before.probeCount;
+        next.probeCount = Math.max(1, Math.round(next.probeCount));
+        fast4Config = next;
+        persist();
+        log.warn("fast4Config updated via API", { before, after: next });
+      },
+      updateFast4StrategyConfig: (strategyId: string, patch: Partial<Fast4Config> | null) => {
+        const beforePerStrat = { ...(fast4Config.perStrategy ?? {}) };
+        if (patch === null) {
+          if (beforePerStrat[strategyId]) delete beforePerStrat[strategyId];
+          fast4Config = { ...fast4Config, perStrategy: beforePerStrat };
+          persist();
+          return;
+        }
+        const cleaned: Partial<FastSandboxConfig> = {};
+        if (patch.martingaleMultiplier != null && isFinite(patch.martingaleMultiplier) && patch.martingaleMultiplier > 1) cleaned.martingaleMultiplier = patch.martingaleMultiplier;
+        if (patch.baseStake != null && isFinite(patch.baseStake) && patch.baseStake >= DERIV_MIN_STAKE_DIGIT_USD) cleaned.baseStake = patch.baseStake;
+        if (patch.maxLevels != null && isFinite(patch.maxLevels) && patch.maxLevels >= 1) cleaned.maxLevels = Math.round(patch.maxLevels);
+        if (patch.perTradeCap != null && isFinite(patch.perTradeCap) && patch.perTradeCap >= DERIV_MIN_STAKE_DIGIT_USD) cleaned.perTradeCap = Math.min(patch.perTradeCap, DERIV_MAX_STAKE_USD);
+        if (patch.martingaleDecay != null && isFinite(patch.martingaleDecay) && patch.martingaleDecay > 0 && patch.martingaleDecay <= 1) cleaned.martingaleDecay = patch.martingaleDecay;
+        if (typeof patch.enabled === "boolean") cleaned.enabled = patch.enabled;
+        if (patch.sideFilter === "both" || patch.sideFilter === "BUY" || patch.sideFilter === "SELL") cleaned.sideFilter = patch.sideFilter;
+        const merged: Partial<FastSandboxConfig> = { ...(beforePerStrat[strategyId] ?? {}), ...cleaned };
+        beforePerStrat[strategyId] = merged;
+        fast4Config = { ...fast4Config, perStrategy: beforePerStrat };
         persist();
       },
       closeFast2Position: async (id: string, mode: "paper" | "live") => {
@@ -959,6 +1140,45 @@ async function main() {
       return out;
     },
     getFast3Config: () => ({ ...fast3Config }),
+    getFast4PaperState: () => fast4Paper.getState(),
+    getFast4PaperStats: () => fast4Paper.stats() as unknown as Record<string, number>,
+    getFast4Martingale: () => {
+      const out: Record<string, { level: number; wins: number; losses: number; circuitBreakers: number; lastCircuitBreakerAt: number; nextStake: number }> = {};
+      const map = fast4ActiveMode() === "live" ? fast4MartingaleLive : fast4MartingalePaper;
+      for (const s of FAST4_STRATEGIES) {
+        const m = map[s.id] ?? emptyMartingaleState();
+        const cfg = fast4ConfigFor(s.id);
+        const params: MartingaleParams = { baseStake: cfg.baseStake, multiplier: cfg.martingaleMultiplier, maxLevels: cfg.maxLevels, perTradeCap: cfg.perTradeCap, martingaleDecay: cfg.martingaleDecay };
+        out[s.id] = { level: m.level, wins: m.wins, losses: m.losses, circuitBreakers: m.circuitBreakers, lastCircuitBreakerAt: m.lastCircuitBreakerAt, nextStake: fastNextStake(m, params) };
+      }
+      return out;
+    },
+    getFast4Config: () => ({ ...fast4Config }),
+    getFast4ProbeStateFor: (strategyId: string) => {
+      const s = fast4ProbeState.get(strategyId);
+      return s ? { ...s } : null;
+    },
+    getFast4StrategyStats: () => {
+      const now = Date.now();
+      return FAST4_STRATEGIES.map((s) => {
+        const sSyms = new Set(s.symbols);
+        const closed = fast4Paper.getState().closed.filter((t) => sSyms.has(t.symbol) && t.detector === FAST4_DETECTOR_TAG);
+        const wins = closed.filter((t) => t.pnl > 0).length;
+        const pnl = closed.reduce((acc, t) => acc + t.pnl, 0);
+        return {
+          id: s.id, name: s.name, description: s.description, symbols: s.symbols, granularity: s.granularity,
+          validation: { expectancyR: s.validation?.expectancyR, winRate: s.validation?.winRate, pnlUsd: s.validation?.pnlUsd, trades: s.validation?.trades },
+          live: {
+            signals: closed.length, trades: closed.length, wins, losses: closed.length - wins,
+            pnlUsd: pnl, winRate: closed.length ? wins / closed.length : 0, expectancyR: 0,
+            lastSignalAt: closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null,
+            lastTradeAt: closed.length ? Math.max(...closed.map((t) => t.closedAt ?? 0)) : null,
+            barsSeen: 0,
+            lastBarSeenAt: null,
+          },
+        };
+      });
+    },
     getFast3StrategyStats: () => {
       const now = Date.now();
       return FAST3_STRATEGIES.map((s) => {
@@ -1165,6 +1385,20 @@ async function main() {
       }
     }
     log.info(`✓ Fast3 DIGITODD ready (${FAST3_STRATEGIES.length} strategies / ${fast3Symbols.size} symbols)`);
+    // ── Fast4 tick subscription: same symbol set as Fast3 (independent dispatcher) ──
+    const fast4Symbols = new Set<string>();
+    for (const s of FAST4_STRATEGIES) for (const sym of s.symbols) fast4Symbols.add(sym);
+    for (const sym of Array.from(fast4Symbols)) {
+      if (tickedSymbols.has(sym)) continue;
+      try {
+        await deriv.subscribeTicks(sym as SymbolCode);
+        tickedSymbols.add(sym);
+        log.info(`fast4 tick subscription: ${sym} active`);
+      } catch (e) {
+        log.warn(`fast4 tick subscription failed for ${sym}: ${(e as Error).message}`);
+      }
+    }
+    log.info(`✓ Fast4 probe-protected ready (${FAST4_STRATEGIES.length} strategies / ${fast4Symbols.size} symbols)`);
     // ── Fast2 tick subscription: same pattern, for granularity=0 strategies ──
     const fast2TickSymbols = new Set<string>();
     for (const s of FAST2_STRATEGIES) if (s.granularity === 0) for (const sym of s.symbols) fast2TickSymbols.add(sym);
@@ -2231,6 +2465,7 @@ async function main() {
           closedAt: tick.epoch * 1000,
           entryPrice: 0,
           exitPrice: tick.quote,
+          digitSide: sideAtPlacement,
         });
         log.debug(`fast3Paper settled ${tick.symbol} ${netPnl > 0 ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
       }
@@ -2339,6 +2574,154 @@ async function main() {
       // Only one strategy fires per symbol per tick (first match wins);
       // multiple Fast3 strategies on same symbol would collide on the
       // pending slot anyway.
+      break;
+    }
+  });
+
+  // ── Fast4: probe-protected DIGITODD tick-level dispatcher ───────────────
+  // Independent of Fast3 (own paper, ladders, probe state). Probe behavior:
+  // after `lossStreakTrigger` consecutive base-side losses, set
+  // `probeRemaining = probeCount`; while >0, dispatch the OPPOSITE digit
+  // side (ladder continues through the probe — choice "C"). After the
+  // probe phase ends, base side resumes and the streak counter restarts.
+  // Reuses fast3LastDigitFor (same pip-decimals map applies).
+  const fast4LastDigitFor = fast3LastDigitFor;
+  deriv.on("tick", (tick) => {
+    const stratsForSym = FAST4_STRATEGIES.filter((s) => s.symbols.includes(tick.symbol));
+    if (stratsForSym.length === 0) return;
+
+    // ── Settle any pending bet on this symbol ──
+    const pending = fast4Pending.get(tick.symbol);
+    if (pending && pending.entryEpoch < tick.epoch) {
+      fast4Pending.delete(tick.symbol);
+      const isOdd = fast4LastDigitFor(tick.quote, tick.symbol) % 2 !== 0;
+      const cfg = fast4ConfigFor(pending.strategyId);
+      const stratForPending = FAST4_STRATEGIES.find((s) => s.id === pending.strategyId);
+      const wantOdd = pending.side === "DIGITODD";
+      const wins = wantOdd ? isOdd : !isOdd;
+      const payoutRatio = tick.symbol === "R_100" ? 1.92 : 1.95;
+      const netPnl = wins ? Number((pending.stake * (payoutRatio - 1)).toFixed(2)) : -pending.stake;
+
+      const ladderMap = pending.mode === "live" ? fast4MartingaleLive : fast4MartingalePaper;
+      const ladder = ladderMap[pending.strategyId] ?? emptyMartingaleState();
+      const params: MartingaleParams = {
+        baseStake: cfg.baseStake,
+        multiplier: cfg.martingaleMultiplier,
+        maxLevels: cfg.maxLevels,
+        perTradeCap: cfg.perTradeCap,
+        martingaleDecay: cfg.martingaleDecay,
+      };
+      const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
+      ladderMap[pending.strategyId] = nextLadder;
+
+      // Advance the probe state machine (paper mode only — live settles
+      // route through real.on("settled") with the same logic).
+      if (pending.mode === "paper" && stratForPending) {
+        const baseSide = fast4BaseSideFor(stratForPending);
+        const probe = fast4ProbeFor(pending.strategyId);
+        if (pending.isProbe) {
+          probe.probeRemaining = Math.max(0, probe.probeRemaining - 1);
+          log.debug(`fast4Paper PROBE settled ${tick.symbol} ${wins ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} probeRemaining=${probe.probeRemaining}`);
+        } else {
+          if (netPnl <= 0) {
+            probe.baseLossStreak++;
+            if (cfg.probeEnabled && probe.baseLossStreak >= cfg.lossStreakTrigger) {
+              probe.probeRemaining = cfg.probeCount;
+              probe.probesFired++;
+              probe.baseLossStreak = 0;
+              log.warn(`fast4Paper PROBE TRIGGERED [${pending.strategyId}] base losses=${cfg.lossStreakTrigger} → flip to ${fast4OppositeSide(baseSide)} for ${cfg.probeCount} trades`);
+            }
+          } else {
+            probe.baseLossStreak = 0;
+          }
+        }
+      }
+
+      if (pending.mode === "paper") {
+        const ps = fast4Paper.getState();
+        const newBal = Number((ps.balance + netPnl).toFixed(2));
+        fast4Paper.applyDelta(netPnl, {
+          symbol: tick.symbol,
+          side: "BUY",
+          detector: FAST4_DETECTOR_TAG,
+          strategyId: pending.strategyId,
+          stake: pending.stake,
+          result: netPnl > 0 ? "won" : "lost",
+          pnl: netPnl,
+          openedAt: pending.entryEpoch * 1000,
+          closedAt: tick.epoch * 1000,
+          entryPrice: 0,
+          exitPrice: tick.quote,
+          digitSide: pending.side,
+          isProbe: pending.isProbe,
+        });
+        log.debug(`fast4Paper settled ${tick.symbol} ${pending.side}${pending.isProbe ? " PROBE" : ""} ${netPnl > 0 ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} bal=$${newBal.toFixed(2)} W=${nextLadder.wins} L=${nextLadder.losses} lvl=${nextLadder.level}`);
+      }
+    }
+
+    // ── Place a new bet for the next tick ──
+    if (fast4Pending.has(tick.symbol)) return;
+    for (const strat of stratsForSym) {
+      const cfg = fast4ConfigFor(strat.id);
+      const enabled = (fast4Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
+      if (!enabled) continue;
+      const mode = fast4ActiveMode();
+      const ladderMap = mode === "live" ? fast4MartingaleLive : fast4MartingalePaper;
+      const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
+      const stake = Number((cfg.baseStake * stakeFactorFor(ladder.level, cfg.martingaleMultiplier, cfg.martingaleDecay)).toFixed(2));
+      const cappedStake = Math.min(stake, cfg.perTradeCap);
+      const ps = fast4Paper.getState();
+      if (mode === "paper" && ps.balance < cappedStake) {
+        if (ladder.level > 0) ladderMap[strat.id] = emptyMartingaleState();
+        continue;
+      }
+      const finalStake = stake > cfg.perTradeCap ? cfg.baseStake : stake;
+
+      // Decide which digit side this trade fires on. Probe phase wins.
+      const probe = fast4ProbeFor(strat.id);
+      const baseSide = fast4BaseSideFor(strat);
+      const isProbeTrade = probe.probeRemaining > 0;
+      const sideForThisTrade: "DIGITODD" | "DIGITEVEN" = isProbeTrade
+        ? fast4OppositeSide(baseSide)
+        : baseSide;
+
+      if (mode === "live") {
+        if (fast4LiveInFlight.has(tick.symbol)) continue;
+        if (real.state().open.some((t) => t.sandbox === "fast4" && t.symbol === tick.symbol)) continue;
+        fast4LiveInFlight.add(tick.symbol);
+        real.placeTrade({
+          symbol: tick.symbol as SymbolCode,
+          side: "BUY",
+          family: "DIGIT",
+          digitContractType: sideForThisTrade,
+          detector: FAST4_DETECTOR_TAG,
+          stakeOverride: finalStake,
+          signalFiredAt: Date.now(),
+          sandbox: "fast4",
+          sandboxStrategyId: strat.id,
+          entryPriceHint: tick.quote,
+        }).then((trade) => {
+          log.info(`fast4 LIVE opened ${sideForThisTrade}${isProbeTrade ? " PROBE" : ""} ${tick.symbol} stake=$${trade.stake.toFixed(2)} contract=${trade.contractId} strategy=${strat.id} lvl=${ladder.level}`);
+        }).catch((e) => {
+          const msg = (e as Error).message;
+          if (msg.includes("RateLimit") || msg.includes("rate limit")) {
+            log.debug(`fast4 LIVE rate-limited by Deriv on ${tick.symbol} — next tick will retry`);
+          } else {
+            log.warn(`fast4 LIVE placeTrade failed ${tick.symbol}: ${msg}`);
+          }
+        }).finally(() => {
+          fast4LiveInFlight.delete(tick.symbol);
+        });
+        break;
+      }
+      fast4Pending.set(tick.symbol, {
+        entryEpoch: tick.epoch,
+        stake: finalStake,
+        strategyId: strat.id,
+        mode,
+        side: sideForThisTrade,
+        isProbe: isProbeTrade,
+      });
       break;
     }
   });

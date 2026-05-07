@@ -56,6 +56,13 @@ export type ClosedPaperPosition = PaperPosition & {
   result: "won" | "lost";
   pnl: number;
   rMultiple: number;
+  /** For DIGIT-family contracts (Fast3/Fast4): which side was active at
+   *  placement. Lets the UI show ODD/EVEN per row so the operator can spot
+   *  when a probe phase fired. Undefined for non-DIGIT trades. */
+  digitSide?: "DIGITODD" | "DIGITEVEN";
+  /** For DIGIT-family contracts: marks trades fired during a probe-phase
+   *  (Fast4 circuit-breaker). Lets the UI distinguish probe vs base bets. */
+  isProbe?: boolean;
 };
 
 export type PaperState = {
@@ -388,6 +395,11 @@ export class PaperEngine {
     closedAt: number;
     entryPrice: number;
     exitPrice: number;
+    /** Optional DIGIT-side tag for Fast3/Fast4 settles. Surfaces in the UI
+     *  so the operator can spot probe-phase trades on Fast4. */
+    digitSide?: "DIGITODD" | "DIGITEVEN";
+    /** True when this trade was fired during a probe phase (Fast4). */
+    isProbe?: boolean;
   }): ClosedPaperPosition {
     const closed: ClosedPaperPosition = {
       id: randomUUID(),
@@ -416,6 +428,8 @@ export class PaperEngine {
       result: opts.result,
       pnl: round2(opts.pnl),
       rMultiple: opts.stake > 0 ? round2(opts.pnl / opts.stake) : 0,
+      digitSide: opts.digitSide,
+      isProbe: opts.isProbe,
     };
     this.state.balance = round2(this.state.balance + pnl);
     this.state.daily.profit = round2(this.state.daily.profit + pnl);
