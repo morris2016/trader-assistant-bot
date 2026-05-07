@@ -231,7 +231,7 @@ export function Fast4Panel({ state, doAction, pending }: {
               ))}
             </select>
           </ConfigField>
-          <ConfigField label="Hard Cap (ladder force-reset, 0 = disabled)">
+          <ConfigField label="Hard Cap (ladder freeze level, 0 = disabled)">
             <input
               className="filter-input"
               type="number"
@@ -240,7 +240,7 @@ export function Fast4Panel({ state, doAction, pending }: {
               max={20}
               value={cfg.hardCap ?? 0}
               onChange={(e) => setCfg({ hardCap: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
-              title="When the ladder advances past this level, force-reset to L0. Bounds per-streak loss but kills deep-streak recovery. 0 = disabled (no cap)."
+              title="When the ladder would advance past this level, FREEZE at the cap level instead of advancing. Each subsequent loss stays at cap stake. A win still triggers the natural mart W→L0 reset. 0 = disabled (no cap)."
             />
           </ConfigField>
           <ConfigField label="Martingale Multiplier">

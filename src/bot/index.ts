@@ -603,10 +603,10 @@ async function main() {
         martingaleDecay: sCfgLive.martingaleDecay,
       };
       const { state: nextLadder } = fastMartingaleUpdate(before, pnl, params, Date.now(), sCfgLive.martingaleMode);
-      // HardCap on live ladder same as paper.
+      // HardCap on live ladder same as paper — freeze at cap, don't reset.
       if (sCfgLive.hardCap > 0 && nextLadder.level > sCfgLive.hardCap) {
-        fast4MartingaleLive[t.sandboxStrategyId] = { ...nextLadder, level: 0, cumulativeSinceReset: 0 };
-        log.warn(`fast4 LIVE HARDCAP fire [${t.sandboxStrategyId}] level=${nextLadder.level} > cap=${sCfgLive.hardCap} → reset to L0`);
+        fast4MartingaleLive[t.sandboxStrategyId] = { ...nextLadder, level: sCfgLive.hardCap };
+        log.warn(`fast4 LIVE HARDCAP freeze [${t.sandboxStrategyId}] level=${nextLadder.level} > cap=${sCfgLive.hardCap} → freeze at L${sCfgLive.hardCap}`);
       } else {
         fast4MartingaleLive[t.sandboxStrategyId] = nextLadder;
       }
@@ -2674,11 +2674,13 @@ async function main() {
         martingaleDecay: cfg.martingaleDecay,
       };
       const { state: nextLadder } = fastMartingaleUpdate(ladder, netPnl, params, Date.now(), cfg.martingaleMode);
-      // HardCap: if ladder advanced past cfg.hardCap, force-reset to L0.
+      // HardCap: ladder cannot advance past cfg.hardCap. When a loss would
+      // push it higher, FREEZE at the cap level (keep firing at cap stake)
+      // until a win triggers the natural mart W→L0 reset.
       // hardCap=0 disables (no cap, ladder runs up to params.maxLevels).
       if (cfg.hardCap > 0 && nextLadder.level > cfg.hardCap) {
-        ladderMap[pending.strategyId] = { ...nextLadder, level: 0, cumulativeSinceReset: 0 };
-        log.debug(`fast4Paper HARDCAP fire [${pending.strategyId}] level=${nextLadder.level} > cap=${cfg.hardCap} → reset to L0`);
+        ladderMap[pending.strategyId] = { ...nextLadder, level: cfg.hardCap };
+        log.debug(`fast4Paper HARDCAP freeze [${pending.strategyId}] level=${nextLadder.level} > cap=${cfg.hardCap} → freeze at L${cfg.hardCap}`);
       } else {
         ladderMap[pending.strategyId] = nextLadder;
       }
