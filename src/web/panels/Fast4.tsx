@@ -1,9 +1,10 @@
 // Fast4 sandbox panel — Fast3 + opposite-side probe circuit breaker.
 //
-// Fast4 mirrors Fast3 (DIGITODD tick-level book) but adds three knobs:
+// Fast4 mirrors Fast3 (DIGITODD tick-level book) but adds:
 //   probeEnabled        — master switch
-//   lossStreakTrigger   — N base-side losses required to flip to opposite (default 3)
-//   probeCount          — M opposite-side trades to fire after trigger (default 2)
+//   lossStreakTrigger   — N base-side losses required to fire the probe (default 3)
+//   probePattern        — named recipe for the probe phase (e.g. EBEBE, WX-OPP-10)
+//   hardCap             — ladder freeze level (0 = disabled)
 //
 // The recent-trades table shows ODD/EVEN per row plus a PROBE tag so the
 // operator can spot when a probe phase fired.
@@ -80,7 +81,6 @@ export function Fast4Panel({ state, doAction, pending }: {
     (pendingCfg.martingaleDecay ?? 1) !== (paper.config.martingaleDecay ?? 1) ||
     pendingCfg.probeEnabled !== paper.config.probeEnabled ||
     pendingCfg.lossStreakTrigger !== paper.config.lossStreakTrigger ||
-    pendingCfg.probeCount !== paper.config.probeCount ||
     (pendingCfg.probePattern ?? "EBEBE") !== (paper.config.probePattern ?? "EBEBE") ||
     (pendingCfg.hardCap ?? 0) !== (paper.config.hardCap ?? 0)
   );
@@ -139,14 +139,15 @@ export function Fast4Panel({ state, doAction, pending }: {
     <>
       {isLive && (
         <div className="banner banner-danger" style={{ marginBottom: 12, fontWeight: 600 }}>
-          🔴 LIVE TRADING ACTIVE — Fast4 fires real DIGITODD/EVEN contracts on Deriv ({accountLogin}). Probe logic is active live: after {cfg.lossStreakTrigger} consecutive base-side losses, the next {cfg.probeCount} trades flip to the opposite side.
+          🔴 LIVE TRADING ACTIVE — Fast4 fires real DIGITODD/EVEN contracts on Deriv ({accountLogin}). Probe logic active: after {cfg.lossStreakTrigger} consecutive base-side losses, fires probe pattern <strong>{cfg.probePattern || "EBEBE"}</strong>.
         </div>
       )}
       <div className="banner" style={{ marginBottom: 12 }}>
-        <strong>Fast4 Sandbox</strong> — independent copy of Fast3 with an opposite-side probe circuit breaker.
-        After <strong>{cfg.lossStreakTrigger}</strong> consecutive base-side losses, the bot fires <strong>{cfg.probeCount}</strong> probes <em>interleaved</em> with base trades (P, B, P, B, P, then RESUME).
-        Probes use the OPPOSITE digit side; the martingale ladder continues through every trade. Interleaved bases do NOT count toward the streak.
+        <strong>Fast4 Sandbox</strong> — independent copy of Fast3 with a configurable probe-pattern circuit breaker.
+        After <strong>{cfg.lossStreakTrigger}</strong> consecutive base-side losses, the bot fires the probe pattern <strong>{cfg.probePattern || "EBEBE"}</strong>.
+        The martingale ladder continues through every trade; in-phase trades do NOT count toward the streak counter.
         Currently <strong>{cfg.probeEnabled ? "ENABLED" : "DISABLED"}</strong>.
+        {(cfg.hardCap ?? 0) > 0 && <> · ladder freeze at <strong>L{cfg.hardCap}</strong></>}
         {totalProbesFired > 0 && <> · <span className="mono">{totalProbesFired}</span> probe phase{totalProbesFired === 1 ? "" : "s"} fired so far</>}
         {stratsCurrentlyProbing > 0 && <> · <span className="pos">{stratsCurrentlyProbing} strategy{stratsCurrentlyProbing === 1 ? "" : "ies"} currently in probe phase</span></>}
       </div>
@@ -202,19 +203,7 @@ export function Fast4Panel({ state, doAction, pending }: {
               max={20}
               value={cfg.lossStreakTrigger}
               onChange={(e) => setCfg({ lossStreakTrigger: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
-              title="After this many consecutive losses on the base side (DIGITODD), the dispatcher flips to the opposite side for `probeCount` trades. Default 3."
-            />
-          </ConfigField>
-          <ConfigField label="Probe Count (legacy — superseded by pattern)">
-            <input
-              className="filter-input"
-              type="number"
-              step="1"
-              min={1}
-              max={10}
-              value={cfg.probeCount}
-              onChange={(e) => setCfg({ probeCount: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
-              title="Legacy field kept for back-compat. The active pattern's length supersedes this."
+              title="After this many consecutive base-side losses, the configured probe pattern fires. Default 3."
             />
           </ConfigField>
           <ConfigField label="Probe Pattern (the recipe to fire when triggered)">
@@ -346,7 +335,7 @@ export function Fast4Panel({ state, doAction, pending }: {
                   </td>
                   <td className="mono" style={{ fontSize: 11 }}>
                     {inProbe
-                      ? <span className="pos">PROBE {ps!.probeRemaining}/{cfg.probeCount}</span>
+                      ? <span className="pos">PROBE {ps!.probeRemaining} left</span>
                       : ps && ps.probesFired > 0
                         ? <span className="muted">{ps.probesFired} fired</span>
                         : "—"}

@@ -200,12 +200,10 @@ export const DEFAULT_FAST3_CONFIG: Fast3Config = {
  *  exactly seq.length trades) or win-exit patterns (run until a win or
  *  maxTrades cap).
  *
- *  Independent of `probeCount` (legacy field, kept for back-compat — the
- *  active pattern's length supersedes it).
- *
- *  Optional `hardCap` field: when the martingale ladder would advance past
- *  this level, force-reset to L0 instead. Bounds per-streak loss but
- *  forfeits deep-streak recovery. 0 = disabled.
+ *  Optional `hardCap` field: when the ladder would advance past this
+ *  level, FREEZE at the cap level instead. Each subsequent loss stays
+ *  at cap stake until a win triggers the natural mart W→L0 reset.
+ *  0 = disabled (no cap, ladder runs up to MAX_LEVELS).
  */
 export type Fast4Config = FastSandboxConfig & {
   /** Master switch for the probe circuit. When false, Fast4 behaves
@@ -213,15 +211,10 @@ export type Fast4Config = FastSandboxConfig & {
   probeEnabled: boolean;
   /** Consecutive base-side losses required to trigger the probe phase. */
   lossStreakTrigger: number;
-  /** Legacy: number of opposite-side probes. Superseded by `probePattern`
-   *  but kept so older persisted state still loads. */
-  probeCount: number;
   /** Named probe pattern from src/main/engine/fast4-patterns.ts.
    *  Default "EBEBE" matches the original deployed behavior. */
   probePattern: string;
-  /** Hard cap on ladder advancement. When ladder would advance past this
-   *  level (mart's level + 1 > hardCap), force-reset to L0 instead. 0 =
-   *  disabled (no cap, ladder runs up to MAX_LEVELS). */
+  /** Hard cap on ladder advancement (freeze level). 0 = disabled. */
   hardCap: number;
 };
 
@@ -241,7 +234,6 @@ export const DEFAULT_FAST4_CONFIG: Fast4Config = {
   martingaleDecay: 0.75,
   probeEnabled: true,
   lossStreakTrigger: 3,
-  probeCount: 2,
   probePattern: "EBEBE",
   hardCap: 0,
 };

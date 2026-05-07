@@ -355,11 +355,6 @@ export function startHttpServer(opts: {
               const n = Number(lst);
               if (Number.isFinite(n) && n >= 1) patch.lossStreakTrigger = Math.round(n);
             }
-            const pc = url.searchParams.get("probeCount");
-            if (pc != null && pc !== "") {
-              const n = Number(pc);
-              if (Number.isFinite(n) && n >= 1) patch.probeCount = Math.round(n);
-            }
             const pp = url.searchParams.get("probePattern");
             if (pp != null && pp !== "") patch.probePattern = pp;
             const hc = url.searchParams.get("hardCap");

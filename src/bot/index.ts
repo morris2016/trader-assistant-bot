@@ -282,10 +282,12 @@ async function main() {
 
   // ── Fast4: Fast3 + opposite-side probe circuit breaker ──────────────────
   // After `lossStreakTrigger` consecutive base-side losses, the dispatcher
-  // flips to the opposite digit side for `probeCount` trades. The martingale
-  // ladder continues through the probe (choice "C" — probe stake follows
-  // ladder, probe outcomes advance ladder normally). Loss-streak counter
-  // only counts BASE-side losses; resets on any base-side win.
+  // fires the configured probe pattern (cfg.probePattern, e.g. "EBEBE" or
+  // "WX-OPP-10"). The martingale ladder continues through the probe (probe
+  // stake follows ladder, probe outcomes advance ladder normally). The
+  // pattern's length determines how many trades the phase runs for.
+  // Loss-streak counter only counts BASE-side losses; resets on any base
+  // win and is unaffected by in-phase outcomes.
   const fast4Paper = new PaperEngine(persisted.fast4Paper);
   const fast4MartingalePaper: Record<string, MartingaleState> = { ...persisted.fast4MartingalePaper };
   const fast4MartingaleLive: Record<string, MartingaleState> = { ...persisted.fast4MartingaleLive };
@@ -303,7 +305,8 @@ async function main() {
       ...merged,
       probeEnabled: fast4Config.probeEnabled,
       lossStreakTrigger: fast4Config.lossStreakTrigger,
-      probeCount: fast4Config.probeCount,
+      probePattern: fast4Config.probePattern,
+      hardCap: fast4Config.hardCap,
     };
   };
   const fast4ActiveMode = (): "paper" | "live" =>
@@ -922,8 +925,6 @@ async function main() {
         if (typeof next.probeEnabled !== "boolean") next.probeEnabled = before.probeEnabled;
         if (!isFinite(next.lossStreakTrigger) || next.lossStreakTrigger < 1) next.lossStreakTrigger = before.lossStreakTrigger;
         next.lossStreakTrigger = Math.max(1, Math.round(next.lossStreakTrigger));
-        if (!isFinite(next.probeCount) || next.probeCount < 1) next.probeCount = before.probeCount;
-        next.probeCount = Math.max(1, Math.round(next.probeCount));
         // Pattern registry — drop unknown names back to default.
         if (typeof next.probePattern !== "string" || !FAST4_PROBE_PATTERNS[next.probePattern]) {
           next.probePattern = before.probePattern || FAST4_DEFAULT_PROBE_PATTERN;
@@ -2642,10 +2643,10 @@ async function main() {
 
   // ── Fast4: probe-protected DIGITODD tick-level dispatcher ───────────────
   // Independent of Fast3 (own paper, ladders, probe state). Probe behavior:
-  // after `lossStreakTrigger` consecutive base-side losses, set
-  // `probeRemaining = probeCount`; while >0, dispatch the OPPOSITE digit
-  // side (ladder continues through the probe — choice "C"). After the
-  // probe phase ends, base side resumes and the streak counter restarts.
+  // after `lossStreakTrigger` consecutive base-side losses, fire the named
+  // `probePattern` recipe (length determines how many trades the phase runs
+  // for). The martingale ladder continues through every trade. After the
+  // phase ends, base side resumes and the streak counter restarts.
   // Reuses fast3LastDigitFor (same pip-decimals map applies).
   const fast4LastDigitFor = fast3LastDigitFor;
   deriv.on("tick", (tick) => {
