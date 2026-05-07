@@ -194,25 +194,35 @@ export const DEFAULT_FAST3_CONFIG: Fast3Config = {
 /** Fast4 — Fast3 baseline + opposite-side probe circuit breaker.
  *
  *  After `lossStreakTrigger` consecutive losses on the base side, the
- *  dispatcher flips to the opposite digit side for `probeCount` trades
- *  (continuing the martingale ladder through the probe — choice "C" from
- *  the design discussion). Loss-streak counter only counts BASE-side
- *  losses, resets on any base-side win, and is unaffected by probe
- *  outcomes. After `probeCount` probe trades the dispatcher resumes
- *  base-side trading.
+ *  dispatcher fires a configurable probe pattern. The pattern is one of
+ *  the named recipes in src/main/engine/fast4-patterns.ts (e.g. "EBEBE",
+ *  "WX-OPP-10", "EOOEEO"). Patterns are either fixed sequences (run for
+ *  exactly seq.length trades) or win-exit patterns (run until a win or
+ *  maxTrades cap).
  *
- *  Same shape as Fast3Config plus three probe knobs. */
+ *  Independent of `probeCount` (legacy field, kept for back-compat — the
+ *  active pattern's length supersedes it).
+ *
+ *  Optional `hardCap` field: when the martingale ladder would advance past
+ *  this level, force-reset to L0 instead. Bounds per-streak loss but
+ *  forfeits deep-streak recovery. 0 = disabled.
+ */
 export type Fast4Config = FastSandboxConfig & {
   /** Master switch for the probe circuit. When false, Fast4 behaves
-   *  identically to Fast3. */
+   *  identically to Fast3 (always bet base side). */
   probeEnabled: boolean;
-  /** Consecutive base-side losses required to trigger the probe phase.
-   *  Default 3 — matches the user-discovered pattern. */
+  /** Consecutive base-side losses required to trigger the probe phase. */
   lossStreakTrigger: number;
-  /** Number of opposite-side trades to fire after the streak triggers.
-   *  Default 2. After this many probes, base side resumes regardless of
-   *  probe outcomes. */
+  /** Legacy: number of opposite-side probes. Superseded by `probePattern`
+   *  but kept so older persisted state still loads. */
   probeCount: number;
+  /** Named probe pattern from src/main/engine/fast4-patterns.ts.
+   *  Default "EBEBE" matches the original deployed behavior. */
+  probePattern: string;
+  /** Hard cap on ladder advancement. When ladder would advance past this
+   *  level (mart's level + 1 > hardCap), force-reset to L0 instead. 0 =
+   *  disabled (no cap, ladder runs up to MAX_LEVELS). */
+  hardCap: number;
 };
 
 export const DEFAULT_FAST4_CONFIG: Fast4Config = {
@@ -232,6 +242,8 @@ export const DEFAULT_FAST4_CONFIG: Fast4Config = {
   probeEnabled: true,
   lossStreakTrigger: 3,
   probeCount: 2,
+  probePattern: "EBEBE",
+  hardCap: 0,
 };
 
 /** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.

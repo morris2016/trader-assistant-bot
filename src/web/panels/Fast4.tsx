@@ -15,6 +15,19 @@ const MART_MULT_OPTIONS = [1.3, 1.5, 1.7, 2.0, 2.2];
 const DERIV_MIN_STAKE = 0.35;
 const DERIV_MAX_STAKE = 2000;
 
+// Probe-pattern dropdown options. Mirror the registry in
+// src/main/engine/fast4-patterns.ts. Grouped by family for readability.
+const PROBE_PATTERN_GROUPS: Array<{ label: string; options: string[] }> = [
+  { label: "Disabled",        options: ["OFF"] },
+  { label: "Fixed (length 2)", options: ["EE", "EO"] },
+  { label: "Fixed (length 3)", options: ["EOE", "EEE"] },
+  { label: "Fixed (length 4)", options: ["EEEE", "EOEO"] },
+  { label: "Fixed (length 5)", options: ["EBEBE", "EEEEE", "EOEOE"] },
+  { label: "Fixed (length 6)", options: ["EEEEEE", "EOEOEO", "EOOEEO", "EOEEOE", "EEEOE", "EOOOEE"] },
+  { label: "Fixed (length 7+)", options: ["EEEEEEE", "EOEOEOE"] },
+  { label: "Win-exit (until win or maxTrades)", options: ["WX-OPP-3", "WX-OPP-5", "WX-OPP-7", "WX-OPP-10", "WX-OPP-15", "WX-ALT-5", "WX-ALT-10"] },
+];
+
 export function Fast4Panel({ state, doAction, pending }: {
   state: StateResp | null;
   doAction: (label: string, fn: () => Promise<unknown>) => void;
@@ -67,7 +80,9 @@ export function Fast4Panel({ state, doAction, pending }: {
     (pendingCfg.martingaleDecay ?? 1) !== (paper.config.martingaleDecay ?? 1) ||
     pendingCfg.probeEnabled !== paper.config.probeEnabled ||
     pendingCfg.lossStreakTrigger !== paper.config.lossStreakTrigger ||
-    pendingCfg.probeCount !== paper.config.probeCount
+    pendingCfg.probeCount !== paper.config.probeCount ||
+    (pendingCfg.probePattern ?? "EBEBE") !== (paper.config.probePattern ?? "EBEBE") ||
+    (pendingCfg.hardCap ?? 0) !== (paper.config.hardCap ?? 0)
   );
 
   const stats = (paper.stats ?? {}) as Partial<{ balance: number; startingBalance: number; totalPnl: number; pnlPct: number; trades: number; wins: number; losses: number; winRate: number; avgR: number; peak: number; ddPct: number; open: number }>;
@@ -190,7 +205,7 @@ export function Fast4Panel({ state, doAction, pending }: {
               title="After this many consecutive losses on the base side (DIGITODD), the dispatcher flips to the opposite side for `probeCount` trades. Default 3."
             />
           </ConfigField>
-          <ConfigField label="Probe Count (opposite-side trades to fire)">
+          <ConfigField label="Probe Count (legacy — superseded by pattern)">
             <input
               className="filter-input"
               type="number"
@@ -199,7 +214,33 @@ export function Fast4Panel({ state, doAction, pending }: {
               max={10}
               value={cfg.probeCount}
               onChange={(e) => setCfg({ probeCount: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
-              title="Number of opposite-side trades to fire after the loss streak triggers. Default 2. After this many probes, the base side resumes."
+              title="Legacy field kept for back-compat. The active pattern's length supersedes this."
+            />
+          </ConfigField>
+          <ConfigField label="Probe Pattern (the recipe to fire when triggered)">
+            <select
+              className="filter-select"
+              value={cfg.probePattern || "EBEBE"}
+              onChange={(e) => setCfg({ probePattern: e.target.value })}
+              title="Named probe pattern. E = opposite digit (e.g. EVEN), O/B = base digit (ODD). WX-OPP-N = keep firing opposite until a win or N trades. WX-ALT-N = alternate sides until win."
+            >
+              {PROBE_PATTERN_GROUPS.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.options.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </ConfigField>
+          <ConfigField label="Hard Cap (ladder force-reset, 0 = disabled)">
+            <input
+              className="filter-input"
+              type="number"
+              step="1"
+              min={0}
+              max={20}
+              value={cfg.hardCap ?? 0}
+              onChange={(e) => setCfg({ hardCap: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+              title="When the ladder advances past this level, force-reset to L0. Bounds per-streak loss but kills deep-streak recovery. 0 = disabled (no cap)."
             />
           </ConfigField>
           <ConfigField label="Martingale Multiplier">

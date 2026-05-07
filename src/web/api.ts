@@ -223,6 +223,10 @@ export type Fast4Config = FastSandboxConfig & {
   probeEnabled: boolean;
   lossStreakTrigger: number;
   probeCount: number;
+  /** Named probe pattern (see Fast4 panel dropdown values). */
+  probePattern: string;
+  /** Hard cap on ladder advancement. 0 = disabled. */
+  hardCap: number;
 };
 export type Fast4ProbeState = { baseLossStreak: number; probeRemaining: number; probesFired: number };
 export type Fast4PaperResp = Omit<FastPaperResp, "config"> & {

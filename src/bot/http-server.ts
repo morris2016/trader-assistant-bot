@@ -360,6 +360,13 @@ export function startHttpServer(opts: {
               const n = Number(pc);
               if (Number.isFinite(n) && n >= 1) patch.probeCount = Math.round(n);
             }
+            const pp = url.searchParams.get("probePattern");
+            if (pp != null && pp !== "") patch.probePattern = pp;
+            const hc = url.searchParams.get("hardCap");
+            if (hc != null && hc !== "") {
+              const n = Number(hc);
+              if (Number.isFinite(n) && n >= 0) patch.hardCap = Math.round(n);
+            }
             if (strategyId) {
               opts.manualControls.updateFast4StrategyConfig(strategyId, clear ? null : patch);
             } else {
