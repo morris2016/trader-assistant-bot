@@ -11,6 +11,7 @@
 
 import React, { useEffect, useState } from "react";
 import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast4Config, type Fast4PaperResp, type FastMartingaleSnapshot, type RealTrade, type StateResp, type StrategyStats } from "../api";
+import { validateProbePattern as validatePatternFn } from "../../main/engine/fast4-patterns";
 
 const MART_MULT_OPTIONS = [1.3, 1.5, 1.7, 2.0, 2.2];
 const DERIV_MIN_STAKE = 0.35;
@@ -43,6 +44,9 @@ export function Fast4Panel({ state, doAction, pending }: {
   const [error, setError] = useState<string | null>(null);
   const [resetTo, setResetTo] = useState<string>("41");
   const [pendingCfg, setPendingCfg] = useState<Fast4Config | null>(null);
+  const [addingCustom, setAddingCustom] = useState<boolean>(false);
+  const [customDraft, setCustomDraft] = useState<string>("");
+  const [showManage, setShowManage] = useState<boolean>(false);
 
   useEffect(() => {
     const load = async () => {
@@ -82,7 +86,8 @@ export function Fast4Panel({ state, doAction, pending }: {
     pendingCfg.probeEnabled !== paper.config.probeEnabled ||
     pendingCfg.lossStreakTrigger !== paper.config.lossStreakTrigger ||
     (pendingCfg.probePattern ?? "EBEBE") !== (paper.config.probePattern ?? "EBEBE") ||
-    (pendingCfg.hardCap ?? 0) !== (paper.config.hardCap ?? 0)
+    (pendingCfg.hardCap ?? 0) !== (paper.config.hardCap ?? 0) ||
+    JSON.stringify(pendingCfg.customPatterns ?? []) !== JSON.stringify(paper.config.customPatterns ?? [])
   );
 
   const stats = (paper.stats ?? {}) as Partial<{ balance: number; startingBalance: number; totalPnl: number; pnlPct: number; trades: number; wins: number; losses: number; winRate: number; avgR: number; peak: number; ddPct: number; open: number }>;
@@ -207,18 +212,88 @@ export function Fast4Panel({ state, doAction, pending }: {
             />
           </ConfigField>
           <ConfigField label="Probe Pattern (the recipe to fire when triggered)">
-            <select
-              className="filter-select"
-              value={cfg.probePattern || "EBEBE"}
-              onChange={(e) => setCfg({ probePattern: e.target.value })}
-              title="Named probe pattern. E = opposite digit (e.g. EVEN), O/B = base digit (ODD). WX-OPP-N = keep firing opposite until a win or N trades. WX-ALT-N = alternate sides until win."
-            >
-              {PROBE_PATTERN_GROUPS.map((group) => (
-                <optgroup key={group.label} label={group.label}>
-                  {group.options.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+            <div style={{ display: "flex", gap: 4, alignItems: "stretch" }}>
+              <select
+                className="filter-select"
+                style={{ flex: 1 }}
+                value={cfg.probePattern || "EBEBE"}
+                onChange={(e) => {
+                  if (e.target.value === "__ADD_CUSTOM__") {
+                    setAddingCustom(true);
+                    setCustomDraft("");
+                    return;
+                  }
+                  setCfg({ probePattern: e.target.value });
+                }}
+                title="Named probe pattern. E = opposite digit, O/B = base digit. WX-OPP-N = keep firing opposite until win or N trades. WX-ALT-N = alternate."
+              >
+                {PROBE_PATTERN_GROUPS.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.options.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                  </optgroup>
+                ))}
+                {(cfg.customPatterns ?? []).length > 0 && (
+                  <optgroup label="My Customs">
+                    {(cfg.customPatterns ?? []).map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Custom">
+                  <option value="__ADD_CUSTOM__">+ Add custom…</option>
                 </optgroup>
-              ))}
-            </select>
+              </select>
+              {(cfg.customPatterns ?? []).length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: "0 8px" }}
+                  onClick={() => setShowManage(true)}
+                  title="Manage saved custom patterns"
+                >
+                  ⋯
+                </button>
+              )}
+            </div>
+            {addingCustom && (() => {
+              const draft = customDraft.toUpperCase();
+              const v = validatePatternFn(draft);
+              const isDuplicate = (cfg.customPatterns ?? []).includes(draft);
+              const canSave = v.valid && !isDuplicate;
+              const reason = v.valid
+                ? (isDuplicate ? "already saved" : "")
+                : (v as { valid: false; reason: string }).reason;
+              const onSave = () => {
+                const next = [...(cfg.customPatterns ?? []), draft];
+                setCfg({ customPatterns: next, probePattern: draft });
+                setAddingCustom(false);
+                setCustomDraft("");
+              };
+              return (
+                <div style={{ marginTop: 6, display: "flex", gap: 4, alignItems: "center" }}>
+                  <input
+                    className="filter-input"
+                    style={{
+                      flex: 1,
+                      borderColor: draft.length === 0 ? undefined : (canSave ? "#3a8" : "#a33"),
+                    }}
+                    value={draft}
+                    autoFocus
+                    placeholder="e.g. EOOEEEOO or WX-OPP-25"
+                    onChange={(e) => setCustomDraft(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && canSave) onSave();
+                      if (e.key === "Escape") { setAddingCustom(false); setCustomDraft(""); }
+                    }}
+                  />
+                  <button type="button" className="btn btn-primary btn-sm" disabled={!canSave} onClick={onSave}>save</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setAddingCustom(false); setCustomDraft(""); }}>cancel</button>
+                  {draft.length > 0 && reason && (
+                    <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>{reason}</span>
+                  )}
+                </div>
+              );
+            })()}
           </ConfigField>
           <ConfigField label="Hard Cap (ladder freeze level, 0 = disabled)">
             <input
@@ -275,6 +350,51 @@ export function Fast4Panel({ state, doAction, pending }: {
           <button className="btn btn-primary btn-sm" disabled={!dirty || pending !== null} onClick={applyCfg}>apply</button>
         </div>
       </div>
+
+      {showManage && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50,
+          }}
+          onClick={() => setShowManage(false)}
+        >
+          <div
+            className="card"
+            style={{ minWidth: 360, maxWidth: 480, padding: 16 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h4 style={{ marginTop: 0, marginBottom: 12 }}>Manage Custom Patterns</h4>
+            {(cfg.customPatterns ?? []).length === 0 ? (
+              <div className="muted">No custom patterns saved.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {(cfg.customPatterns ?? []).map((pat) => (
+                  <div key={pat} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span className="mono" style={{ flex: 1 }}>{pat}</span>
+                    <button
+                      type="button"
+                      className="btn btn-warn btn-sm"
+                      onClick={() => {
+                        const next = (cfg.customPatterns ?? []).filter((p) => p !== pat);
+                        const patch: Partial<Fast4Config> = { customPatterns: next };
+                        if (cfg.probePattern === pat) patch.probePattern = "EBEBE";
+                        setCfg(patch);
+                      }}
+                      title="Delete this custom pattern"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowManage(false)}>close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <h3 className="section-title">Per-Strategy</h3>
       <div className="card-sub" style={{ marginBottom: 6, fontSize: 11, padding: "0 4px" }}>

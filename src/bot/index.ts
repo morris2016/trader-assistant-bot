@@ -19,7 +19,7 @@ import { FAST_STRATEGIES, isFastSymbol, fastStrategiesForSymbol } from "../main/
 import { FAST2_STRATEGIES } from "../main/engine/fast2-strategies";
 import { FAST3_STRATEGIES, FAST3_DETECTOR_TAG } from "../main/engine/fast3-strategies";
 import { FAST4_STRATEGIES, FAST4_DETECTOR_TAG } from "../main/engine/fast4-strategies";
-import { FAST4_PROBE_PATTERNS, FAST4_DEFAULT_PROBE_PATTERN, decideNextTrade as fast4DecideTrade, patternMaxTrades, type ProbePattern } from "../main/engine/fast4-patterns";
+import { FAST4_PROBE_PATTERNS, FAST4_DEFAULT_PROBE_PATTERN, decideNextTrade as fast4DecideTrade, patternMaxTrades, parsePattern as fast4ParsePattern, validateProbePattern as fast4ValidatePattern, type ProbePattern } from "../main/engine/fast4-patterns";
 import { FAST2_DIGITOVER0_DETECTOR_TAG } from "../main/engine/fast2-strategies";
 import { DEFAULT_FAST_MARTINGALE, emptyMartingaleState, stakeFactorFor, nextStake as fastNextStake, updateAfterTrade as fastMartingaleUpdate, type MartingaleParams, type MartingaleState } from "../main/engine/martingale";
 import { emptyAdaptiveShiftState } from "../main/engine/adaptive-shift";
@@ -371,7 +371,7 @@ async function main() {
   };
   const fast4PatternFor = (cfg: Fast4Config): ProbePattern => {
     const name = cfg.probePattern || FAST4_DEFAULT_PROBE_PATTERN;
-    return FAST4_PROBE_PATTERNS[name] ?? FAST4_PROBE_PATTERNS[FAST4_DEFAULT_PROBE_PATTERN];
+    return fast4ParsePattern(name);
   };
   const fast4BaseSideFor = (strat: StrategyDescriptor): "DIGITODD" | "DIGITEVEN" =>
     strat.digitContractType ?? "DIGITODD";
@@ -925,13 +925,40 @@ async function main() {
         if (typeof next.probeEnabled !== "boolean") next.probeEnabled = before.probeEnabled;
         if (!isFinite(next.lossStreakTrigger) || next.lossStreakTrigger < 1) next.lossStreakTrigger = before.lossStreakTrigger;
         next.lossStreakTrigger = Math.max(1, Math.round(next.lossStreakTrigger));
-        // Pattern registry — drop unknown names back to default.
-        if (typeof next.probePattern !== "string" || !FAST4_PROBE_PATTERNS[next.probePattern]) {
+        // Pattern lookup — accept registry names or any string that parses
+        // (fixed E/O/B sequence or WX-* form). Reject unparseable strings.
+        if (typeof next.probePattern !== "string") {
           next.probePattern = before.probePattern || FAST4_DEFAULT_PROBE_PATTERN;
+        } else if (!FAST4_PROBE_PATTERNS[next.probePattern]) {
+          const v = fast4ValidatePattern(next.probePattern);
+          if (!v.valid) {
+            log.warn(`fast4Config: rejected probePattern "${next.probePattern}" — ${v.reason}; falling back to ${before.probePattern}`);
+            next.probePattern = before.probePattern || FAST4_DEFAULT_PROBE_PATTERN;
+          }
         }
         // HardCap: 0 = disabled. Negative or non-numeric → 0.
         if (!isFinite(next.hardCap) || next.hardCap < 0) next.hardCap = 0;
         next.hardCap = Math.round(next.hardCap);
+        // customPatterns: validated, deduped, capped at 50.
+        if (!Array.isArray(next.customPatterns)) {
+          next.customPatterns = before.customPatterns ?? [];
+        } else {
+          const seen = new Set<string>();
+          const cleaned: string[] = [];
+          for (const raw of next.customPatterns) {
+            if (typeof raw !== "string") continue;
+            if (seen.has(raw)) continue;
+            const v = fast4ValidatePattern(raw);
+            if (!v.valid) {
+              log.warn(`fast4Config: dropping custom "${raw}" — ${v.reason}`);
+              continue;
+            }
+            seen.add(raw);
+            cleaned.push(raw);
+            if (cleaned.length >= 50) break;
+          }
+          next.customPatterns = cleaned;
+        }
         fast4Config = next;
         persist();
         log.warn("fast4Config updated via API", { before, after: next });

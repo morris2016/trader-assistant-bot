@@ -222,10 +222,13 @@ export type Fast3PaperResp = Omit<FastPaperResp, "config"> & {
 export type Fast4Config = FastSandboxConfig & {
   probeEnabled: boolean;
   lossStreakTrigger: number;
-  /** Named probe pattern (see Fast4 panel dropdown values). */
+  /** Named probe pattern (see Fast4 panel dropdown values). May be a
+   *  registry name OR an entry from `customPatterns`. */
   probePattern: string;
   /** Hard cap on ladder advancement (freeze level). 0 = disabled. */
   hardCap: number;
+  /** User-saved custom probe patterns (raw strings). */
+  customPatterns: string[];
 };
 export type Fast4ProbeState = { baseLossStreak: number; probeRemaining: number; probesFired: number };
 export type Fast4PaperResp = Omit<FastPaperResp, "config"> & {
@@ -371,7 +374,8 @@ export const api = {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(patch)) {
       if (k === "perStrategy") continue;
-      if (typeof v === "boolean") p.set(k, String(v));
+      if (Array.isArray(v)) p.set(k, JSON.stringify(v));
+      else if (typeof v === "boolean") p.set(k, String(v));
       else if (typeof v === "string") p.set(k, v);
       else if (v != null && Number.isFinite(v as number)) p.set(k, String(v));
     }

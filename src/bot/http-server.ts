@@ -362,6 +362,17 @@ export function startHttpServer(opts: {
               const n = Number(hc);
               if (Number.isFinite(n) && n >= 0) patch.hardCap = Math.round(n);
             }
+            const cps = url.searchParams.get("customPatterns");
+            if (cps != null && cps !== "") {
+              try {
+                const parsed = JSON.parse(cps);
+                if (Array.isArray(parsed)) {
+                  patch.customPatterns = parsed.filter((x: unknown): x is string => typeof x === "string");
+                }
+              } catch {
+                // Bad JSON — ignore the field, server-side validator will keep current value.
+              }
+            }
             if (strategyId) {
               opts.manualControls.updateFast4StrategyConfig(strategyId, clear ? null : patch);
             } else {
