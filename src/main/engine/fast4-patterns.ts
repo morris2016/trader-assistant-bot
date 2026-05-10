@@ -80,6 +80,60 @@ export const FAST4_PROBE_PATTERN_NAMES = Object.keys(FAST4_PROBE_PATTERNS);
 
 export const FAST4_DEFAULT_PROBE_PATTERN = "EBEBE";
 
+/** Result of validating a user-supplied probe pattern string. */
+export type ProbePatternValidation =
+  | { valid: true }
+  | { valid: false; reason: string };
+
+const PATTERN_MAX_LENGTH = 25;
+
+/** Validate a user-supplied probe pattern. Accepts either a fixed E/O/B
+ *  sequence or a `WX-OPP-N` / `WX-ALT-N` form. Used identically on the
+ *  client (live UI feedback) and server (defense). */
+export function validateProbePattern(s: string): ProbePatternValidation {
+  if (typeof s !== "string" || s.length === 0) {
+    return { valid: false, reason: "empty" };
+  }
+  if (s.length > PATTERN_MAX_LENGTH) {
+    return { valid: false, reason: `too long (max ${PATTERN_MAX_LENGTH} chars)` };
+  }
+  // Reject if it collides with a registry name — registry wins.
+  if (FAST4_PROBE_PATTERNS[s]) {
+    return { valid: false, reason: "matches a registry name; pick from the registry instead" };
+  }
+  // Win-exit form
+  const wx = s.match(/^WX-(OPP|ALT)-(\d+)$/);
+  if (wx) {
+    const n = Number(wx[2]);
+    if (n < 1 || n > PATTERN_MAX_LENGTH) {
+      return { valid: false, reason: `WX maxTrades must be 1-${PATTERN_MAX_LENGTH}` };
+    }
+    return { valid: true };
+  }
+  // Fixed sequence
+  if (/^[EOB]+$/.test(s)) return { valid: true };
+  return { valid: false, reason: "must be E/O/B chars or WX-OPP-N / WX-ALT-N" };
+}
+
+/** Resolve a pattern name to its ProbePattern shape. Tries the registry
+ *  first; falls back to parsing the string as a raw fixed sequence or
+ *  WX-* form. Returns the default pattern when nothing parses. */
+export function parsePattern(name: string): ProbePattern {
+  const reg = FAST4_PROBE_PATTERNS[name];
+  if (reg) return reg;
+  const wx = name.match(/^WX-(OPP|ALT)-(\d+)$/);
+  if (wx) {
+    const n = Number(wx[2]);
+    if (n >= 1 && n <= PATTERN_MAX_LENGTH) {
+      return { kind: "win-exit", sideRule: wx[1] as "OPP" | "ALT", maxTrades: n };
+    }
+  }
+  if (/^[EOB]+$/.test(name) && name.length >= 1 && name.length <= PATTERN_MAX_LENGTH) {
+    return { kind: "fixed", seq: name };
+  }
+  return FAST4_PROBE_PATTERNS[FAST4_DEFAULT_PROBE_PATTERN];
+}
+
 /** Total trades in this phase (length cap). For win-exit patterns this is
  *  the upper bound; the phase may end earlier on a win. */
 export function patternMaxTrades(pat: ProbePattern): number {
