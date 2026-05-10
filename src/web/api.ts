@@ -229,6 +229,10 @@ export type Fast4Config = FastSandboxConfig & {
   hardCap: number;
   /** User-saved custom probe patterns (raw strings). */
   customPatterns: string[];
+  /** Trade-frequency throttle unit. */
+  tradeIntervalUnit: "ticks" | "seconds";
+  /** Trade-frequency throttle interval (>=1). */
+  tradeInterval: number;
 };
 export type Fast4ProbeState = { baseLossStreak: number; probeRemaining: number; probesFired: number };
 export type Fast4PaperResp = Omit<FastPaperResp, "config"> & {

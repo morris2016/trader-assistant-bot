@@ -221,6 +221,11 @@ export type Fast4Config = FastSandboxConfig & {
    *  appears in the panel's "My Customs" dropdown group. Validated
    *  via fast4-patterns.validateProbePattern(). Capped at 50 entries. */
   customPatterns: string[];
+  /** Trade-frequency throttle unit. "ticks" = fire every Nth tick.
+   *  "seconds" = fire only when ≥N seconds elapsed since last fire. */
+  tradeIntervalUnit: "ticks" | "seconds";
+  /** Trade-frequency throttle interval (>=1). Applies per-symbol. */
+  tradeInterval: number;
 };
 
 export const DEFAULT_FAST4_CONFIG: Fast4Config = {
@@ -242,6 +247,8 @@ export const DEFAULT_FAST4_CONFIG: Fast4Config = {
   probePattern: "EBEBE",
   hardCap: 0,
   customPatterns: [],
+  tradeIntervalUnit: "ticks",
+  tradeInterval: 1,
 };
 
 /** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.
@@ -486,6 +493,8 @@ export class BotStorage {
             liveTradingEnabled: false,
           };
           if (!Array.isArray(merged.customPatterns)) merged.customPatterns = [];
+          if (merged.tradeIntervalUnit !== "ticks" && merged.tradeIntervalUnit !== "seconds") merged.tradeIntervalUnit = "ticks";
+          if (!Number.isFinite(merged.tradeInterval) || merged.tradeInterval < 1) merged.tradeInterval = 1;
           return merged;
         })(),
         realConfig: {

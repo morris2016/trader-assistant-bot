@@ -959,6 +959,14 @@ async function main() {
           }
           next.customPatterns = cleaned;
         }
+        // Trade-frequency throttle.
+        if (next.tradeIntervalUnit !== "ticks" && next.tradeIntervalUnit !== "seconds") {
+          next.tradeIntervalUnit = before.tradeIntervalUnit ?? "ticks";
+        }
+        if (!isFinite(next.tradeInterval) || next.tradeInterval < 1) {
+          next.tradeInterval = before.tradeInterval ?? 1;
+        }
+        next.tradeInterval = Math.max(1, Math.round(next.tradeInterval));
         fast4Config = next;
         persist();
         log.warn("fast4Config updated via API", { before, after: next });
@@ -2676,6 +2684,12 @@ async function main() {
   // phase ends, base side resumes and the streak counter restarts.
   // Reuses fast3LastDigitFor (same pip-decimals map applies).
   const fast4LastDigitFor = fast3LastDigitFor;
+  // Per-symbol throttle state. tickCount counts ticks since last placement;
+  // lastFireMs records wall-clock time of last placement. Used by the
+  // tradeInterval / tradeIntervalUnit knobs to skip placements until N ticks
+  // or N seconds have elapsed.
+  const fast4SymbolTickCount = new Map<string, number>();
+  const fast4SymbolLastFireMs = new Map<string, number>();
   deriv.on("tick", (tick) => {
     const stratsForSym = FAST4_STRATEGIES.filter((s) => s.symbols.includes(tick.symbol));
     if (stratsForSym.length === 0) return;
@@ -2787,10 +2801,29 @@ async function main() {
 
     // ── Place a new bet for the next tick ──
     if (fast4Pending.has(tick.symbol)) return;
+    // Increment per-symbol tick counter (used by the trade-interval throttle).
+    const tcPrev = fast4SymbolTickCount.get(tick.symbol) ?? 0;
+    fast4SymbolTickCount.set(tick.symbol, tcPrev + 1);
     for (const strat of stratsForSym) {
       const cfg = fast4ConfigFor(strat.id);
       const enabled = (fast4Config.perStrategy?.[strat.id]?.enabled ?? true) !== false;
       if (!enabled) continue;
+      // Trade-interval throttle. interval=1 ticks = fire every tick (no skip).
+      // interval=N ticks = require ≥N ticks since last placement.
+      // interval=N seconds = require ≥N seconds since last placement.
+      const intervalUnit = cfg.tradeIntervalUnit ?? "ticks";
+      const intervalN = Math.max(1, cfg.tradeInterval ?? 1);
+      const lastFireMs = fast4SymbolLastFireMs.get(tick.symbol) ?? 0;
+      const tickCount = fast4SymbolTickCount.get(tick.symbol) ?? 0;
+      if (intervalN > 1) {
+        if (intervalUnit === "ticks") {
+          if (tickCount < intervalN) continue;
+        } else {
+          // seconds — block until enough wall-clock time has passed since last fire.
+          const elapsedMs = Date.now() - lastFireMs;
+          if (lastFireMs > 0 && elapsedMs < intervalN * 1000) continue;
+        }
+      }
       const mode = fast4ActiveMode();
       const ladderMap = mode === "live" ? fast4MartingaleLive : fast4MartingalePaper;
       const ladder = ladderMap[strat.id] ?? emptyMartingaleState();
@@ -2859,6 +2892,9 @@ async function main() {
         }).finally(() => {
           fast4LiveInFlight.delete(tick.symbol);
         });
+        // Reset throttle counters now that we've committed to a placement.
+        fast4SymbolTickCount.set(tick.symbol, 0);
+        fast4SymbolLastFireMs.set(tick.symbol, Date.now());
         break;
       }
       fast4Pending.set(tick.symbol, {
@@ -2870,6 +2906,9 @@ async function main() {
         isProbe: isProbeTrade,
         phaseKind: decision.kind,
       });
+      // Reset throttle counters now that we've committed to a placement.
+      fast4SymbolTickCount.set(tick.symbol, 0);
+      fast4SymbolLastFireMs.set(tick.symbol, Date.now());
       break;
     }
   });

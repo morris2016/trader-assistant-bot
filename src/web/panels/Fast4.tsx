@@ -87,7 +87,9 @@ export function Fast4Panel({ state, doAction, pending }: {
     pendingCfg.lossStreakTrigger !== paper.config.lossStreakTrigger ||
     (pendingCfg.probePattern ?? "EBEBE") !== (paper.config.probePattern ?? "EBEBE") ||
     (pendingCfg.hardCap ?? 0) !== (paper.config.hardCap ?? 0) ||
-    JSON.stringify(pendingCfg.customPatterns ?? []) !== JSON.stringify(paper.config.customPatterns ?? [])
+    JSON.stringify(pendingCfg.customPatterns ?? []) !== JSON.stringify(paper.config.customPatterns ?? []) ||
+    (pendingCfg.tradeIntervalUnit ?? "ticks") !== (paper.config.tradeIntervalUnit ?? "ticks") ||
+    (pendingCfg.tradeInterval ?? 1) !== (paper.config.tradeInterval ?? 1)
   );
 
   const stats = (paper.stats ?? {}) as Partial<{ balance: number; startingBalance: number; totalPnl: number; pnlPct: number; trades: number; wins: number; losses: number; winRate: number; avgR: number; peak: number; ddPct: number; open: number }>;
@@ -305,6 +307,29 @@ export function Fast4Panel({ state, doAction, pending }: {
               value={cfg.hardCap ?? 0}
               onChange={(e) => setCfg({ hardCap: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
               title="When the ladder would advance past this level, FREEZE at the cap level instead of advancing. Each subsequent loss stays at cap stake. A win still triggers the natural mart W→L0 reset. 0 = disabled (no cap)."
+            />
+          </ConfigField>
+          <ConfigField label="Trade Interval Unit">
+            <select
+              className="filter-select"
+              value={cfg.tradeIntervalUnit ?? "ticks"}
+              onChange={(e) => setCfg({ tradeIntervalUnit: e.target.value as "ticks" | "seconds" })}
+              title="ticks = fire every Nth tick. seconds = fire only when ≥N seconds elapsed since last fire."
+            >
+              <option value="ticks">every N ticks</option>
+              <option value="seconds">every N seconds</option>
+            </select>
+          </ConfigField>
+          <ConfigField label={`Trade Interval N (${cfg.tradeIntervalUnit ?? "ticks"})`}>
+            <input
+              className="filter-input"
+              type="number"
+              step="1"
+              min={1}
+              max={3600}
+              value={cfg.tradeInterval ?? 1}
+              onChange={(e) => setCfg({ tradeInterval: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+              title="Throttle interval. 1 = trade every tick (no throttle). For ticks: skip N-1 ticks between trades. For seconds: wait at least N seconds since the last placement."
             />
           </ConfigField>
           <ConfigField label="Martingale Multiplier">

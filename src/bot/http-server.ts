@@ -373,6 +373,13 @@ export function startHttpServer(opts: {
                 // Bad JSON — ignore the field, server-side validator will keep current value.
               }
             }
+            const tiu = url.searchParams.get("tradeIntervalUnit");
+            if (tiu === "ticks" || tiu === "seconds") patch.tradeIntervalUnit = tiu;
+            const ti = url.searchParams.get("tradeInterval");
+            if (ti != null && ti !== "") {
+              const n = Number(ti);
+              if (Number.isFinite(n) && n >= 1) patch.tradeInterval = Math.round(n);
+            }
             if (strategyId) {
               opts.manualControls.updateFast4StrategyConfig(strategyId, clear ? null : patch);
             } else {
