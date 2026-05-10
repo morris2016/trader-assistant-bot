@@ -216,6 +216,11 @@ export type Fast4Config = FastSandboxConfig & {
   probePattern: string;
   /** Hard cap on ladder advancement (freeze level). 0 = disabled. */
   hardCap: number;
+  /** User-saved custom probe patterns. Each entry is a raw pattern
+   *  string (fixed E/O/B sequence or WX-OPP-N / WX-ALT-N form) and
+   *  appears in the panel's "My Customs" dropdown group. Validated
+   *  via fast4-patterns.validateProbePattern(). Capped at 50 entries. */
+  customPatterns: string[];
 };
 
 export const DEFAULT_FAST4_CONFIG: Fast4Config = {
@@ -236,6 +241,7 @@ export const DEFAULT_FAST4_CONFIG: Fast4Config = {
   lossStreakTrigger: 3,
   probePattern: "EBEBE",
   hardCap: 0,
+  customPatterns: [],
 };
 
 /** Deriv-valid multiplier values for synthetic-index MULTIPLIER contracts.
@@ -472,13 +478,16 @@ export class BotStorage {
         fast4Paper: parsed.fast4Paper ?? emptyPaperState(41),
         fast4MartingalePaper: parsed.fast4MartingalePaper ?? {},
         fast4MartingaleLive: parsed.fast4MartingaleLive ?? {},
-        fast4Config: {
-          ...DEFAULT_FAST4_CONFIG,
-          ...(parsed.fast4Config ?? {}),
-          ...(prefs.fast4Config ?? {}),
-          // Force PAPER on every boot — same safety reasoning as Fast2/Fast3.
-          liveTradingEnabled: false,
-        },
+        fast4Config: (() => {
+          const merged: Fast4Config = {
+            ...DEFAULT_FAST4_CONFIG,
+            ...(parsed.fast4Config ?? {}),
+            ...(prefs.fast4Config ?? {}),
+            liveTradingEnabled: false,
+          };
+          if (!Array.isArray(merged.customPatterns)) merged.customPatterns = [];
+          return merged;
+        })(),
         realConfig: {
           ...DEFAULT_REAL_CONFIG,
           ...(parsed.realConfig ?? {}),
