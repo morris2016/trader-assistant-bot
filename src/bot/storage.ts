@@ -144,14 +144,18 @@ export type Fast2Config = FastSandboxConfig;
 // 2.2× anti-martingale (Paroli) escalates stake on each win; resets on loss.
 // Depth 5 lets a 5-win streak ride from $1 → $1×2.2⁵ = $51 before reset.
 export const DEFAULT_FAST2_CONFIG: Fast2Config = {
-  tradeMultiplier: 100,           // unused for DIGITs (binary contracts) — kept for UI parity
+  tradeMultiplier: 100,           // Deriv-verified max valid on BOOM 300N
   martingaleMultiplier: 2.2,      // Paroli escalation ratio
   baseStake: 1,
   maxLevels: 5,                   // 5-win Paroli streak cap; resets on first loss
   perTradeCap: 50,                // Deriv DIGIT contract max stake
-  commissionPct: 0,
+  // Live-realistic fees (validated 2026-05 vs Deriv proposal endpoint).
+  // BOOM 300N MULT contracts charge 3% of stake baked into ask_price.
+  // Synthetic-index SL fills typically slip 5-15bps past the trigger on
+  // volatile bars; 10bps is a conservative midpoint.
+  commissionPct: 0.03,
   entrySpreadBps: 0,
-  slSlippageBps: 0,
+  slSlippageBps: 10,
   forceMartingale: false,
   sideFilter: "both",
   martingaleMode: "anti",         // ★ Paroli — escalate on win, reset on loss
