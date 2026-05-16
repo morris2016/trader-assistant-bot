@@ -335,9 +335,12 @@ async function main() {
   // operator can swap patterns from the UI without restarting the bot.
   //
   // State:
-  //   inPhase       — true while a probe phase is active
-  //   phaseIdx      — 0-based index of the next trade within the phase
-  //   phaseHadWin   — has any trade in this phase already won? (used by win-exit)
+  //   inPhase         — true while a probe phase is active
+  //   phaseIdx        — 0-based index of the next trade within the phase
+  //   phaseProbeWon   — has a PROBE-side trade won during this phase?
+  //                     Used by decideNextTrade for early-exit. Interleave
+  //                     (base-side) wins do NOT set this — they reset the
+  //                     ladder via mart but the phase continues.
   //
   // Legacy fields (probeRemaining, lastFiredProbe) are kept on the state shape
   // for back-compat with persisted entries, but the pattern engine drives all
@@ -346,7 +349,7 @@ async function main() {
     baseLossStreak: number;
     inPhase: boolean;
     phaseIdx: number;
-    phaseHadWin: boolean;
+    phaseProbeWon: boolean;
     probesFired: number;
     // Legacy / UI-display:
     probeRemaining: number;
@@ -360,7 +363,7 @@ async function main() {
         baseLossStreak: 0,
         inPhase: false,
         phaseIdx: 0,
-        phaseHadWin: false,
+        phaseProbeWon: false,
         probesFired: 0,
         probeRemaining: 0,
         lastFiredProbe: false,
@@ -626,15 +629,17 @@ async function main() {
         const won = pnl > 0;
         if (phaseKind === "probe" || phaseKind === "interleave") {
           probe.phaseIdx++;
-          if (won) probe.phaseHadWin = true;
+          // Only PROBE wins trigger early exit. Interleave wins reset the
+          // ladder via mart but the phase continues firing the pattern.
+          if (won && phaseKind === "probe") probe.phaseProbeWon = true;
           if (probe.phaseIdx >= patternMaxTrades(pattern)) {
             probe.inPhase = false;
             probe.phaseIdx = 0;
-            probe.phaseHadWin = false;
+            probe.phaseProbeWon = false;
           }
           probe.probeRemaining = Math.max(0, patternMaxTrades(pattern) - probe.phaseIdx);
           probe.lastFiredProbe = phaseKind === "probe";
-          log.info(`fast4 LIVE ${phaseKind.toUpperCase()} settled ${t.symbol} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} phaseIdx=${probe.phaseIdx}/${patternMaxTrades(pattern)} lvl=${nextLadder.level}`);
+          log.info(`fast4 LIVE ${phaseKind.toUpperCase()} settled ${t.symbol} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} phaseIdx=${probe.phaseIdx}/${patternMaxTrades(pattern)} lvl=${nextLadder.level}${probe.phaseProbeWon ? " probeWon→willExit" : ""}`);
         } else {
           // "normal" or "exit" — both count toward streak as a normal base.
           if (pnl <= 0) {
@@ -643,7 +648,7 @@ async function main() {
             if (sCfgLive.probeEnabled && patternHasTrades && probe.baseLossStreak >= sCfgLive.lossStreakTrigger) {
               probe.inPhase = true;
               probe.phaseIdx = 0;
-              probe.phaseHadWin = false;
+              probe.phaseProbeWon = false;
               probe.probesFired++;
               probe.baseLossStreak = 0;
               probe.probeRemaining = patternMaxTrades(pattern);
@@ -2736,20 +2741,19 @@ async function main() {
         const probe = fast4ProbeFor(pending.strategyId);
         const pattern = fast4PatternFor(cfg);
         if (pending.phaseKind === "probe" || pending.phaseKind === "interleave") {
-          // In-phase trade. Update phaseIdx and phase-win flag.
+          // In-phase trade. Update phaseIdx and probe-win flag.
           probe.phaseIdx++;
-          if (wins) probe.phaseHadWin = true;
-          // Win-exit early termination handled at dispatch — once phaseHadWin is
-          // set, decideNextTrade returns "exit" on the next dispatch.
-          // Fixed patterns end when phaseIdx reaches seq.length.
+          // Only PROBE wins trigger early exit; interleave wins reset the
+          // ladder via mart but the phase continues.
+          if (wins && pending.phaseKind === "probe") probe.phaseProbeWon = true;
           if (probe.phaseIdx >= patternMaxTrades(pattern)) {
             probe.inPhase = false;
             probe.phaseIdx = 0;
-            probe.phaseHadWin = false;
+            probe.phaseProbeWon = false;
           }
           probe.probeRemaining = Math.max(0, patternMaxTrades(pattern) - probe.phaseIdx);
           probe.lastFiredProbe = pending.phaseKind === "probe";
-          log.debug(`fast4Paper ${pending.phaseKind.toUpperCase()} settled ${tick.symbol} ${wins ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} phaseIdx=${probe.phaseIdx}/${patternMaxTrades(pattern)}`);
+          log.debug(`fast4Paper ${pending.phaseKind.toUpperCase()} settled ${tick.symbol} ${wins ? "WIN" : "LOSS"} pnl=$${netPnl.toFixed(2)} phaseIdx=${probe.phaseIdx}/${patternMaxTrades(pattern)}${probe.phaseProbeWon ? " probeWon→willExit" : ""}`);
         } else {
           // Normal base trade (or "exit" — first trade after a phase).
           // Count toward streak and check trigger.
@@ -2759,7 +2763,7 @@ async function main() {
             if (cfg.probeEnabled && patternHasTrades && probe.baseLossStreak >= cfg.lossStreakTrigger) {
               probe.inPhase = true;
               probe.phaseIdx = 0;
-              probe.phaseHadWin = false;
+              probe.phaseProbeWon = false;
               probe.probesFired++;
               probe.baseLossStreak = 0;
               probe.probeRemaining = patternMaxTrades(pattern);
@@ -2843,7 +2847,7 @@ async function main() {
       const decision = fast4DecideTrade({
         inPhase: probe.inPhase,
         phaseIdx: probe.phaseIdx,
-        phaseHadWin: probe.phaseHadWin,
+        phaseProbeWon: probe.phaseProbeWon,
         pattern,
         baseSide,
       });
@@ -2852,7 +2856,7 @@ async function main() {
       if (decision.kind === "exit") {
         probe.inPhase = false;
         probe.phaseIdx = 0;
-        probe.phaseHadWin = false;
+        probe.phaseProbeWon = false;
         probe.probeRemaining = 0;
         probe.lastFiredProbe = false;
       }

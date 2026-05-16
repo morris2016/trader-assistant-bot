@@ -158,11 +158,11 @@ export type PhaseDecision = {
 export function decideNextTrade(args: {
   inPhase: boolean;
   phaseIdx: number;
-  phaseHadWin: boolean;
+  phaseProbeWon: boolean;
   pattern: ProbePattern;
   baseSide: "DIGITODD" | "DIGITEVEN";
 }): PhaseDecision {
-  const { inPhase, phaseIdx, phaseHadWin, pattern, baseSide } = args;
+  const { inPhase, phaseIdx, phaseProbeWon, pattern, baseSide } = args;
   const opposite: "DIGITODD" | "DIGITEVEN" = baseSide === "DIGITODD" ? "DIGITEVEN" : "DIGITODD";
 
   if (!inPhase) return { kind: "normal", side: baseSide };
@@ -172,9 +172,11 @@ export function decideNextTrade(args: {
   // Phase exhausted → exit (this trade fires as normal base).
   if (phaseIdx >= maxTrades) return { kind: "exit", side: baseSide };
 
-  // Win-exit early termination: if a win has already landed in this phase,
-  // exit immediately on the next decision (this trade is normal base).
-  if (pattern.kind === "win-exit" && phaseHadWin) return { kind: "exit", side: baseSide };
+  // Probe-win early termination (applies to ALL patterns): if a probe-side
+  // trade has already won during this phase, exit immediately on the next
+  // decision. Interleave (base-side) wins do NOT trigger this — they just
+  // reset the ladder via the normal mart W→L0 rule and the phase continues.
+  if (phaseProbeWon) return { kind: "exit", side: baseSide };
 
   if (pattern.kind === "fixed") {
     const ch = pattern.seq[phaseIdx];
