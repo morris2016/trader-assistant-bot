@@ -597,10 +597,17 @@ export function startHttpServer(opts: {
           // Snapshot of last-known prices for each symbol with an open position.
           // The UI uses this to render live unrealized P&L per row + a SL/TP
           // progress bar so the operator can intervene before the bot does.
+          // Include BOTH paper opens AND live fast2 opens so the Open Positions
+          // table works whether liveTradingEnabled is on or off.
           const prices: Record<string, number> = {};
-          for (const p of ps.open) {
-            const px = opts.getLastPriceFor(p.symbol);
-            if (px != null) prices[p.symbol] = px;
+          const symbolsNeeded = new Set<string>();
+          for (const p of ps.open) symbolsNeeded.add(p.symbol);
+          for (const t of opts.getState().open) {
+            if (t.sandbox === "fast2") symbolsNeeded.add(t.symbol);
+          }
+          for (const sym of symbolsNeeded) {
+            const px = opts.getLastPriceFor(sym);
+            if (px != null) prices[sym] = px;
           }
           json(res, 200, {
             stats,

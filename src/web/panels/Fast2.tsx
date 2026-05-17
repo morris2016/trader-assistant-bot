@@ -459,23 +459,38 @@ export function Fast2Panel({ state, doAction, pending }: {
             </tr>
           </thead>
           <tbody>
-            {strategies.map((s) => (
-              <tr key={s.id}>
-                <td>
-                  <div className="bold">{s.id}</div>
-                  <div className="faint" style={{ fontSize: 11 }}>{s.name}</div>
-                </td>
-                <td className="mono">{s.symbols.join(", ")}</td>
-                <td><span className="strat-chip">{s.granularity}s</span></td>
-                <td className={`mono ${s.live.barsSeen === 0 ? "neg" : ""}`}>{s.live.barsSeen}</td>
-                <td className="mono">{s.live.trades}</td>
-                <td className="mono">{s.live.trades > 0 ? `${s.live.wins}W/${s.live.losses}L` : "—"}</td>
-                <td className={`mono ${(s.live.pnlUsd ?? 0) > 0 ? "pos" : (s.live.pnlUsd ?? 0) < 0 ? "neg" : "muted"}`}>
-                  {(s.live.pnlUsd ?? 0) >= 0 ? "+" : ""}${(s.live.pnlUsd ?? 0).toFixed(2)}
-                </td>
-                <td className="faint">{s.live.lastSignalAt ? fmtTime(s.live.lastSignalAt) : "—"}</td>
-              </tr>
-            ))}
+            {strategies.map((s) => {
+              let trades: number, wins: number, losses: number, pnlUsd: number;
+              if (isLive) {
+                const myTrades = liveClosed.filter((t) => t.sandboxStrategyId === s.id);
+                trades = myTrades.length;
+                wins = myTrades.filter((t) => (t.profit ?? 0) > 0).length;
+                losses = trades - wins;
+                pnlUsd = myTrades.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+              } else {
+                trades = s.live.trades ?? 0;
+                wins = s.live.wins ?? 0;
+                losses = s.live.losses ?? 0;
+                pnlUsd = s.live.pnlUsd ?? 0;
+              }
+              return (
+                <tr key={s.id}>
+                  <td>
+                    <div className="bold">{s.id}</div>
+                    <div className="faint" style={{ fontSize: 11 }}>{s.name}</div>
+                  </td>
+                  <td className="mono">{s.symbols.join(", ")}</td>
+                  <td><span className="strat-chip">{s.granularity}s</span></td>
+                  <td className={`mono ${s.live.barsSeen === 0 ? "neg" : ""}`}>{s.live.barsSeen}</td>
+                  <td className="mono">{trades}</td>
+                  <td className="mono">{trades > 0 ? `${wins}W/${losses}L` : "—"}</td>
+                  <td className={`mono ${pnlUsd > 0 ? "pos" : pnlUsd < 0 ? "neg" : "muted"}`}>
+                    {pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}
+                  </td>
+                  <td className="faint">{s.live.lastSignalAt ? fmtTime(s.live.lastSignalAt) : "—"}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -579,19 +594,33 @@ export function Fast2Panel({ state, doAction, pending }: {
 
       {(() => {
         const openRows = isLive
-          ? liveTrades.filter((t) => t.closedAt == null).map((t) => ({
-              id: t.id,
-              symbol: t.symbol,
-              side: t.side,
-              detector: t.detector,
-              stake: t.stake,
-              multiplier: t.multiplier,
-              entryPrice: t.entrySpot ?? 0,
-              stopPrice: t.stopLoss ?? null,
-              takeProfitPrice: t.takeProfit ?? null,
-              openedAt: t.openedAt,
-              contractId: t.contractId,
-            }))
+          ? liveTrades.filter((t) => t.closedAt == null).map((t) => {
+              const entry = t.entrySpot ?? 0;
+              const mult = t.multiplier ?? 1;
+              const sideSign = t.side === "BUY" ? 1 : -1;
+              // Live trades store SL/TP as $ P&L thresholds. Convert to implied
+              // trigger prices so the table + progress bar render in price units
+              // consistent with paper trades.
+              const slPriceDist = (t.stopLoss != null && t.stake > 0 && entry > 0)
+                ? (t.stopLoss / (t.stake * mult)) * entry
+                : null;
+              const tpPriceDist = (t.takeProfit != null && t.stake > 0 && entry > 0)
+                ? (t.takeProfit / (t.stake * mult)) * entry
+                : null;
+              return {
+                id: t.id,
+                symbol: t.symbol,
+                side: t.side,
+                detector: t.detector,
+                stake: t.stake,
+                multiplier: t.multiplier,
+                entryPrice: entry,
+                stopPrice: slPriceDist != null ? entry - sideSign * slPriceDist : null,
+                takeProfitPrice: tpPriceDist != null ? entry + sideSign * tpPriceDist : null,
+                openedAt: t.openedAt,
+                contractId: t.contractId,
+              };
+            })
           : paper.open.map((p) => ({
               id: p.id,
               symbol: p.symbol,

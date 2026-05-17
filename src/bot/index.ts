@@ -2308,30 +2308,41 @@ async function main() {
     }
   }, 30_000);
 
-  // ─── Fast3 stuck-contract watchdog ───
-  // DIGITODD settles 1 tick after open (~3-5s). If Deriv silently drops the
-  // proposal_open_contract subscription (WS keeps the main connection alive
-  // but stops delivering updates for that contract), the local trade stays
-  // in real.state().open forever, and the fast3 dispatcher's "open-contract
-  // on this symbol" guard then dead-zones that symbol — strategy "dies".
-  // Every 20s, scan for fast3 trades older than 30s and reconcile them
-  // against Deriv (one-shot proposal_open_contract). reconcileOpenContracts
-  // settles finalised contracts and re-subscribes still-live ones.
-  safeInterval("fast3-stuck-watchdog", async () => {
-    const STUCK_THRESHOLD_MS = 30_000;
+  // ─── Stuck-contract watchdog (per-sandbox thresholds) ───
+  // Deriv occasionally silently drops the proposal_open_contract subscription
+  // (the main WS stays connected but updates for that contract stop arriving).
+  // When that happens, the local trade stays in real.state().open forever and
+  // the sandbox's "open-contract on this symbol" guard dead-zones that symbol
+  // — strategy "dies".
+  //
+  // Per-sandbox stuck thresholds reflect the strategy hold window:
+  //   • fast3 / fast4 — DIGITODD settles 1 tick after open (~3-5s) → 30s stuck
+  //   • fast2          — MULTIPLIER on 5m bars typically holds 1-2 bars → 10min stuck
+  // Every 20s, reconcile any trade past its threshold via a one-shot
+  // proposal_open_contract pull. reconcileOpenContracts settles finalised
+  // contracts and re-subscribes still-live ones so the next settlement update
+  // arrives through the normal flow.
+  safeInterval("stuck-contract-watchdog", async () => {
+    const THRESHOLD_BY_SANDBOX: Record<string, number> = {
+      fast2: 600_000,   // 10 min — MULTIPLIER on 5m bars
+      fast3: 30_000,    // 30s — DIGITODD
+      fast4: 30_000,    // 30s — DIGITODD
+    };
     const now = Date.now();
-    const stuck = real.state().open.filter(
-      (t) => t.sandbox === "fast3" && now - t.openedAt > STUCK_THRESHOLD_MS,
-    );
+    const stuck = real.state().open.filter((t) => {
+      const threshold = t.sandbox ? THRESHOLD_BY_SANDBOX[t.sandbox] : undefined;
+      return threshold != null && now - t.openedAt > threshold;
+    });
     if (stuck.length === 0) return;
-    log.warn(`fast3-stuck-watchdog: ${stuck.length} fast3 contracts open >${STUCK_THRESHOLD_MS / 1000}s — reconciling`, {
-      contracts: stuck.map((t) => ({ id: t.contractId, sym: t.symbol, ageSec: Math.floor((now - t.openedAt) / 1000) })),
+    log.warn(`stuck-contract-watchdog: ${stuck.length} contracts past threshold — reconciling`, {
+      contracts: stuck.map((t) => ({ id: t.contractId, sym: t.symbol, sandbox: t.sandbox, ageSec: Math.floor((now - t.openedAt) / 1000) })),
     });
     try {
       const res = await real.reconcileOpenContracts();
-      log.info("fast3-stuck-watchdog: reconcile complete", res);
+      log.info("stuck-contract-watchdog: reconcile complete", res);
+      if (res.settled > 0) persist();
     } catch (e) {
-      log.error("fast3-stuck-watchdog: reconcile threw", { err: (e as Error).message });
+      log.error("stuck-contract-watchdog: reconcile threw", { err: (e as Error).message });
     }
   }, 20_000);
 
