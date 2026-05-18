@@ -87,7 +87,10 @@ export function FastPanel({ doAction, pending }: {
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
     pendingCfg.forceMartingale !== paper.config.forceMartingale
   );
-  const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
+  const symbols = Array.from(new Set([
+    ...trades.map((t) => t.symbol),
+    ...liveClosed.map((t) => t.symbol),
+  ])).sort();
   const filtered = trades.filter((t) =>
     (filterSym === "ALL" || t.symbol === filterSym) &&
     (filterRes === "ALL" || t.result === filterRes)
@@ -347,6 +350,149 @@ export function FastPanel({ doAction, pending }: {
         </table>
       </div>
 
+      {(() => {
+        const openRows = isLive
+          ? liveOpenList.map((t) => {
+              const entry = t.entrySpot ?? 0;
+              const mult = t.multiplier ?? 1;
+              const sideSign = t.side === "BUY" ? 1 : -1;
+              // Live trades store SL/TP as $ P&L thresholds. Convert to implied
+              // trigger prices for display + progress bar (entry ± distance).
+              const slPriceDist = (t.stopLoss != null && t.stake > 0 && entry > 0)
+                ? (t.stopLoss / (t.stake * mult)) * entry
+                : null;
+              const tpPriceDist = (t.takeProfit != null && t.stake > 0 && entry > 0)
+                ? (t.takeProfit / (t.stake * mult)) * entry
+                : null;
+              return {
+                id: t.id,
+                symbol: t.symbol,
+                side: t.side,
+                detector: t.detector,
+                stake: t.stake,
+                multiplier: t.multiplier,
+                entryPrice: entry,
+                stopPrice: slPriceDist != null ? entry - sideSign * slPriceDist : null,
+                takeProfitPrice: tpPriceDist != null ? entry + sideSign * tpPriceDist : null,
+                openedAt: t.openedAt,
+                contractId: t.contractId,
+              };
+            })
+          : paper.open.map((p) => ({
+              id: p.id,
+              symbol: p.symbol,
+              side: p.side,
+              detector: p.detector,
+              stake: p.stake,
+              multiplier: p.multiplier,
+              entryPrice: p.entryPrice,
+              stopPrice: p.stopPrice,
+              takeProfitPrice: p.takeProfitPrice,
+              openedAt: p.openedAt,
+              contractId: undefined as number | undefined,
+            }));
+        return (
+          <>
+            <h3 className="section-title">
+              Open Positions <span className="muted" style={{ fontSize: 11 }}>{openRows.length} {isLive ? "live" : "paper"}</span>
+            </h3>
+            <div className="card table-card" style={{ marginBottom: 16 }}>
+              {openRows.length === 0 ? (
+                <div className="empty" style={{ padding: 16, textAlign: "center" }}>
+                  No open positions — Fade is flat.
+                </div>
+              ) : (
+                <table className="trades-table">
+                  <thead>
+                    <tr>
+                      <th>Opened</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Detector</th>
+                      <th style={{ textAlign: "right" }}>Stake</th>
+                      <th style={{ textAlign: "right" }}>MULT</th>
+                      <th style={{ textAlign: "right" }}>Entry</th>
+                      <th style={{ textAlign: "right" }}>Current</th>
+                      <th style={{ textAlign: "right" }}>uPnL</th>
+                      <th style={{ minWidth: 110 }}>SL ──── TP</th>
+                      <th style={{ textAlign: "right" }}>SL</th>
+                      <th style={{ textAlign: "right" }}>TP</th>
+                      {isLive && <th style={{ textAlign: "right" }}>Contract</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {openRows.map((r) => {
+                      const ageMs = Date.now() - r.openedAt;
+                      const ageStr = ageMs < 60_000
+                        ? `${Math.floor(ageMs / 1000)}s`
+                        : ageMs < 3_600_000
+                          ? `${Math.floor(ageMs / 60_000)}m`
+                          : `${(ageMs / 3_600_000).toFixed(1)}h`;
+                      const cur = paper.prices?.[r.symbol] ?? null;
+                      let upnl: number | null = null;
+                      let progressPct: number | null = null;
+                      let priceDelta: number | null = null;
+                      if (cur != null && r.entryPrice && r.entryPrice > 0) {
+                        const move = (cur - r.entryPrice) / r.entryPrice;
+                        const sideSign = r.side === "BUY" ? 1 : -1;
+                        upnl = Math.max(-r.stake, r.stake * (r.multiplier ?? 1) * move * sideSign);
+                        priceDelta = cur - r.entryPrice;
+                        if (r.stopPrice != null && r.takeProfitPrice != null) {
+                          const slDist = Math.abs(r.entryPrice - r.stopPrice);
+                          const tpDist = Math.abs(r.takeProfitPrice - r.entryPrice);
+                          if (r.side === "BUY") {
+                            if (cur >= r.entryPrice) progressPct = 50 + (Math.min(cur, r.takeProfitPrice) - r.entryPrice) / tpDist * 50;
+                            else                    progressPct = 50 - (r.entryPrice - Math.max(cur, r.stopPrice)) / slDist * 50;
+                          } else {
+                            if (cur <= r.entryPrice) progressPct = 50 + (r.entryPrice - Math.max(cur, r.takeProfitPrice)) / tpDist * 50;
+                            else                    progressPct = 50 - (Math.min(cur, r.stopPrice) - r.entryPrice) / slDist * 50;
+                          }
+                          progressPct = Math.max(0, Math.min(100, progressPct));
+                        }
+                      }
+                      const upnlClass = upnl == null ? "muted" : upnl > 0 ? "pos" : upnl < 0 ? "neg" : "muted";
+                      return (
+                        <tr key={r.id}>
+                          <td>{fmtTime(r.openedAt)} <span className="muted" style={{ fontSize: 10 }}>({ageStr})</span></td>
+                          <td>{r.symbol}</td>
+                          <td className={r.side === "BUY" ? "tone-pos" : "tone-neg"}>{r.side}</td>
+                          <td className="muted" style={{ fontSize: 11 }}>{r.detector}</td>
+                          <td style={{ textAlign: "right" }}>${r.stake.toFixed(2)}</td>
+                          <td style={{ textAlign: "right" }}>{r.multiplier ? `${r.multiplier}×` : "—"}</td>
+                          <td style={{ textAlign: "right" }}>{r.entryPrice ? r.entryPrice.toFixed(5) : "—"}</td>
+                          <td style={{ textAlign: "right" }} className={`mono ${priceDelta == null ? "" : priceDelta > 0 ? "pos" : priceDelta < 0 ? "neg" : ""}`}>
+                            {cur != null ? cur.toFixed(5) : "—"}
+                            {priceDelta != null && (
+                              <div className="muted" style={{ fontSize: 10 }}>
+                                {priceDelta >= 0 ? "+" : ""}{priceDelta.toFixed(5)}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ textAlign: "right" }} className={`mono ${upnlClass}`}>
+                            {upnl == null ? "—" : `${upnl >= 0 ? "+" : ""}$${upnl.toFixed(2)}`}
+                          </td>
+                          <td>
+                            {progressPct == null ? <span className="muted" style={{ fontSize: 10 }}>no price</span> : (
+                              <div style={{ position: "relative", height: 8, background: "#2a2f44", borderRadius: 4, overflow: "hidden" }} title={`${progressPct.toFixed(1)}% (0=SL, 50=entry, 100=TP)`}>
+                                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${progressPct}%`, background: progressPct >= 50 ? "#3acc7c" : "#e5526e" }} />
+                                <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "#888" }} />
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ textAlign: "right" }}>{r.stopPrice ? r.stopPrice.toFixed(5) : "—"}</td>
+                          <td style={{ textAlign: "right" }}>{r.takeProfitPrice ? r.takeProfitPrice.toFixed(5) : "—"}</td>
+                          {isLive && <td style={{ textAlign: "right", fontSize: 11 }} className="muted">{r.contractId ?? "—"}</td>}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        );
+      })()}
+
       <h3 className="section-title">Equity Curve <span className="muted" style={{ fontSize: 11 }}>{equity.length} samples</span></h3>
       <EquityChart points={equity} />
 
@@ -362,46 +508,105 @@ export function FastPanel({ doAction, pending }: {
         </button>
       </div>
 
-      <h3 className="section-title">Recent Trades ({filtered.length})</h3>
-      <div className="card table-card">
-        <div className="filters">
-          <select className="filter-select" value={filterSym} onChange={(e) => setFilterSym(e.target.value)}>
-            <option value="ALL">All symbols</option>
-            {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <select className="filter-select" value={filterRes} onChange={(e) => setFilterRes(e.target.value as "ALL" | "won" | "lost")}>
-            <option value="ALL">Won + Lost</option>
-            <option value="won">Won only</option>
-            <option value="lost">Lost only</option>
-          </select>
-        </div>
-        {filtered.length === 0 ? (
-          <div className="empty"><span className="empty-emoji">⚡</span>No fast-paper trades yet</div>
-        ) : (
-          <table>
-            <thead>
-              <tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Stake</th><th>MULT</th><th>Fee</th><th>Entry</th><th>Exit</th><th>R</th><th>Net P&amp;L</th><th>Result</th></tr>
-            </thead>
-            <tbody>
-              {filtered.map((t) => (
-                <tr key={t.id}>
-                  <td className="mono faint">{t.closedAt ? fmtTime(t.closedAt) : "—"}</td>
-                  <td className="mono">{t.symbol}</td>
-                  <td><span className={`pill ${t.side === "BUY" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
-                  <td className="mono">${t.stake.toFixed(2)}</td>
-                  <td className="mono faint">{t.multiplier}×</td>
-                  <td className="mono faint">${(t.commission ?? 0).toFixed(2)}</td>
-                  <td className="mono">{t.entryPrice.toFixed(5)}</td>
-                  <td className="mono">{t.exitPrice.toFixed(5)}</td>
-                  <td className={`mono ${t.rMultiple > 0 ? "pos" : "neg"}`}>{t.rMultiple.toFixed(2)}R</td>
-                  <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`}>{t.pnl >= 0 ? "+" : ""}${t.pnl.toFixed(2)}</td>
-                  <td><span className={`pill ${t.result === "won" ? "pill-green" : "pill-red"}`}>{t.result}</span></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {(() => {
+        // Recent Trades: in LIVE mode, render the live closed trades (from
+        // /api/trades?sandbox=fast). In PAPER mode, render the paper sim closed
+        // trades. Filter sym/result both modes.
+        type RowT = {
+          id: string; closedAt: number | null; symbol: string; side: "BUY" | "SELL";
+          stake: number; multiplier?: number; commission: number;
+          entryPrice: number; exitPrice: number;
+          rMultiple: number; pnl: number; result: "won" | "lost";
+          contractId?: number; latencyMs?: number | null;
+        };
+        const rows: RowT[] = isLive
+          ? liveClosed.map((t) => ({
+              id: t.id,
+              closedAt: t.closedAt,
+              symbol: t.symbol,
+              side: t.side as "BUY" | "SELL",
+              stake: t.stake,
+              multiplier: t.multiplier,
+              commission: 0,
+              entryPrice: t.entrySpot ?? 0,
+              exitPrice: t.exitSpot ?? 0,
+              rMultiple: t.stake > 0 ? (t.profit ?? 0) / t.stake : 0,
+              pnl: t.profit ?? 0,
+              result: (t.profit ?? 0) > 0 ? "won" : "lost",
+              contractId: t.contractId,
+              latencyMs: t.openLatencyMs ?? null,
+            }))
+          : trades.map((t) => ({
+              id: t.id,
+              closedAt: t.closedAt,
+              symbol: t.symbol,
+              side: t.side as "BUY" | "SELL",
+              stake: t.stake,
+              multiplier: t.multiplier,
+              commission: t.commission ?? 0,
+              entryPrice: t.entryPrice,
+              exitPrice: t.exitPrice,
+              rMultiple: t.rMultiple,
+              pnl: t.pnl,
+              result: t.result,
+            }));
+        const rowsFilt = rows.filter((r) =>
+          (filterSym === "ALL" || r.symbol === filterSym) &&
+          (filterRes === "ALL" || r.result === filterRes),
+        );
+        return (
+          <>
+            <h3 className="section-title">Recent Trades ({rowsFilt.length}) <span className="muted" style={{ fontSize: 11 }}>{isLive ? "live" : "paper"}</span></h3>
+            <div className="card table-card">
+              <div className="filters">
+                <select className="filter-select" value={filterSym} onChange={(e) => setFilterSym(e.target.value)}>
+                  <option value="ALL">All symbols</option>
+                  {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <select className="filter-select" value={filterRes} onChange={(e) => setFilterRes(e.target.value as "ALL" | "won" | "lost")}>
+                  <option value="ALL">Won + Lost</option>
+                  <option value="won">Won only</option>
+                  <option value="lost">Lost only</option>
+                </select>
+              </div>
+              {rowsFilt.length === 0 ? (
+                <div className="empty"><span className="empty-emoji">⚡</span>No {isLive ? "live" : "paper"} trades yet</div>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Closed</th><th>Symbol</th><th>Side</th><th>Stake</th><th>MULT</th>
+                      {!isLive && <th>Fee</th>}
+                      {isLive && <th>Latency</th>}
+                      <th>Entry</th><th>Exit</th><th>R</th><th>{isLive ? "P&L" : "Net P&L"}</th><th>Result</th>
+                      {isLive && <th>Contract</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsFilt.map((t) => (
+                      <tr key={t.id}>
+                        <td className="mono faint">{t.closedAt ? fmtTime(t.closedAt) : "—"}</td>
+                        <td className="mono">{t.symbol}</td>
+                        <td><span className={`pill ${t.side === "BUY" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
+                        <td className="mono">${t.stake.toFixed(2)}</td>
+                        <td className="mono faint">{t.multiplier ?? "—"}×</td>
+                        {!isLive && <td className="mono faint">${t.commission.toFixed(2)}</td>}
+                        {isLive && <td className="mono faint">{t.latencyMs != null ? `${t.latencyMs}ms` : "—"}</td>}
+                        <td className="mono">{t.entryPrice ? t.entryPrice.toFixed(5) : "—"}</td>
+                        <td className="mono">{t.exitPrice ? t.exitPrice.toFixed(5) : "—"}</td>
+                        <td className={`mono ${t.rMultiple > 0 ? "pos" : "neg"}`}>{t.rMultiple.toFixed(2)}R</td>
+                        <td className={`mono ${t.pnl > 0 ? "pos" : "neg"}`}>{t.pnl >= 0 ? "+" : ""}${t.pnl.toFixed(2)}</td>
+                        <td><span className={`pill ${t.result === "won" ? "pill-green" : "pill-red"}`}>{t.result}</span></td>
+                        {isLive && <td className="muted" style={{ fontSize: 11 }}>{t.contractId ?? "—"}</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        );
+      })()}
 
       <h3 className="section-title" style={{ marginTop: 16 }}>Recent Signals ({signals.length})</h3>
       <div className="card table-card">
