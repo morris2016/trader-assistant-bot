@@ -207,6 +207,9 @@ export type FastPaperResp = {
   open: PaperPosition[];
   martingale: Record<string, FastMartingaleSnapshot>;
   config: Fast1Config;
+  /** Last-known close price per symbol with an open position. Used by the
+   *  UI to render live unrealized P&L + SL/TP progress per row. */
+  prices?: Record<string, number>;
 };
 
 export type Fast2PaperResp = Omit<FastPaperResp, "config"> & {

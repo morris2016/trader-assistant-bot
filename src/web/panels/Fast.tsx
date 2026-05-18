@@ -5,7 +5,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, ColorType } from "lightweight-charts";
-import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast1Config, type FastMartingaleSnapshot, type FastPaperResp, type Signal, type StrategyStats } from "../api";
+import { api, fmtTime, type ClosedPaperPosition, type EquityPoint, type Fast1Config, type FastMartingaleSnapshot, type FastPaperResp, type RealTrade, type Signal, type StrategyStats } from "../api";
 
 // Deriv only accepts these multipliers for synthetic-index multiplier
 // contracts. Other values trigger ContractBuyValidationError on live trades.
@@ -28,6 +28,7 @@ export function FastPanel({ doAction, pending }: {
 }) {
   const [paper, setPaper] = useState<FastPaperResp | null>(null);
   const [trades, setTrades] = useState<ClosedPaperPosition[]>([]);
+  const [liveTrades, setLiveTrades] = useState<RealTrade[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
   const [martingale, setMartingale] = useState<Record<string, FastMartingaleSnapshot>>({});
@@ -41,11 +42,13 @@ export function FastPanel({ doAction, pending }: {
   useEffect(() => {
     const load = async () => {
       try {
-        const [p, t, e, s, sig] = await Promise.all([
+        const [p, t, e, s, sig, lt] = await Promise.all([
           api.fastPaper(), api.fastPaperTrades(500), api.fastPaperEquity(), api.fastStrategies(), api.fastSignals(100),
+          api.trades(500, "fast"),
         ]);
         setPaper(p);
         setTrades(t.trades);
+        setLiveTrades(lt.trades);
         setEquity(e.equity);
         setStrategies(s.strategies);
         setMartingale(s.martingale);
@@ -61,6 +64,16 @@ export function FastPanel({ doAction, pending }: {
   if (error && !paper) return <div className="banner banner-danger">⚠ {error}</div>;
   if (!paper) return <div className="empty">Loading…</div>;
 
+  const isLive = paper.config.liveTradingEnabled;
+  const liveClosed = liveTrades.filter((t) => t.closedAt != null);
+  const liveOpenList = liveTrades.filter((t) => t.closedAt == null);
+  const liveWins = liveClosed.filter((t) => (t.profit ?? 0) > 0).length;
+  const liveLosses = liveClosed.length - liveWins;
+  const liveTotalPnl = liveClosed.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+  const liveAvgR = liveClosed.length > 0
+    ? liveClosed.reduce((acc, t) => acc + (t.stake > 0 ? (t.profit ?? 0) / t.stake : 0), 0) / liveClosed.length
+    : 0;
+
   const stats = paper.stats;
   const cfg = pendingCfg ?? paper.config;
   const dirty = pendingCfg !== null && (
@@ -71,7 +84,8 @@ export function FastPanel({ doAction, pending }: {
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.commissionPct !== paper.config.commissionPct ||
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
-    pendingCfg.forceMartingale !== paper.config.forceMartingale
+    pendingCfg.forceMartingale !== paper.config.forceMartingale ||
+    pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
   );
   const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
   const filtered = trades.filter((t) =>
@@ -97,17 +111,38 @@ export function FastPanel({ doAction, pending }: {
 
   return (
     <>
-      <div className="banner" style={{ marginBottom: 12 }}>
-        <strong>Fast Sandbox</strong> — paper-only, but P&L is settled with Deriv-realistic fees so it mirrors what a real account would clear.
-        Currently running at <strong>MULT={paper.config.tradeMultiplier}× · martingale={paper.config.martingaleMultiplier}× · commission={(paper.config.commissionPct * 100).toFixed(2)}% · entry-spread={paper.config.entrySpreadBps}bps</strong>.
-        Tune below to test the live edge before promoting to a real account.
+      <div className={`banner ${isLive ? "banner-warn" : ""}`} style={{ marginBottom: 12 }}>
+        <strong>Fade Sandbox</strong> — {isLive ? "🔴 LIVE mode (real Deriv multipliers)" : "paper-only with Deriv-realistic fees"}.
+        BOOM 300N fade-fast strategy (1m, asymmetric SL/TP).
+        Currently running at <strong>MULT={paper.config.tradeMultiplier}× · martingale={paper.config.martingaleMultiplier}× · commission={(paper.config.commissionPct * 100).toFixed(2)}%</strong>.
+        {isLive && " Trades will execute on Deriv with real funds."}
       </div>
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Card title="Balance" value={`$${(paper.balance ?? 0).toFixed(2)}`} sub={`started at $${(paper.startingBalance ?? 0).toFixed(2)}`} tone={(paper.balance ?? 0) >= (paper.startingBalance ?? 0) ? "pos" : "neg"} />
-        <Card title="Net P&L" value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toFixed(2)}`} sub={`${stats.pnlPct >= 0 ? "+" : ""}${stats.pnlPct.toFixed(1)}% from start · fees $${totalCommission.toFixed(2)}`} tone={stats.totalPnl >= 0 ? "pos" : "neg"} />
-        <Card title="Win Rate" value={stats.trades > 0 ? `${(stats.winRate * 100).toFixed(0)}%` : "—"} sub={`${stats.wins}W / ${stats.losses}L · ${stats.trades} trades · avg ${stats.avgR.toFixed(2)}R`} tone={stats.winRate >= 0.55 ? "pos" : stats.trades > 5 ? "neg" : "muted"} />
-        <Card title="Peak / DD" value={`$${stats.peak.toFixed(2)}`} sub={`${stats.ddPct.toFixed(1)}% from peak · ${stats.open} open`} tone={stats.ddPct > -10 ? "pos" : "neg"} />
+        <Card
+          title={isLive ? "Live P&L" : "Paper Balance"}
+          value={isLive ? `${liveTotalPnl >= 0 ? "+" : ""}$${liveTotalPnl.toFixed(2)}` : `$${(paper.balance ?? 0).toFixed(2)}`}
+          sub={isLive ? `${liveClosed.length} live trades · ${liveOpenList.length} open` : `started at $${(paper.startingBalance ?? 0).toFixed(2)}`}
+          tone={isLive ? (liveTotalPnl >= 0 ? "pos" : "neg") : ((paper.balance ?? 0) >= (paper.startingBalance ?? 0) ? "pos" : "neg")}
+        />
+        <Card
+          title={isLive ? "Live Trades" : "Net P&L"}
+          value={isLive ? `${liveClosed.length}` : `${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toFixed(2)}`}
+          sub={isLive ? `${liveWins}W / ${liveLosses}L · avg ${liveAvgR.toFixed(2)}R` : `${stats.pnlPct >= 0 ? "+" : ""}${stats.pnlPct.toFixed(1)}% from start · fees $${totalCommission.toFixed(2)}`}
+          tone={isLive ? "muted" : (stats.totalPnl >= 0 ? "pos" : "neg")}
+        />
+        <Card
+          title="Win Rate"
+          value={isLive ? (liveClosed.length > 0 ? `${(liveWins / liveClosed.length * 100).toFixed(0)}%` : "—") : (stats.trades > 0 ? `${(stats.winRate * 100).toFixed(0)}%` : "—")}
+          sub={isLive ? `${liveWins}W / ${liveLosses}L · ${liveClosed.length} trades · avg ${liveAvgR.toFixed(2)}R` : `${stats.wins}W / ${stats.losses}L · ${stats.trades} trades · avg ${stats.avgR.toFixed(2)}R`}
+          tone={(isLive ? (liveClosed.length > 0 ? liveWins / liveClosed.length : 0) : stats.winRate) >= 0.55 ? "pos" : "muted"}
+        />
+        <Card
+          title="Peak / DD"
+          value={isLive ? "—" : `$${stats.peak.toFixed(2)}`}
+          sub={isLive ? "live peak tracking — see logs" : `${stats.ddPct.toFixed(1)}% from peak · ${stats.open} open`}
+          tone={isLive ? "muted" : (stats.ddPct > -10 ? "pos" : "neg")}
+        />
       </div>
 
       <h3 className="section-title">Configuration</h3>
@@ -159,6 +194,32 @@ export function FastPanel({ doAction, pending }: {
               />
               <span className={`mono ${cfg.forceMartingale ? "pos" : "muted"}`}>
                 {cfg.forceMartingale ? "ON — every strategy ladders" : "OFF — registry decides"}
+              </span>
+            </label>
+          </ConfigField>
+          <ConfigField label="Trading Mode">
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                paddingTop: 6,
+                cursor: "pointer",
+              }}
+              title={cfg.liveTradingEnabled
+                ? "LIVE — orders execute on Deriv with real funds. Click to switch back to paper."
+                : "PAPER — orders simulated only. Click to enable LIVE trading on Deriv (real funds)."}
+            >
+              <input
+                type="checkbox"
+                checked={cfg.liveTradingEnabled}
+                onChange={(e) => {
+                  if (e.target.checked && !confirm("Enable LIVE trading on Fade?\n\nReal Deriv multiplier orders will be placed using your account balance. Are you sure?")) return;
+                  setCfg({ liveTradingEnabled: e.target.checked });
+                }}
+              />
+              <span className={`mono ${cfg.liveTradingEnabled ? "neg" : "pos"}`}>
+                {cfg.liveTradingEnabled ? "🔴 LIVE (Deriv)" : "📄 PAPER (sim)"}
               </span>
             </label>
           </ConfigField>
@@ -223,23 +284,38 @@ export function FastPanel({ doAction, pending }: {
             </tr>
           </thead>
           <tbody>
-            {strategies.map((s) => (
-              <tr key={s.id}>
-                <td>
-                  <div className="bold">{s.id}</div>
-                  <div className="faint" style={{ fontSize: 11 }}>{s.name}</div>
-                </td>
-                <td className="mono">{s.symbols.join(", ")}</td>
-                <td><span className="strat-chip">{s.granularity}s</span></td>
-                <td className={`mono ${s.live.barsSeen === 0 ? "neg" : ""}`}>{s.live.barsSeen}</td>
-                <td className="mono">{s.live.trades}</td>
-                <td className="mono">{s.live.trades > 0 ? `${s.live.wins}W/${s.live.losses}L` : "—"}</td>
-                <td className={`mono ${(s.live.pnlUsd ?? 0) > 0 ? "pos" : (s.live.pnlUsd ?? 0) < 0 ? "neg" : "muted"}`}>
-                  {(s.live.pnlUsd ?? 0) >= 0 ? "+" : ""}${(s.live.pnlUsd ?? 0).toFixed(2)}
-                </td>
-                <td className="faint">{s.live.lastSignalAt ? fmtTime(s.live.lastSignalAt) : "—"}</td>
-              </tr>
-            ))}
+            {strategies.map((s) => {
+              let trades: number, wins: number, losses: number, pnlUsd: number;
+              if (isLive) {
+                const myTrades = liveClosed.filter((t) => t.sandboxStrategyId === s.id);
+                trades = myTrades.length;
+                wins = myTrades.filter((t) => (t.profit ?? 0) > 0).length;
+                losses = trades - wins;
+                pnlUsd = myTrades.reduce((acc, t) => acc + (t.profit ?? 0), 0);
+              } else {
+                trades = s.live.trades ?? 0;
+                wins = s.live.wins ?? 0;
+                losses = s.live.losses ?? 0;
+                pnlUsd = s.live.pnlUsd ?? 0;
+              }
+              return (
+                <tr key={s.id}>
+                  <td>
+                    <div className="bold">{s.id}</div>
+                    <div className="faint" style={{ fontSize: 11 }}>{s.name}</div>
+                  </td>
+                  <td className="mono">{s.symbols.join(", ")}</td>
+                  <td><span className="strat-chip">{s.granularity}s</span></td>
+                  <td className={`mono ${s.live.barsSeen === 0 ? "neg" : ""}`}>{s.live.barsSeen}</td>
+                  <td className="mono">{trades}</td>
+                  <td className="mono">{trades > 0 ? `${wins}W/${losses}L` : "—"}</td>
+                  <td className={`mono ${pnlUsd > 0 ? "pos" : pnlUsd < 0 ? "neg" : "muted"}`}>
+                    {pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}
+                  </td>
+                  <td className="faint">{s.live.lastSignalAt ? fmtTime(s.live.lastSignalAt) : "—"}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

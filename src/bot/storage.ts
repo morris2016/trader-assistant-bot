@@ -303,8 +303,15 @@ export type BotState = {
    *  drift-fade scalps with martingale stake escalation. */
   fastPaper: PaperState;
   /** Per-strategy martingale ladder state for the fast-trade sandbox, keyed
-   *  by strategy id. */
+   *  by strategy id. SUPERSEDED by fastMartingalePaper — kept for backward
+   *  compatibility on first-load migration. */
   fastMartingale: Record<string, MartingaleState>;
+  /** Paper-mode martingale ladders for Fast (sandbox 1). Advanced ONLY when
+   *  fastPaper settles. Cannot influence live stake. */
+  fastMartingalePaper: Record<string, MartingaleState>;
+  /** Live-mode martingale ladders. Advanced ONLY when a Deriv contract
+   *  tagged sandbox="fast" settles. Cannot influence paper stake. */
+  fastMartingaleLive: Record<string, MartingaleState>;
   /** Fast (sandbox 1) runtime config — leverage, martingale, fees. Editable
    *  from the UI; the bot applies it at every Fast trade open and ladder
    *  advance so a live operator can tune behavior without redeploy. */
@@ -373,6 +380,8 @@ export function emptyBotState(): BotState {
     paper: emptyPaperState(),
     fastPaper: emptyPaperState(200), // smaller starting balance — martingale needs less headroom than the 500 sandbox
     fastMartingale: {},
+    fastMartingalePaper: {},
+    fastMartingaleLive: {},
     fast1Config: { ...DEFAULT_FAST1_CONFIG },
     fast2Paper: emptyPaperState(250), // Fast2 sandbox sized to validated $250 d=3 mart book (2026-05-03)
     fast2MartingalePaper: {},
@@ -457,7 +466,11 @@ export class BotStorage {
         paper: parsed.paper ?? emptyPaperState(),
         fastPaper: parsed.fastPaper ?? emptyPaperState(200),
         fastMartingale: parsed.fastMartingale ?? {},
-        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}), ...(prefs.fast1Config ?? {}), liveTradingEnabled: false },
+        // Migrate legacy fastMartingale → paper ladder. The legacy single map
+        // was driven by the paper-engine, so treat it as the paper baseline.
+        fastMartingalePaper: parsed.fastMartingalePaper ?? parsed.fastMartingale ?? {},
+        fastMartingaleLive: parsed.fastMartingaleLive ?? {},
+        fast1Config: { ...DEFAULT_FAST1_CONFIG, ...(parsed.fast1Config ?? {}), ...(prefs.fast1Config ?? {}) },
         fast2Paper: parsed.fast2Paper ?? emptyPaperState(50),
         // Migrate from legacy single fast2Martingale → split paper/live.
         // The legacy state is treated as the paper ladder (it was driven by

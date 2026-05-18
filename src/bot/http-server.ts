@@ -550,6 +550,19 @@ export function startHttpServer(opts: {
         if (path0 === "/api/fast-paper") {
           const ps = opts.getFastPaperState();
           const stats = opts.getFastPaperStats();
+          // Snapshot of last-known prices for each symbol with an open
+          // position — paper opens AND live fast opens — so the UI's Open
+          // Positions table can compute live uPnL and SL/TP progress.
+          const prices: Record<string, number> = {};
+          const symbolsNeeded = new Set<string>();
+          for (const p of ps.open) symbolsNeeded.add(p.symbol);
+          for (const t of opts.getState().open) {
+            if (t.sandbox === "fast") symbolsNeeded.add(t.symbol);
+          }
+          for (const sym of symbolsNeeded) {
+            const px = opts.getLastPriceFor(sym);
+            if (px != null) prices[sym] = px;
+          }
           json(res, 200, {
             stats,
             startingBalance: ps.startingBalance,
@@ -558,6 +571,7 @@ export function startHttpServer(opts: {
             open: ps.open,
             martingale: opts.getFastMartingale(),
             config: opts.getFast1Config(),
+            prices,
           });
           return;
         }

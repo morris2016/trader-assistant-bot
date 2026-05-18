@@ -30,6 +30,9 @@ export const driftPullback: Detector = {
     consec: 3,            // require this many consecutive against-drift closes
     atrPeriod: 14,
     kAtr: 1.0,            // equidistant SL/TP at K × ATR (R:R = 1:1)
+    emitStructural: 1,    // 1 = emit stopPrice/targetPrice (equidistant via kAtr).
+                          // 0 = strategy's atrSlMult/atrTpMult drive SL/TP via the
+                          //     engine's ATR-fallback path (used for asymmetric RR).
   },
 
   onClose(ctx: DetectorContext): DetectorOutput {
@@ -38,6 +41,7 @@ export const driftPullback: Detector = {
     const consec = Math.max(1, Math.round(ctx.params.consec ?? 3));
     const atrPeriod = ctx.params.atrPeriod ?? 14;
     const kAtr = ctx.params.kAtr ?? 1.0;
+    const emitStructural = (ctx.params.emitStructural ?? 1) >= 1;
     const candles = ctx.candles;
     if (candles.length < Math.max(atrPeriod + 1, consec + 1)) return { signals: [] };
 
@@ -73,8 +77,11 @@ export const driftPullback: Detector = {
           confidence: 0.6,
           reason: `${consec}-bar pullback against ${driftDirection === 1 ? "up" : "down"}-drift — fade back to drift direction`,
           price: entry,
-          stopPrice,
-          targetPrice,
+          // When emitStructural is off, omit stopPrice/targetPrice so the engine
+          // falls back to atrSlMult/atrTpMult from the strategy descriptor —
+          // required for asymmetric RR (e.g. Fade's 0.3/3.0 spec). Equidistant
+          // detector levels otherwise silently override the strategy's mults.
+          ...(emitStructural ? { stopPrice, targetPrice } : {}),
         },
       ],
     };

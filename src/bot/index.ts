@@ -113,11 +113,20 @@ async function main() {
   // martingale needs less headroom). Stake comes from per-strategy martingale
   // ladder, not adaptive shift; the PaperEngine just records open/close.
   const fastPaper = new PaperEngine(persisted.fastPaper);
-  // Per-strategy martingale state, restored from disk; missing strategies seed empty.
-  const fastMartingale: Record<string, MartingaleState> = { ...persisted.fastMartingale };
+  // SPLIT MARTINGALE LADDERS: paper-mode and live-mode ladders track
+  // separately so paper losses cannot influence live stake (and vice versa).
+  // Mirrors the Fast2 split (introduced 2026-05-03 to fix cross-mode bleed).
+  // `fastMartingale` is the legacy alias pointing at the PAPER map for
+  // backward-compatibility with code that hasn't been migrated to the split.
+  const fastMartingalePaper: Record<string, MartingaleState> = { ...persisted.fastMartingalePaper };
+  const fastMartingaleLive: Record<string, MartingaleState> = { ...persisted.fastMartingaleLive };
   for (const s of FAST_STRATEGIES) {
-    if (!fastMartingale[s.id]) fastMartingale[s.id] = emptyMartingaleState();
+    if (!fastMartingalePaper[s.id]) fastMartingalePaper[s.id] = emptyMartingaleState();
+    if (!fastMartingaleLive[s.id]) fastMartingaleLive[s.id] = emptyMartingaleState();
   }
+  const fastMartingale: Record<string, MartingaleState> = fastMartingalePaper;
+  const fastMartingaleFor = (mode: "paper" | "live"): Record<string, MartingaleState> =>
+    mode === "live" ? fastMartingaleLive : fastMartingalePaper;
   // Fast (sandbox 1) runtime config — replaces the old hardcoded
   // DEFAULT_FAST_MARTINGALE constant. Driven by the UI so leverage, martingale
   // multiplier, base stake, ladder depth, per-trade cap, and Deriv-fee model
@@ -130,6 +139,8 @@ async function main() {
     maxLevels: fast1Config.maxLevels,
     perTradeCap: fast1Config.perTradeCap,
   });
+  const fastActiveMode = (): "paper" | "live" =>
+    fast1Config.liveTradingEnabled ? "live" : "paper";
   log.info("fastPaper: state loaded", {
     balance: fastPaper.getState().balance,
     closed: fastPaper.getState().closed.length,
@@ -492,6 +503,8 @@ async function main() {
       paper: paper.getState(),
       fastPaper: fastPaper.getState(),
       fastMartingale,
+      fastMartingalePaper,
+      fastMartingaleLive,
       fast1Config,
       fast2Paper: fast2Paper.getState(),
       fast2MartingalePaper,
@@ -518,6 +531,35 @@ async function main() {
   real.on("opened", (t) => { log.info("trade opened", { symbol: t.symbol, side: t.side, stake: t.stake, detector: t.detector, contractId: t.contractId, sandbox: t.sandbox ?? "real" }); persist(); });
   real.on("settled", (t) => {
     log.info("trade settled", { symbol: t.symbol, side: t.side, profit: t.profit, status: t.status, sandbox: t.sandbox ?? "real", openLatencyMs: t.openLatencyMs, entrySlippage: t.entrySlippage });
+    // Fast (sandbox 1) LIVE settle — advance the LIVE ladder for the strategy.
+    // Mirrors the Fast2 handler below: live ladder updates regardless of the
+    // current liveTradingEnabled flag (a user flipping back to paper before
+    // settle still gets the live ladder updated; paper ladder untouched).
+    if (t.sandbox === "fast" && t.sandboxStrategyId) {
+      const fastStrat = FAST_STRATEGIES.find((s) => s.id === t.sandboxStrategyId);
+      const before = fastMartingaleLive[t.sandboxStrategyId] ?? emptyMartingaleState();
+      const martingaleActive = (fastStrat?.useMartingale ?? false) || fast1Config.forceMartingale;
+      const pnl = t.profit ?? 0;
+      if (martingaleActive) {
+        const params = fast1MartingaleParams();
+        const { state: nextLadder, circuitBreakerFired } = fastMartingaleUpdate(before, pnl, params, Date.now(), fast1Config.martingaleMode);
+        fastMartingaleLive[t.sandboxStrategyId] = nextLadder;
+        const modeTag = fast1Config.martingaleMode === "anti" ? " ANTI" : "";
+        log.info(`fast LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} lvl=${nextLadder.level} W=${nextLadder.wins} L=${nextLadder.losses} mart=${params.multiplier}×${modeTag} contract=${t.contractId}${circuitBreakerFired ? " CIRCUIT-BREAKER" : ""}`);
+        if (circuitBreakerFired) {
+          log.warn(`fast LIVE martingale circuit-breaker fired for ${t.sandboxStrategyId}: ladder reset after ${params.maxLevels} ${fast1Config.martingaleMode === "anti" ? "wins" : "losses"}`);
+        }
+      } else {
+        fastMartingaleLive[t.sandboxStrategyId] = {
+          ...before,
+          wins: before.wins + (pnl > 0 ? 1 : 0),
+          losses: before.losses + (pnl > 0 ? 0 : 1),
+          level: 0,
+          cumulativeSinceReset: 0,
+        };
+        log.info(`fast LIVE settled ${t.symbol} ${t.side} ${t.status} pnl=$${pnl.toFixed(2)} strategy=${t.sandboxStrategyId} W=${fastMartingaleLive[t.sandboxStrategyId].wins} L=${fastMartingaleLive[t.sandboxStrategyId].losses} (no martingale)`);
+      }
+    }
     // Fast2 LIVE settlements advance the same per-strategy ladder that the
     // paper path uses. Treat the contract's `profit` as the pnl for ladder
     // purposes (positive = win, negative = loss). Ignore "real" sandbox
@@ -699,7 +741,8 @@ async function main() {
         const newBal = balance ?? 200;
         fastPaper.reset(newBal);
         // Also wipe per-strategy martingale ladders so the next trade starts at level 0.
-        for (const sId of Object.keys(fastMartingale)) fastMartingale[sId] = emptyMartingaleState();
+        for (const sId of Object.keys(fastMartingalePaper)) fastMartingalePaper[sId] = emptyMartingaleState();
+        for (const sId of Object.keys(fastMartingaleLive)) fastMartingaleLive[sId] = emptyMartingaleState();
         persist();
         log.warn(`fastPaper reset via API to $${newBal.toFixed(2)} — all martingale ladders cleared`);
       },
@@ -1771,52 +1814,96 @@ async function main() {
         log.info("fast signal blocked by sandbox sideFilter", { symbol: sig.symbol, side: sig.action, strategy: fastMatch.id, sideFilter: fast1Config.sideFilter });
         handledFast = true;
       } else {
-        const alreadyOpen = fastPaper.getState().open.some((p) => p.symbol === sig.symbol);
+        const isLiveMode = fast1Config.liveTradingEnabled;
+        const alreadyOpen = isLiveMode
+          ? real.state().open.some((t) => t.sandbox === "fast" && t.sandboxStrategyId === fastMatch.id)
+          : fastPaper.getState().open.some((p) => p.symbol === sig.symbol);
         if (alreadyOpen) {
-          log.info("fast signal skipped — position already open", { symbol: sig.symbol, side: sig.action, strategy: fastMatch.id });
+          log.info("fast signal skipped — position already open", { symbol: sig.symbol, side: sig.action, strategy: fastMatch.id, mode: isLiveMode ? "live" : "paper" });
           handledFast = true;
         } else {
-          const ladder = fastMartingale[fastMatch.id] ?? emptyMartingaleState();
+          // Stake is derived from the ladder of the *active* mode only —
+          // paper losses cannot influence live stake and vice versa.
+          const ladderMap = fastMartingaleFor(fastActiveMode());
+          const ladder = ladderMap[fastMatch.id] ?? emptyMartingaleState();
           const params = fast1MartingaleParams();
-          // Strategies with positive raw expectancy can opt out of martingale
-          // (useMartingale=false) — they get a flat baseStake. Strategies with
-          // useMartingale=true ride the configured ladder. The UI override
-          // (fast1Config.forceMartingale) wins regardless of the per-strategy
-          // flag so the operator can flip martingale on for any strategy.
           const martingaleActive = fastMatch.useMartingale || fast1Config.forceMartingale;
           const stake = martingaleActive
             ? fastNextStake(ladder, params)
             : params.baseStake;
-          const pos = fastPaper.openPosition({
-            signalId: sig.id,
-            symbol: sig.symbol,
-            side: sig.action,
-            detector: sig.detector,
-            entryPrice: entryPriceHint,
-            atr,
-            atrTpMult: fastMatch.atrTpMult,
-            atrSlMult: fastMatch.atrSlMult,
-            // Fast uses the user-selected leverage from fast1Config rather
-            // than the bot-wide cfg.multiplier.
-            multiplier: fast1Config.tradeMultiplier,
-            granularity,
-            candleEpoch: candle.epoch,
-            baseStake: params.baseStake,
-            minStake: 0.5,
-            nowMs: Date.now(),
-            signalStopPrice: sig.stopPrice,
-            signalTargetPrice: sig.targetPrice,
-            stakeOverride: stake,
-            commissionPct: fast1Config.commissionPct,
-            entrySpreadFrac: fast1Config.entrySpreadBps / 10000,
-            slSlippageFrac: fast1Config.slSlippageBps / 10000,
-          });
-          if (pos) {
-            log.info(`fastPaper opened ${pos.symbol} ${pos.side} strategy=${fastMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${fast1Config.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
+
+          if (isLiveMode) {
+            // ── LIVE PATH: route to real.placeTrade with sandbox="fast". ──
+            const realGate = real.canOpen();
+            if (!realGate.ok) {
+              log.warn(`fast LIVE blocked by real-engine gate: ${realGate.reason}`);
+              handledFast = true;
+            } else {
+              const liveMult = clampDerivMultiplier(fast1Config.tradeMultiplier);
+              const liveStake = Math.min(DERIV_MAX_STAKE_USD, Math.max(DERIV_MIN_STAKE_USD, stake));
+              if (liveMult !== fast1Config.tradeMultiplier) {
+                log.warn(`fast LIVE: tradeMultiplier ${fast1Config.tradeMultiplier}× → ${liveMult}× (Deriv-valid clamp)`);
+              }
+              if (liveStake !== stake) {
+                log.warn(`fast LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD})`);
+              }
+              try {
+                const trade = await real.placeTrade({
+                  symbol: sig.symbol as SymbolCode,
+                  side: sig.action,
+                  family: "MULTIPLIER",
+                  multiplier: liveMult,
+                  tpSlMode: "atr",
+                  atrTpMult: fastMatch.atrTpMult,
+                  atrSlMult: fastMatch.atrSlMult,
+                  atr,
+                  entryPriceHint,
+                  detector: sig.detector,
+                  signalStopPrice: sig.stopPrice,
+                  signalTargetPrice: sig.targetPrice,
+                  signalFiredAt: sig.ts,
+                  stakeOverride: liveStake,
+                  sandbox: "fast",
+                  sandboxStrategyId: fastMatch.id,
+                });
+                log.info(`fast LIVE opened ${trade.symbol} ${trade.side} strategy=${fastMatch.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${liveMult}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
+              } catch (e) {
+                const msg = (e as Error).message;
+                log.error(`fast LIVE placeTrade failed`, { err: msg, symbol: sig.symbol, side: sig.action, strategy: fastMatch.id });
+              }
+              handledFast = true;
+            }
           } else {
-            log.warn(`fastPaper open rejected ${sig.symbol} ${sig.action} (atr=${atr}, balance=$${fastPaper.getState().balance.toFixed(2)}, stake=$${stake})`);
+            // ── PAPER PATH (default): existing simulation flow. ───────────
+            const pos = fastPaper.openPosition({
+              signalId: sig.id,
+              symbol: sig.symbol,
+              side: sig.action,
+              detector: sig.detector,
+              entryPrice: entryPriceHint,
+              atr,
+              atrTpMult: fastMatch.atrTpMult,
+              atrSlMult: fastMatch.atrSlMult,
+              multiplier: fast1Config.tradeMultiplier,
+              granularity,
+              candleEpoch: candle.epoch,
+              baseStake: params.baseStake,
+              minStake: 0.5,
+              nowMs: Date.now(),
+              signalStopPrice: sig.stopPrice,
+              signalTargetPrice: sig.targetPrice,
+              stakeOverride: stake,
+              commissionPct: fast1Config.commissionPct,
+              entrySpreadFrac: fast1Config.entrySpreadBps / 10000,
+              slSlippageFrac: fast1Config.slSlippageBps / 10000,
+            });
+            if (pos) {
+              log.info(`fastPaper opened ${pos.symbol} ${pos.side} strategy=${fastMatch.id} stake=$${pos.stake.toFixed(2)} lvl=${ladder.level} MULT=${fast1Config.tradeMultiplier}× mart=${params.multiplier}× fee=$${pos.commission.toFixed(2)} entry=${pos.entryPrice.toFixed(5)} sl=${pos.stopPrice.toFixed(5)} tp=${pos.takeProfitPrice.toFixed(5)}`);
+            } else {
+              log.warn(`fastPaper open rejected ${sig.symbol} ${sig.action} (atr=${atr}, balance=$${fastPaper.getState().balance.toFixed(2)}, stake=$${stake})`);
+            }
+            handledFast = true;
           }
-          handledFast = true;
         }
       }
     }
@@ -2324,6 +2411,7 @@ async function main() {
   // arrives through the normal flow.
   safeInterval("stuck-contract-watchdog", async () => {
     const THRESHOLD_BY_SANDBOX: Record<string, number> = {
+      fast:  300_000,   // 5 min — MULTIPLIER on 1m bars (Fade)
       fast2: 600_000,   // 10 min — MULTIPLIER on 5m bars
       fast3: 30_000,    // 30s — DIGITODD
       fast4: 30_000,    // 30s — DIGITODD
