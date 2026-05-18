@@ -179,6 +179,11 @@ export const boom300nFadeFast: StrategyDescriptor = {
   atrSlMult: 0.3,
   atrTpMult: 3.0,
   costBps: 30.0,
+  // Opt the strategy into the sandbox's martingale ladder. Required for the
+  // ladder to advance on losses — without this flag, fast1Config.forceMartingale
+  // would have to be set ON by the operator. Validated sims used martingale,
+  // so it must be on by default for live behavior to match expectation.
+  useMartingale: true,
   validation: {
     validatedAt: "2026-05-18",
     sampleDays: 30,
