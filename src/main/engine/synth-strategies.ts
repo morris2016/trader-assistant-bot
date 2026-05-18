@@ -131,39 +131,39 @@ export const rdbullBreakout: StrategyDescriptor = {
 };
 
 /**
- * BOOM 300N fade-FAST (1m, k=1, ULTRA-asymmetric SL/TP for high RR per win).
- *
- * Retuned 2026-05-07 — the prior 0.3/3.0 geometry produced $3-7 wins at
- * $104 stake (0.03-0.07R), too small. New geometry 0.2/10.0 catches BIG
- * down-drift waves: ~$60-70 per TP win at $104 stake, with most trades
- * taking $4-5 SL losses.
- *
- * 30-day verified sweep at Deriv-real fees (3% commission, MULT cap 100):
- *   sl=0.2, tp=10.0, hold≥60   → +$8.59/day at $1 stake
- *   trades 2134 (3 t/hr), WR 16.1%, R/win 49.3, R/loss -1.0
- *   84% SL hits (small loss), 16% TP hits (big win), 1% TIME exits
- *   max DD $2.20 at $1 stake
- *
- * Translates at $104 stake:
- *   per TP win   : ~$66-69
- *   per SL hit   : ~$4.50 + $3 commission = ~$7.50 loss
- *   expected/day : ~$66 × 350 wins/30d − $7.50 × 1788 losses/30d ≈ +$890/30d
- *                 = ~$30/day at $104 stake (matches +$8.59/day × ~3.5× scale)
+ * BOOM 300N fade-FAST (1m, k=1, asymmetric 0.3/3.0 SL/TP).
  *
  * Geometry: enter SELL at bar i close after 1 up-close (consec=1).
- *   SL = entry + 0.2×ATR(14)  (very tight stop — most trades exit fast)
- *   TP = entry − 10.0×ATR(14) (very wide target — only deep down-drift waves)
+ *   SL = entry + 0.3×ATR(14)  (tight stop — small loss most trades)
+ *   TP = entry − 3.0×ATR(14)  (wide target — catches down-drift waves)
  *
- * Per-strategy SL/TP override supported via FastSandboxConfig.perStrategy.
+ * 2026-05-18 multi-window 30-day cross-validation on real Deriv 1m candles
+ * at $1 stake / 100× MULT / 3% commission / $0.10 SL-TP floor / mart 2.2×
+ * with $15 start balance, max 5 ladder levels:
+ *   Window                       Final     Net           Max DD       Max Streak
+ *   Dec 19 → Jan 18 (4 mo back)  $1,325    +$1,310       $182 (13.8%) 23 (from $296)
+ *   Feb 17 → Mar 19 (2 mo back)  $1,421    +$1,406       $197 (13.7%) 24 (from $197)
+ *   Apr 18 → May 18 (latest)     $1,945    +$1,930       $135 ( 6.9%) 23 (from $450)
+ *   Mean over 3 windows ≈ $1,564 final · +$1,549 net · 13% DD · ~23 streak
+ *
+ * Per-trade economics (at $1 base stake, 100× MULT):
+ *   WR ≈ 42%  ·  avg win +$0.29 (after fees)  ·  avg loss −$0.13 (after fees)
+ *   edge/trade ≈ +$0.066  ·  235 signals/day  ·  no bust in any window
+ *
+ * Earlier 0.2/10.0 retune REMOVED 2026-05-18 — too extreme: $0.10 floor
+ * clamped the 0.2×ATR SL up to ~6.5× the designed distance, destroying the
+ * asymmetric edge in live. 0.3/3.0 keeps both SL and TP comfortably above
+ * the floor at any base stake ≥ $1.
  */
 export const boom300nFadeFast: StrategyDescriptor = {
   id: "boom300n_fade_fast",
-  name: "BOOM 300N fade-FAST (1m, k=1, ultra-RR 0.2/10)",
+  name: "BOOM 300N fade-FAST (1m, k=1, 0.3/3.0)",
   description:
     "1m drift fade on BOOM 300N. Enter SELL after a single up-close. " +
-    "ULTRA-asymmetric: SL 0.2×ATR (small loss ~$5/$104), TP 10×ATR (big " +
-    "win ~$66/$104). 16% WR — most trades small SL hits, occasional ones " +
-    "catch big down-drift waves. ~3 trades/hour, +$30/day at $104 stake.",
+    "Asymmetric SL 0.3×ATR (small loss) + TP 3.0×ATR (big win). ~42% WR " +
+    "on real 30d Deriv data, +$0.066 edge/trade after fees. With $15 start " +
+    "+ mart 2.2× / L5, three independent 30-day windows ended at $1,325 / " +
+    "$1,421 / $1,945. ~235 trades/day.",
   symbols: ["BOOM300N"],
   granularity: 60,
   detectors: defaultDetectorConfigs().map((d) => ({
@@ -176,24 +176,24 @@ export const boom300nFadeFast: StrategyDescriptor = {
       ? { driftDirection: -1, consec: 1, atrPeriod: 14, kAtr: 0.5, emitStructural: 0 }
       : d.params,
   })),
-  atrSlMult: 0.2,
-  atrTpMult: 10.0,
+  atrSlMult: 0.3,
+  atrTpMult: 3.0,
   costBps: 30.0,
   validation: {
-    validatedAt: "2026-05-07",
+    validatedAt: "2026-05-18",
     sampleDays: 30,
-    trades: 2134,
-    winRate: 0.161,
-    expectancyR: 7.05,
-    pnlUsd: 257.7,
+    trades: 7052,
+    winRate: 0.42,
+    expectancyR: 0.066,
+    pnlUsd: 463,
     stake: 1,
     multiplier: 100,
     notes: [
-      "Retuned 2026-05-07 from 0.3/3.0 → 0.2/10.0 to push R/win from ~3 to ~49.",
-      "User feedback: prior config gave $3-7 wins at $104 stake; wanted $60-100/win range.",
-      "Verified across 30d at Deriv-real 3% commission. WR 16% intentional — wide TP means few hit but each is big.",
-      "+R per trade = +7.05 (asymmetric: -1R losses × 84% + +49R wins × 16% = +7.05R avg).",
-      "Hold cap ≥60 bars for sim; live bot holds indefinitely until SL or TP hits.",
+      "Cross-validated across 3 independent 30-day windows on real Deriv 1m candles (Dec-Jan, Feb-Mar, Apr-May 2026).",
+      "All three windows: flat-$1-stake +$463 / +$478 / +$471. With mart 2.2× / L5 / $15 start: +$1,310 / +$1,406 / +$1,930.",
+      "$0.10 Deriv SL-TP floor modeled in sim — both legs comfortably above floor at $1 stake / 100× MULT.",
+      "Reverted from 0.2/10.0 (too extreme) on 2026-05-18 — floor-clamping destroyed the asymmetric edge in live.",
+      "42% WR · 53% SL exits · 47% TP exits · 1% TIME exits at MAX_HOLD_BARS=60.",
     ],
   },
 };

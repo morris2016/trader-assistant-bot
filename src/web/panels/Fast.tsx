@@ -17,9 +17,10 @@ const COMMISSION_OPTIONS = [
   { v: 0,     label: "0% (off)" },
   { v: 0.001, label: "0.1%" },
   { v: 0.003, label: "0.3%" },
-  { v: 0.005, label: "0.5% (Deriv default)" },
+  { v: 0.005, label: "0.5%" },
   { v: 0.006, label: "0.6%" },
   { v: 0.01,  label: "1.0%" },
+  { v: 0.03,  label: "3.0% (Deriv BOOM/CRASH MULT)" },
 ];
 
 export function FastPanel({ doAction, pending }: {
@@ -84,8 +85,7 @@ export function FastPanel({ doAction, pending }: {
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.commissionPct !== paper.config.commissionPct ||
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
-    pendingCfg.forceMartingale !== paper.config.forceMartingale ||
-    pendingCfg.liveTradingEnabled !== paper.config.liveTradingEnabled
+    pendingCfg.forceMartingale !== paper.config.forceMartingale
   );
   const symbols = Array.from(new Set(trades.map((t) => t.symbol))).sort();
   const filtered = trades.filter((t) =>
@@ -113,9 +113,62 @@ export function FastPanel({ doAction, pending }: {
     <>
       <div className={`banner ${isLive ? "banner-warn" : ""}`} style={{ marginBottom: 12 }}>
         <strong>Fade Sandbox</strong> — {isLive ? "🔴 LIVE mode (real Deriv multipliers)" : "paper-only with Deriv-realistic fees"}.
-        BOOM 300N fade-fast strategy (1m, asymmetric SL/TP).
+        BOOM 300N fade-fast strategy (1m, asymmetric 0.3/3.0 SL/TP).
         Currently running at <strong>MULT={paper.config.tradeMultiplier}× · martingale={paper.config.martingaleMultiplier}× · commission={(paper.config.commissionPct * 100).toFixed(2)}%</strong>.
         {isLive && " Trades will execute on Deriv with real funds."}
+      </div>
+
+      {/* Prominent LIVE/PAPER toggle — applies IMMEDIATELY (not via Apply
+          config) so flipping it requires no second action. Big, color-coded,
+          confirm-on-flip-to-LIVE so accidental clicks don't fire real trades. */}
+      <div
+        className="card"
+        style={{
+          marginBottom: 16,
+          padding: 16,
+          background: paper.config.liveTradingEnabled ? "linear-gradient(90deg, #2a0f12 0%, #1a0a0d 100%)" : "linear-gradient(90deg, #0f2017 0%, #0a1410 100%)",
+          border: `2px solid ${paper.config.liveTradingEnabled ? "#e5526e" : "#3acc7c"}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ fontSize: 36 }}>{paper.config.liveTradingEnabled ? "🔴" : "📄"}</div>
+          <div>
+            <div className="bold" style={{ fontSize: 18, color: paper.config.liveTradingEnabled ? "#e5526e" : "#3acc7c" }}>
+              {paper.config.liveTradingEnabled ? "LIVE TRADING" : "PAPER MODE"}
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+              {paper.config.liveTradingEnabled
+                ? "Real Deriv multiplier orders placed against your account balance."
+                : "Simulated trades only — no Deriv orders placed."}
+            </div>
+          </div>
+        </div>
+        <button
+          className={`btn btn-sm ${paper.config.liveTradingEnabled ? "btn-warn" : "btn-primary"}`}
+          style={{ fontSize: 13, padding: "8px 16px", minWidth: 140 }}
+          disabled={pending !== null}
+          onClick={() => {
+            const turningOn = !paper.config.liveTradingEnabled;
+            if (turningOn && !confirm(
+              "Enable LIVE trading on Fade?\n\n" +
+              "Real Deriv BOOM 300N multiplier orders will be placed using your account balance. " +
+              "Each order opens at your configured stake (base + martingale ladder) and is settled on Deriv's SL/TP.\n\n" +
+              "Are you sure?",
+            )) return;
+            doAction(
+              turningOn ? "Enable LIVE trading" : "Switch back to PAPER mode",
+              () => api.updateFast1Config({ liveTradingEnabled: turningOn }),
+            );
+          }}
+        >
+          {pending && pending.includes("LIVE trading") ? "Switching…" :
+           pending && pending.includes("PAPER mode") ? "Switching…" :
+           paper.config.liveTradingEnabled ? "Switch to PAPER" : "Enable LIVE →"}
+        </button>
       </div>
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
@@ -194,32 +247,6 @@ export function FastPanel({ doAction, pending }: {
               />
               <span className={`mono ${cfg.forceMartingale ? "pos" : "muted"}`}>
                 {cfg.forceMartingale ? "ON — every strategy ladders" : "OFF — registry decides"}
-              </span>
-            </label>
-          </ConfigField>
-          <ConfigField label="Trading Mode">
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                paddingTop: 6,
-                cursor: "pointer",
-              }}
-              title={cfg.liveTradingEnabled
-                ? "LIVE — orders execute on Deriv with real funds. Click to switch back to paper."
-                : "PAPER — orders simulated only. Click to enable LIVE trading on Deriv (real funds)."}
-            >
-              <input
-                type="checkbox"
-                checked={cfg.liveTradingEnabled}
-                onChange={(e) => {
-                  if (e.target.checked && !confirm("Enable LIVE trading on Fade?\n\nReal Deriv multiplier orders will be placed using your account balance. Are you sure?")) return;
-                  setCfg({ liveTradingEnabled: e.target.checked });
-                }}
-              />
-              <span className={`mono ${cfg.liveTradingEnabled ? "neg" : "pos"}`}>
-                {cfg.liveTradingEnabled ? "🔴 LIVE (Deriv)" : "📄 PAPER (sim)"}
               </span>
             </label>
           </ConfigField>
