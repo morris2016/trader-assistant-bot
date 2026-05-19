@@ -206,6 +206,12 @@ export type RealTrade = {
    *  closes the contract the moment profit crosses this level, regardless
    *  of when the next bot tick arrives. */
   brokerTpAmount?: number | null;
+  /** Current broker-side stop_loss order amount (positive value, loss
+   *  magnitude). Set on order open from clampForDeriv(slDesigned).
+   *  Tightened on trail-arm to Deriv's $0.10 floor — once the trade is
+   *  profitable enough to arm, the original wide SL is no longer needed
+   *  and a tighter SL caps post-arm catastrophic spike-down losses. */
+  brokerSlAmount?: number | null;
   openedAt: number;
   closedAt: number | null;
   status: "open" | "won" | "lost" | "cancelled";

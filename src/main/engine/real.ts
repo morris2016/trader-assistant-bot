@@ -59,6 +59,9 @@ export class RealEngine extends EventEmitter {
    *  racing updates from multiple ticks. Each tick that wants to ratchet
    *  the broker TP higher fires only if no update is already in flight. */
   private brokerTpUpdateInFlight = new Set<number>();
+  /** Set of contract IDs with an in-flight broker-SL update — prevents
+   *  racing updates from the arm-tighten path. */
+  private brokerSlUpdateInFlight = new Set<number>();
   private account: AccountInfo | null = null;
   private perTradeMaxStake = 0;
   private dailyMaxLoss = 0;
@@ -679,6 +682,7 @@ export class RealEngine extends EventEmitter {
         stopLoss: sl ?? null,
         botManagedTakeProfit: botManagedTp,
         botManagedStopLoss: botManagedSl,
+        brokerSlAmount: sl ?? null,
         peakProfit: null,
         trailArmed: false,
         trailingExitEnabled: trailingOn,
@@ -788,6 +792,73 @@ export class RealEngine extends EventEmitter {
             if (justArmed) {
               trade.trailArmed = true;
               console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak-movement=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
+              // BROKER-SL TIGHTEN-ON-ARM: shrink the broker-side stop_loss to
+              // the Deriv floor ($0.10) at the moment of arming. The original
+              // SL was sized for designed loss (slDesigned); once we're armed,
+              // we no longer need that wide protection — a single-tick spike-
+              // DOWN after arm should cap at $0.10 (the minimum loss Deriv
+              // allows), not the wider designed value.
+              //
+              // Only fires when the current broker-SL > $0.10 (else there's
+              // nothing to tighten). At small stakes (≤ ~$2.50) the SL is
+              // already at the floor from order open, so this is a no-op.
+              //
+              // Pre-condition: SL must be < current profit for Deriv to
+              // accept the update. At arm time profit ≈ armThreshold (e.g.
+              // $0.34 on $1 stake), and SL=$0.10 < profit → accepted.
+              const SL_FLOOR = 0.10;
+              const currentSl = trade.brokerSlAmount ?? 0;
+              if (currentSl > SL_FLOOR + 0.001
+                  && !this.brokerSlUpdateInFlight.has(trade.contractId)) {
+                this.brokerSlUpdateInFlight.add(trade.contractId);
+                const prevSl = trade.brokerSlAmount;
+                trade.brokerSlAmount = SL_FLOOR;
+                this.deriv.updateContract(trade.contractId, { stopLoss: SL_FLOOR })
+                  .then((resp) => {
+                    const errMsg = (resp as { error?: { message?: string } }).error?.message;
+                    if (errMsg) {
+                      trade.brokerSlAmount = prevSl;
+                      this.emit("tickDiag", {
+                        contractId: trade.contractId,
+                        sandbox: trade.sandbox,
+                        event: "broker-sl-rejected",
+                        profit,
+                        movement,
+                        peak: trade.peakProfit,
+                        armed: trade.trailArmed,
+                        brokerSl: prevSl,
+                        reason: `Deriv rejected stop_loss=$${SL_FLOOR}: ${errMsg}`,
+                      });
+                    } else {
+                      this.emit("tickDiag", {
+                        contractId: trade.contractId,
+                        sandbox: trade.sandbox,
+                        event: "broker-sl-tightened",
+                        profit,
+                        movement,
+                        peak: trade.peakProfit,
+                        armed: trade.trailArmed,
+                        brokerSl: SL_FLOOR,
+                        reason: `Tightened broker-SL $${prevSl?.toFixed(2) ?? "?"} -> $${SL_FLOOR} on arm`,
+                      });
+                    }
+                  })
+                  .catch((e) => {
+                    trade.brokerSlAmount = prevSl;
+                    this.emit("tickDiag", {
+                      contractId: trade.contractId,
+                      sandbox: trade.sandbox,
+                      event: "broker-sl-error",
+                      profit,
+                      movement,
+                      peak: trade.peakProfit,
+                      armed: trade.trailArmed,
+                      brokerSl: prevSl,
+                      reason: `contract_update(SL) threw: ${(e as Error).message}`,
+                    });
+                  })
+                  .finally(() => this.brokerSlUpdateInFlight.delete(trade.contractId));
+              }
             }
             // BROKER-SIDE TP RATCHET (peak-anchored): after arming, push
             // Deriv's take_profit to `peak + stake × 0.10`. Deriv fires TP
@@ -974,6 +1045,7 @@ export class RealEngine extends EventEmitter {
     this.byContractId.delete(info.contract_id);
     this.sellInFlight.delete(info.contract_id);
     this.brokerTpUpdateInFlight.delete(info.contract_id);
+    this.brokerSlUpdateInFlight.delete(info.contract_id);
     this.closed.unshift(trade);
     if (this.closed.length > 500) this.closed.length = 500;
 
