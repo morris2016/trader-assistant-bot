@@ -587,58 +587,58 @@ export class RealEngine extends EventEmitter {
         }
       }
 
-      // Deriv enforces a per-symbol minimum on take_profit/stop_loss order
-      // amounts. For BOOM300N MULT it's $0.61 (verified 2026-05-19 via
-      // ContractBuyValidationError). The earlier $0.10 constant was wrong
-      // for some symbols. Use a safer $1.00 floor that's high enough for
-      // every synthetic-index/forex MULT contract we trade.
+      // Deriv enforces BOTH a lower and an upper bound on take_profit /
+      // stop_loss `limit_order` amounts:
+      //   - Lower bound: $0.10 absolute (verified 2026-05-19 via
+      //     probe-positive-sl.ts: stop_loss=0 rejected with "≥ 0.10")
+      //   - Upper bound: stake × 0.50 (verified 2026-05-19 via live error
+      //     "≤ 0.50" on $1 stake when we sent $1.00 to Deriv)
       //
       // BOT-MANAGED TP/SL: when the designed TP$ or SL$ (from strategy
-      // geometry) falls below the Deriv floor, send the FLOOR value to
-      // Deriv (so the broker accepts the contract) AND store the designed
-      // value on the trade as `botManagedTp/Sl`. The tick-watch in
-      // onContractUpdate then manually sells when currentProfit crosses
-      // the designed threshold — preserving the validated SL/TP geometry
-      // regardless of Deriv's contract-level minimums.
-      const TP_SL_FLOOR = 1.00;
+      // geometry) falls outside [lower, upper], clamp the value SENT to
+      // Deriv to the nearest valid bound AND store the designed value on
+      // the trade as `botManagedTp/Sl`. The tick-watch in onContractUpdate
+      // manually sells when currentProfit crosses the designed threshold —
+      // preserving the validated SL/TP geometry. Whichever fires first
+      // wins (tick-watch usually first in normal conditions; broker fires
+      // first during spike-gap ticks).
+      const DERIV_MIN = 0.10;
+      const DERIV_MAX_PCT = 0.50;
+      const derivMax = +(stake * DERIV_MAX_PCT).toFixed(2);
+      const clampForDeriv = (v: number) => +Math.min(derivMax, Math.max(DERIV_MIN, v)).toFixed(2);
       const tpDesigned = tp;
       const slDesigned = sl;
       let botManagedTp: number | null = null;
       let botManagedSl: number | null = null;
       const trailingOn = params.trailingExitEnabled === true;
       // TRAILING ENABLED:
-      // - TP omitted from Deriv (Deriv enforces a ~50% of stake upper bound
-      //   on take_profit at small stakes; we'd be forced to clamp narrow and
-      //   defeat the trail). Stored as botManagedTp; bot pushes broker-TP
-      //   ONCE at arm-time via contract_update at stake × 0.45.
-      // - SL **IS sent to Deriv**, clamped up to TP_SL_FLOOR if the designed
-      //   value is below the broker minimum. Without a broker-side SL, a
-      //   BOOM/CRASH single-tick spike against the position skips past the
-      //   bot's tick-watch SL and we settle at the post-spike price (observed
-      //   2026-05-19 contract 149551657261: designed SL ~$0.64, actual loss
-      //   $8.10). Broker SL guarantees the exit price even during spikes.
-      //   The bot's tick-watch still fires the same SL trigger via manual
-      //   sell — whichever fires first wins; in normal (non-spike) conditions
-      //   bot-watch will usually be first.
+      // - TP omitted from Deriv buy request. Bot pushes broker-TP via
+      //   contract_update AFTER arm (peak-anchored ratchet, see
+      //   onContractUpdate). Sending TP at order open hits the stake × 0.50
+      //   upper bound when the designed wide-safety-net value exceeds it.
+      // - SL sent to Deriv, clamped into [DERIV_MIN, stake × 0.50]. This
+      //   catches BOOM/CRASH single-tick spikes against the position that
+      //   the bot's tick-watch can't see in time (observed 2026-05-19
+      //   contract 149551657261: designed SL ~$0.64 but bot exited at
+      //   -$8.10 because no broker-SL was in place).
       //
-      // NON-TRAILING path: send the designed TP/SL clamped to the broker
-      // floor ($1.00 lower bound observed); bot still manages designed
-      // trigger via tick-watch for SL when the clamp widened it.
+      // NON-TRAILING path: send both TP and SL, clamped into the same
+      // range. Bot's tick-watch fires at the designed level if it's
+      // tighter than the clamp.
       if (trailingOn) {
         if (tp != null) { botManagedTp = +tp.toFixed(4); tp = undefined; }
         if (sl != null) {
           botManagedSl = +sl.toFixed(4);
-          sl = Math.max(sl, TP_SL_FLOOR);
-          sl = +sl.toFixed(2);
+          sl = clampForDeriv(sl);
         }
       } else {
-        if (tp != null && tp < TP_SL_FLOOR) {
+        if (tp != null) {
           botManagedTp = +tp.toFixed(4);
-          tp = TP_SL_FLOOR;
+          tp = clampForDeriv(tp);
         }
-        if (sl != null && sl < TP_SL_FLOOR) {
+        if (sl != null) {
           botManagedSl = +sl.toFixed(4);
-          sl = TP_SL_FLOOR;
+          sl = clampForDeriv(sl);
         }
       }
       if (botManagedTp != null || botManagedSl != null) {
@@ -829,16 +829,27 @@ export class RealEngine extends EventEmitter {
             //                 broker-TP. Avoids API spam during steady
             //                 ratcheting; broker-TP ends up lagging peak
             //                 by up to one minStep.
-            //   - MIN_FLOOR = $0.61 → BOOM300N broker minimum (observed
-            //                 via ContractBuyValidationError 2026-05-19).
+            //   - DERIV_MIN = $0.10, DERIV_MAX = stake × 0.50 → Deriv API
+            //                 bounds (verified 2026-05-19 via probe and live
+            //                 placeTrade error). If desiredTp would exceed
+            //                 the cap, SKIP the push — pushing the cap value
+            //                 would prematurely fire broker-TP at 50% of
+            //                 stake regardless of peak (regression vs
+            //                 tick-watch). Skipping leaves the trade under
+            //                 tick-watch trail-exit only; this is the same
+            //                 protection level as before broker-TP existed.
             if (trade.trailArmed) {
-              const MIN_BROKER_TP = 0.61;
+              const DERIV_MIN = 0.10;
+              const DERIV_MAX = +(trade.stake * 0.50).toFixed(2);
               const tpBuffer = trade.stake * 0.10;
               const minStep = trade.stake * 0.05;
               const peakAnchor = Math.max(trade.peakProfit ?? 0, profit);
-              const desiredTp = +Math.max(peakAnchor + tpBuffer, MIN_BROKER_TP).toFixed(2);
+              const desiredTpRaw = +(peakAnchor + tpBuffer).toFixed(2);
+              const desiredTp = +Math.max(desiredTpRaw, DERIV_MIN).toFixed(2);
               const currentBrokerTp = trade.brokerTpAmount ?? 0;
-              if (desiredTp > currentBrokerTp + minStep
+              const exceedsCap = desiredTp > DERIV_MAX;
+              if (!exceedsCap
+                  && desiredTp > currentBrokerTp + minStep
                   && desiredTp > profit
                   && !this.brokerTpUpdateInFlight.has(trade.contractId)) {
                 this.brokerTpUpdateInFlight.add(trade.contractId);
