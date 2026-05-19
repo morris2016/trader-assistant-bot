@@ -2484,64 +2484,25 @@ async function main() {
   }, 20_000);
 
   // ──────── Production risk circuit breakers ────────
-  // Latency circuit: if the rolling-average open latency exceeds the threshold,
-  // auto-pause the bot. The 800ms default was too aggressive — Railway → Deriv
-  // round-trips on multiplier_buy commonly land 700–1100ms even from EU West,
-  // which would trip on every single trade. Defaults raised to a 2500ms ceiling
-  // and 5-sample minimum so a one-off slow buy doesn't blow the circuit.
-  // Auto-resumes when avg drops back below threshold/2 — manual-only recovery
-  // was the wrong default; the user shouldn't have to babysit every spike.
-  // All thresholds are env-configurable (LATENCY_CIRCUIT_MS, LATENCY_MIN_SAMPLES,
-  // LATENCY_AUTO_RESUME=0 to disable auto-resume).
-  const LATENCY_CIRCUIT_MS = Number(process.env.LATENCY_CIRCUIT_MS ?? 2500);
-  const LATENCY_MIN_SAMPLES = Number(process.env.LATENCY_MIN_SAMPLES ?? 5);
-  const LATENCY_AUTO_RESUME = (process.env.LATENCY_AUTO_RESUME ?? "1") === "1";
-  let latencyPaused = false;
-  safeInterval("latency-circuit", () => {
-    const avg = real.averageOpenLatencyMs();
-    const samples = real.recentOpenLatencySampleCount();
-    if (avg == null || samples < LATENCY_MIN_SAMPLES) return; // not enough data yet
-    if (avg > LATENCY_CIRCUIT_MS && !latencyPaused) {
-      log.error(`LATENCY CIRCUIT: avg open latency ${avg.toFixed(0)}ms > ${LATENCY_CIRCUIT_MS}ms threshold (n=${samples}) — auto-pausing`);
-      manualPaused = true;
-      latencyPaused = true;
-    } else if (avg <= LATENCY_CIRCUIT_MS / 2 && latencyPaused) {
-      if (LATENCY_AUTO_RESUME) {
-        log.warn(`latency recovered to ${avg.toFixed(0)}ms (n=${samples}, well below ${LATENCY_CIRCUIT_MS}ms) — auto-resuming`);
-        // Only flip OFF the latency-induced pause; if the operator manually
-        // paused for some other reason, leave it paused.
-        manualPaused = false;
-        latencyPaused = false;
-      } else {
-        log.warn(`latency recovered to ${avg.toFixed(0)}ms (well below ${LATENCY_CIRCUIT_MS}ms). Manual resume required (LATENCY_AUTO_RESUME=0).`);
-      }
-    }
-  }, 60_000);
+  // LATENCY CIRCUIT DISABLED 2026-05-19: the "latency" metric was misleading
+  // because signalFiredAt = bar.start_epoch, while contract open happens at
+  // bar.close (60s later for 1m bars). That gave a constant ~61s "latency"
+  // reading on every Fade trade, repeatedly tripping the auto-pause and
+  // breaking the bot's autonomous operation. True API round-trip is sub-
+  // second on Deriv synths. The user explicitly wants the bot to run for
+  // months without auto-intervention — circuit breaker removed entirely.
+  // Re-enable by uncommenting if real latency tracking is fixed later.
+  // const LATENCY_CIRCUIT_MS = Number(process.env.LATENCY_CIRCUIT_MS ?? 2500);
+  // const LATENCY_MIN_SAMPLES = Number(process.env.LATENCY_MIN_SAMPLES ?? 5);
+  // const LATENCY_AUTO_RESUME = (process.env.LATENCY_AUTO_RESUME ?? "1") === "1";
+  // (latency circuit interval removed)
 
-  // Fast2 session-drawdown circuit: track session-peak and pause Fast2 (only)
-  // if the balance falls below `1 - DD_FRAC` of the peak. Default 30% — at
-  // $50 starting balance with 2.0× martingale a 30% session-DD typically
-  // means a deep ladder bust we should stop and review.
-  const FAST2_DD_FRAC = Number(process.env.FAST2_SESSION_DD_FRAC ?? 0.30);
-  // fast2SessionPeak / fast2DDPaused are hoisted alongside fast2Paper init so
-  // resetFast2Paper can clear them (see comment near declaration).
-  safeInterval("fast2-session-dd", () => {
-    const bal = fast2Paper.getState().balance;
-    if (bal > fast2SessionPeak) fast2SessionPeak = bal;
-    if (fast2SessionPeak <= 0) return;
-    const ddFrac = 1 - bal / fast2SessionPeak;
-    if (ddFrac > FAST2_DD_FRAC && !fast2DDPaused) {
-      log.error(`FAST2 SESSION-DD CIRCUIT: balance $${bal.toFixed(2)} is ${(ddFrac * 100).toFixed(1)}% below session peak $${fast2SessionPeak.toFixed(2)} (threshold ${(FAST2_DD_FRAC * 100).toFixed(0)}%) — pausing fast2 trades`);
-      fast2DDPaused = true;
-      // Force fast2 sideFilter to a side that BOTH excludes (a poor man's
-      // disable). Operator must reset sideFilter and DD-paused flag from UI.
-      // Note: this only pauses Fast2 — Fast/Real keep running.
-    }
-    if (fast2DDPaused) {
-      // Persistent log nudge so the operator notices.
-      log.warn(`fast2 session-DD circuit active: bal=$${bal.toFixed(2)} peak=$${fast2SessionPeak.toFixed(2)} dd=${(ddFrac * 100).toFixed(1)}%. Reset balance or peak via UI to resume.`);
-    }
-  }, 60_000);
+  // Fast2 session-DD circuit DISABLED 2026-05-19: user wants the bot to
+  // run autonomously for months without auto-intervention. The session-DD
+  // pause was a paper-mode safety net that required manual resume — the
+  // wrong default for unattended operation. Removed entirely (Fast2 is
+  // also silenced from the registry, so this was inert anyway).
+  // (fast2 session-dd circuit interval removed)
   // Expose the DD circuit flag to executeSignal via closure; gate fast2 opens
   // when active. This requires plumbing a shared boolean — done via the
   // `fast2DDPaused` reference captured by the `if (fast2Match)` branch
