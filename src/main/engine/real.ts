@@ -776,46 +776,84 @@ export class RealEngine extends EventEmitter {
             const armPct = trade.trailingArmPct ?? 0.95;
             const retracePct = trade.trailingRetracePct ?? 0.20;
             const armThreshold = trade.botManagedTakeProfit * armPct;
-            if (!trade.trailArmed && (trade.peakProfit ?? 0) >= armThreshold) {
+            const justArmed = !trade.trailArmed && (trade.peakProfit ?? 0) >= armThreshold;
+            if (justArmed) {
               trade.trailArmed = true;
               console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak-movement=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
+              // BROKER-SIDE TP: at the moment of arming, push the Deriv
+              // take_profit to the CAP (stake × 0.45, well below Deriv's
+              // ~50% upper bound). Pushed ONCE — no ratcheting, because
+              // Deriv's take_profit fires when profit FIRST CROSSES the
+              // value upward, not on retracement. Pushing a value below
+              // current profit causes either silent rejection or immediate
+              // close — neither matches the intent.
+              //
+              // The cap acts as a server-side guarantee: when profit climbs
+              // to stake × 0.45, Deriv auto-closes at that exact level even
+              // during a single-tick spike that would skip the bot's tick-
+              // watch. For peaks below the cap, the bot's tick-watch fires
+              // the trail-exit at peak × (1 − retracePct) before the cap is
+              // hit, so the cap is only the "ceiling" exit.
+              //
+              // Pre-condition: current profit MUST be below cap for Deriv
+              // to accept the update. armThreshold (e.g. $0.342 at $1 stake)
+              // is below cap ($0.45 at $1 stake), so this holds at arm time.
+              const capTp = +(trade.stake * 0.45).toFixed(2);
+              if (profit < capTp && !this.brokerTpUpdateInFlight.has(trade.contractId)) {
+                this.brokerTpUpdateInFlight.add(trade.contractId);
+                const prevTp = trade.brokerTpAmount;
+                trade.brokerTpAmount = capTp;
+                this.deriv.updateContract(trade.contractId, { takeProfit: capTp })
+                  .then((resp) => {
+                    const errMsg = (resp as { error?: { message?: string } }).error?.message;
+                    if (errMsg) {
+                      trade.brokerTpAmount = prevTp;
+                      this.emit("tickDiag", {
+                        contractId: trade.contractId,
+                        sandbox: trade.sandbox,
+                        event: "broker-tp-rejected",
+                        profit,
+                        movement,
+                        peak: trade.peakProfit,
+                        armed: trade.trailArmed,
+                        brokerTp: prevTp,
+                        reason: `Deriv rejected take_profit=$${capTp}: ${errMsg}`,
+                      });
+                    } else {
+                      this.emit("tickDiag", {
+                        contractId: trade.contractId,
+                        sandbox: trade.sandbox,
+                        event: "broker-tp-set",
+                        profit,
+                        movement,
+                        peak: trade.peakProfit,
+                        armed: trade.trailArmed,
+                        brokerTp: capTp,
+                        reason: `Deriv accepted take_profit=$${capTp} (cap=stake×0.45)`,
+                      });
+                    }
+                  })
+                  .catch((e) => {
+                    trade.brokerTpAmount = prevTp;
+                    this.emit("tickDiag", {
+                      contractId: trade.contractId,
+                      sandbox: trade.sandbox,
+                      event: "broker-tp-error",
+                      profit,
+                      movement,
+                      peak: trade.peakProfit,
+                      armed: trade.trailArmed,
+                      brokerTp: prevTp,
+                      reason: `contract_update threw: ${(e as Error).message}`,
+                    });
+                  })
+                  .finally(() => this.brokerTpUpdateInFlight.delete(trade.contractId));
+              }
             }
             if (trade.trailArmed) {
               const exitMovement = (trade.peakProfit ?? 0) * (1 - retracePct);
               if (movement <= exitMovement) {
                 trigger = { side: "TRAIL", reason: `movement=$${movement.toFixed(3)} retraced from peak=$${trade.peakProfit?.toFixed(3)} past $${exitMovement.toFixed(3)} threshold (${(retracePct*100).toFixed(0)}% retrace; profit=$${profit.toFixed(3)})` };
-              } else {
-                // BROKER-SIDE TP RATCHET: as peak grows, push the trail
-                // threshold to Deriv's take_profit so a single-tick spike
-                // (BOOM event) auto-closes server-side at the threshold,
-                // bypassing the tick-gap that lets the bot miss the level.
-                //
-                // Deriv enforces an UPPER bound on TP ~50% of stake. We cap
-                // conservatively at 45% to avoid ContractBuyValidationError.
-                // Update only when the new threshold is meaningfully higher
-                // than the last one we pushed (≥ $0.10 increment) to avoid
-                // hammering the contract_update endpoint.
-                const desiredBrokerTp = +exitMovement.toFixed(2);
-                const derivMaxTp = +(trade.stake * 0.45).toFixed(2);
-                const cappedTp = Math.min(desiredBrokerTp, derivMaxTp);
-                const minBumpDollars = 0.10;
-                const shouldUpdate = cappedTp > 0
-                  && (trade.brokerTpAmount == null || cappedTp >= trade.brokerTpAmount + minBumpDollars)
-                  && !this.brokerTpUpdateInFlight.has(trade.contractId);
-                if (shouldUpdate) {
-                  this.brokerTpUpdateInFlight.add(trade.contractId);
-                  const prevTp = trade.brokerTpAmount;
-                  // Optimistic assignment so subsequent ticks don't race to
-                  // the same value while this call is in flight.
-                  trade.brokerTpAmount = cappedTp;
-                  console.log(`[real.brokerTp] ${trade.symbol} contract=${trade.contractId} bump broker TP $${prevTp ?? "(none)"} → $${cappedTp} (peak=$${trade.peakProfit?.toFixed(3)}, cap=$${derivMaxTp})`);
-                  this.deriv.updateContract(trade.contractId, { takeProfit: cappedTp })
-                    .catch((e) => {
-                      console.error(`[real.brokerTp] update failed: ${(e as Error).message} — reverting tracked value`);
-                      trade.brokerTpAmount = prevTp;
-                    })
-                    .finally(() => this.brokerTpUpdateInFlight.delete(trade.contractId));
-                }
               }
             }
           }
