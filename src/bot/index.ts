@@ -715,7 +715,8 @@ async function main() {
   // Filtered to sandbox="fast" to keep the log signal-dense.
   real.on("tickDiag", (d: { sandbox?: string; contractId: number; event: string; profit: number;
     movement?: number; peak: number | null; armed: boolean | undefined; armThreshold: number | null;
-    trailExitAt: number | null; slAt: number | null; side?: string; reason?: string }) => {
+    trailExitAt: number | null; slAt: number | null; brokerTp?: number | null;
+    side?: string; reason?: string }) => {
     if (d.sandbox !== "fast") return;
     log.info(`fade-tick`, {
       contract: d.contractId,
@@ -726,6 +727,7 @@ async function main() {
       armed: d.armed ?? false,
       armAt: d.armThreshold,
       trailAt: d.trailExitAt,
+      brokerTp: d.brokerTp ?? null,
       slAt: d.slAt,
       ...(d.side ? { side: d.side, reason: d.reason } : {}),
     });

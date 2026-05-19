@@ -55,6 +55,10 @@ export class RealEngine extends EventEmitter {
    *  from each firing a duplicate manual-sell when the bot-managed TP/SL
    *  trips. Cleared on settlement (when the contract leaves byContractId). */
   private sellInFlight = new Set<number>();
+  /** Set of contract IDs with an in-flight broker-TP update — prevents
+   *  racing updates from multiple ticks. Each tick that wants to ratchet
+   *  the broker TP higher fires only if no update is already in flight. */
+  private brokerTpUpdateInFlight = new Set<number>();
   private account: AccountInfo | null = null;
   private perTradeMaxStake = 0;
   private dailyMaxLoss = 0;
@@ -780,6 +784,38 @@ export class RealEngine extends EventEmitter {
               const exitMovement = (trade.peakProfit ?? 0) * (1 - retracePct);
               if (movement <= exitMovement) {
                 trigger = { side: "TRAIL", reason: `movement=$${movement.toFixed(3)} retraced from peak=$${trade.peakProfit?.toFixed(3)} past $${exitMovement.toFixed(3)} threshold (${(retracePct*100).toFixed(0)}% retrace; profit=$${profit.toFixed(3)})` };
+              } else {
+                // BROKER-SIDE TP RATCHET: as peak grows, push the trail
+                // threshold to Deriv's take_profit so a single-tick spike
+                // (BOOM event) auto-closes server-side at the threshold,
+                // bypassing the tick-gap that lets the bot miss the level.
+                //
+                // Deriv enforces an UPPER bound on TP ~50% of stake. We cap
+                // conservatively at 45% to avoid ContractBuyValidationError.
+                // Update only when the new threshold is meaningfully higher
+                // than the last one we pushed (≥ $0.10 increment) to avoid
+                // hammering the contract_update endpoint.
+                const desiredBrokerTp = +exitMovement.toFixed(2);
+                const derivMaxTp = +(trade.stake * 0.45).toFixed(2);
+                const cappedTp = Math.min(desiredBrokerTp, derivMaxTp);
+                const minBumpDollars = 0.10;
+                const shouldUpdate = cappedTp > 0
+                  && (trade.brokerTpAmount == null || cappedTp >= trade.brokerTpAmount + minBumpDollars)
+                  && !this.brokerTpUpdateInFlight.has(trade.contractId);
+                if (shouldUpdate) {
+                  this.brokerTpUpdateInFlight.add(trade.contractId);
+                  const prevTp = trade.brokerTpAmount;
+                  // Optimistic assignment so subsequent ticks don't race to
+                  // the same value while this call is in flight.
+                  trade.brokerTpAmount = cappedTp;
+                  console.log(`[real.brokerTp] ${trade.symbol} contract=${trade.contractId} bump broker TP $${prevTp ?? "(none)"} → $${cappedTp} (peak=$${trade.peakProfit?.toFixed(3)}, cap=$${derivMaxTp})`);
+                  this.deriv.updateContract(trade.contractId, { takeProfit: cappedTp })
+                    .catch((e) => {
+                      console.error(`[real.brokerTp] update failed: ${(e as Error).message} — reverting tracked value`);
+                      trade.brokerTpAmount = prevTp;
+                    })
+                    .finally(() => this.brokerTpUpdateInFlight.delete(trade.contractId));
+                }
               }
             }
           }
@@ -826,6 +862,7 @@ export class RealEngine extends EventEmitter {
                 ? +(trade.peakProfit * (1 - trade.trailingRetracePct)).toFixed(4)
                 : null,
               slAt: trade.botManagedStopLoss != null ? -trade.botManagedStopLoss : null,
+              brokerTp: trade.brokerTpAmount ?? null,
             });
           }
         }
@@ -846,6 +883,7 @@ export class RealEngine extends EventEmitter {
     this.open = this.open.filter((t) => t.id !== trade.id);
     this.byContractId.delete(info.contract_id);
     this.sellInFlight.delete(info.contract_id);
+    this.brokerTpUpdateInFlight.delete(info.contract_id);
     this.closed.unshift(trade);
     if (this.closed.length > 500) this.closed.length = 500;
 

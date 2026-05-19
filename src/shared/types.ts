@@ -199,6 +199,13 @@ export type RealTrade = {
   trailingArmPct?: number;
   /** Retracement from peak that triggers manual sell (e.g. 0.20 = 20%). */
   trailingRetracePct?: number;
+  /** Latest broker-side TP$ pushed via contract_update. Used to ratchet
+   *  the Deriv take_profit upward as peak grows so a single-tick spike
+   *  (e.g. BOOM 300N boom event) auto-closes at the broker-side threshold
+   *  instead of skipping it during the tick gap. Server-side execution
+   *  closes the contract the moment profit crosses this level, regardless
+   *  of when the next bot tick arrives. */
+  brokerTpAmount?: number | null;
   openedAt: number;
   closedAt: number | null;
   status: "open" | "won" | "lost" | "cancelled";

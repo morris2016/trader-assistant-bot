@@ -310,6 +310,20 @@ export class DerivClient extends EventEmitter {
     await this.send({ sell: String(contractId), price });
   }
 
+  /** Update an open MULTIPLIER contract's take_profit / stop_loss order amount.
+   *  Used by the trailing-exit logic to ratchet a broker-side TP up as peak
+   *  profit grows. Server-side execution means the contract auto-closes at
+   *  the new threshold even during single-tick spikes that would otherwise
+   *  skip the bot's tick-watch. Either field can be passed (or both); pass
+   *  `null` to clear an existing limit. */
+  async updateContract(contractId: number, params: { takeProfit?: number | null; stopLoss?: number | null }): Promise<void> {
+    if (!this.authToken) throw new Error("Not authorized");
+    const limit_order: Record<string, number | null> = {};
+    if (params.takeProfit !== undefined) limit_order.take_profit = params.takeProfit;
+    if (params.stopLoss !== undefined) limit_order.stop_loss = params.stopLoss;
+    await this.send({ contract_update: 1, contract_id: contractId, limit_order });
+  }
+
   /** Fetch the user's currently-open contracts from Deriv. Used at bot
    *  startup to recover open positions when local state was wiped (Railway
    *  redeploy, container restart, etc.) so the UI can show them as Open
