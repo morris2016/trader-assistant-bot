@@ -606,23 +606,31 @@ export class RealEngine extends EventEmitter {
       let botManagedTp: number | null = null;
       let botManagedSl: number | null = null;
       const trailingOn = params.trailingExitEnabled === true;
-      // TRAILING ENABLED: don't send TP/SL to Deriv at all. The bot manages
-      // both via tick-watch + manual sell. Designed values stored on
-      // botManagedTakeProfit/StopLoss.
-      //
-      // Rationale: Deriv enforces BOTH a lower bound (~$0.61 at $4 stake on
-      // BOOM300N) AND an upper bound (~50% of stake at small stakes) on
-      // TP/SL order amounts. Trying to send a "wide safety net" TP value
-      // exceeds the upper bound; sending a clamped narrow one defeats the
-      // trail. Easier to send nothing — the MULTIPLIER natural floor at
-      // -stake handles outage protection (max loss = stake regardless).
+      // TRAILING ENABLED:
+      // - TP omitted from Deriv (Deriv enforces a ~50% of stake upper bound
+      //   on take_profit at small stakes; we'd be forced to clamp narrow and
+      //   defeat the trail). Stored as botManagedTp; bot pushes broker-TP
+      //   ONCE at arm-time via contract_update at stake × 0.45.
+      // - SL **IS sent to Deriv**, clamped up to TP_SL_FLOOR if the designed
+      //   value is below the broker minimum. Without a broker-side SL, a
+      //   BOOM/CRASH single-tick spike against the position skips past the
+      //   bot's tick-watch SL and we settle at the post-spike price (observed
+      //   2026-05-19 contract 149551657261: designed SL ~$0.64, actual loss
+      //   $8.10). Broker SL guarantees the exit price even during spikes.
+      //   The bot's tick-watch still fires the same SL trigger via manual
+      //   sell — whichever fires first wins; in normal (non-spike) conditions
+      //   bot-watch will usually be first.
       //
       // NON-TRAILING path: send the designed TP/SL clamped to the broker
       // floor ($1.00 lower bound observed); bot still manages designed
       // trigger via tick-watch for SL when the clamp widened it.
       if (trailingOn) {
         if (tp != null) { botManagedTp = +tp.toFixed(4); tp = undefined; }
-        if (sl != null) { botManagedSl = +sl.toFixed(4); sl = undefined; }
+        if (sl != null) {
+          botManagedSl = +sl.toFixed(4);
+          sl = Math.max(sl, TP_SL_FLOOR);
+          sl = +sl.toFixed(2);
+        }
       } else {
         if (tp != null && tp < TP_SL_FLOOR) {
           botManagedTp = +tp.toFixed(4);
