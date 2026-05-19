@@ -1842,13 +1842,15 @@ async function main() {
         handledFast = true;
       } else {
         const isLiveMode = fast1Config.liveTradingEnabled;
-        const alreadyOpen = isLiveMode
-          ? real.state().open.some((t) => t.sandbox === "fast" && t.sandboxStrategyId === fastMatch.id)
-          : fastPaper.getState().open.some((p) => p.symbol === sig.symbol);
-        if (alreadyOpen) {
-          log.info("fast signal skipped — position already open", { symbol: sig.symbol, side: sig.action, strategy: fastMatch.id, mode: isLiveMode ? "live" : "paper" });
-          handledFast = true;
-        } else {
+        // PARALLEL TRADES ENABLED 2026-05-19: the previous `alreadyOpen` gate
+        // caused the bot to skip 95%+ of signals on BOOM 300N (each Fade trade
+        // runs 5-10 minutes, blocking everything fired in that window).
+        // Validated sim shows 341 signals/day vs ~5-10 live = massive miss.
+        // Each new signal now opens a new contract regardless of existing
+        // open trades; balance-floor clamp at the dispatcher below is the
+        // only stake cap. Concurrent loss exposure is real — equity-curve
+        // dip can be sharp if multiple trades lose in quick succession.
+        {
           // Stake is derived from the ladder of the *active* mode only —
           // paper losses cannot influence live stake and vice versa.
           const ladderMap = fastMartingaleFor(fastActiveMode());
