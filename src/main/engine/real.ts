@@ -602,24 +602,35 @@ export class RealEngine extends EventEmitter {
       let botManagedTp: number | null = null;
       let botManagedSl: number | null = null;
       const trailingOn = params.trailingExitEnabled === true;
-      // TRAILING ENABLED: always bot-manage TP (so we don't auto-close at the
-      // designed level — peak can ride past it). Send a much-wider TP to Deriv
-      // as a safety-net cap in case the bot misses ticks. The designed TP$
-      // stored on botManagedTakeProfit serves as the arm threshold reference.
-      if (trailingOn && tp != null) {
-        botManagedTp = +tp.toFixed(4);
-        tp = Math.max(tp * 10, TP_SL_FLOOR);
-      }
-      if (tp != null && tp < TP_SL_FLOOR) {
-        botManagedTp = botManagedTp ?? +tp.toFixed(4);
-        tp = TP_SL_FLOOR;
-      }
-      if (sl != null && sl < TP_SL_FLOOR) {
-        botManagedSl = +sl.toFixed(4);
-        sl = TP_SL_FLOOR;
+      // TRAILING ENABLED: don't send TP/SL to Deriv at all. The bot manages
+      // both via tick-watch + manual sell. Designed values stored on
+      // botManagedTakeProfit/StopLoss.
+      //
+      // Rationale: Deriv enforces BOTH a lower bound (~$0.61 at $4 stake on
+      // BOOM300N) AND an upper bound (~50% of stake at small stakes) on
+      // TP/SL order amounts. Trying to send a "wide safety net" TP value
+      // exceeds the upper bound; sending a clamped narrow one defeats the
+      // trail. Easier to send nothing — the MULTIPLIER natural floor at
+      // -stake handles outage protection (max loss = stake regardless).
+      //
+      // NON-TRAILING path: send the designed TP/SL clamped to the broker
+      // floor ($1.00 lower bound observed); bot still manages designed
+      // trigger via tick-watch for SL when the clamp widened it.
+      if (trailingOn) {
+        if (tp != null) { botManagedTp = +tp.toFixed(4); tp = undefined; }
+        if (sl != null) { botManagedSl = +sl.toFixed(4); sl = undefined; }
+      } else {
+        if (tp != null && tp < TP_SL_FLOOR) {
+          botManagedTp = +tp.toFixed(4);
+          tp = TP_SL_FLOOR;
+        }
+        if (sl != null && sl < TP_SL_FLOOR) {
+          botManagedSl = +sl.toFixed(4);
+          sl = TP_SL_FLOOR;
+        }
       }
       if (botManagedTp != null || botManagedSl != null) {
-        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP $${tp} / SL $${sl}${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct}` : ""}.`);
+        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP ${tp ?? "(none)"} / SL ${sl ?? "(none)"}${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct}` : ""}.`);
       }
 
       const { proposal, buy } = await this.deriv.placeMultiplier({
