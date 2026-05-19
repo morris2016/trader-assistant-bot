@@ -761,6 +761,9 @@ async function main() {
         if (next.sideFilter !== "both" && next.sideFilter !== "BUY" && next.sideFilter !== "SELL") next.sideFilter = before.sideFilter;
         if (next.martingaleMode !== "classic" && next.martingaleMode !== "anti") next.martingaleMode = before.martingaleMode;
         if (typeof next.liveTradingEnabled !== "boolean") next.liveTradingEnabled = before.liveTradingEnabled;
+        if (typeof next.trailingExitEnabled !== "boolean") next.trailingExitEnabled = before.trailingExitEnabled ?? true;
+        if (!isFinite(next.trailingArmPct as number) || (next.trailingArmPct as number) <= 0 || (next.trailingArmPct as number) > 1) next.trailingArmPct = before.trailingArmPct ?? 0.95;
+        if (!isFinite(next.trailingRetracePct as number) || (next.trailingRetracePct as number) <= 0 || (next.trailingRetracePct as number) >= 1) next.trailingRetracePct = before.trailingRetracePct ?? 0.20;
         fast1Config = next;
         persist();
         log.warn("fast1Config updated via API", { before, after: next });
@@ -1865,6 +1868,9 @@ async function main() {
                   stakeOverride: liveStake,
                   sandbox: "fast",
                   sandboxStrategyId: fastMatch.id,
+                  trailingExitEnabled: fast1Config.trailingExitEnabled ?? false,
+                  trailingArmPct: fast1Config.trailingArmPct ?? 0.95,
+                  trailingRetracePct: fast1Config.trailingRetracePct ?? 0.20,
                 });
                 log.info(`fast LIVE opened ${trade.symbol} ${trade.side} strategy=${fastMatch.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${liveMult}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
               } catch (e) {

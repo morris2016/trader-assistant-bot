@@ -193,6 +193,11 @@ export type FastSandboxConfig = {
    *  set to false to silence one strategy without removing it from the
    *  registry. Defaults to true/undefined (active). */
   enabled?: boolean;
+  /** Trailing-exit (ratcheted TP). When true, the bot doesn't auto-close
+   *  at designed TP; it tracks peak profit and exits when retraced. */
+  trailingExitEnabled?: boolean;
+  trailingArmPct?: number;
+  trailingRetracePct?: number;
   perStrategy?: Record<string, Partial<FastSandboxConfig>>;
 };
 export type Fast1Config = FastSandboxConfig;

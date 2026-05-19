@@ -388,6 +388,13 @@ export class RealEngine extends EventEmitter {
     digitContractType?: "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER" | "DIGITMATCH" | "DIGITDIFF";
     /** Required for OVER/UNDER/MATCH/DIFF contract types — the digit barrier. */
     digitBarrier?: number;
+    /** Trailing-exit (ratcheted TP). When enabled, the bot doesn't rely on
+     *  the static TP; instead it tick-watches profit and manually sells when
+     *  retrace from peak crosses the configured threshold. See FastSandboxConfig
+     *  for full semantics. Defaults: enabled=false (preserve prior behavior). */
+    trailingExitEnabled?: boolean;
+    trailingArmPct?: number;
+    trailingRetracePct?: number;
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
@@ -594,8 +601,17 @@ export class RealEngine extends EventEmitter {
       const slDesigned = sl;
       let botManagedTp: number | null = null;
       let botManagedSl: number | null = null;
-      if (tp != null && tp < TP_SL_FLOOR) {
+      const trailingOn = params.trailingExitEnabled === true;
+      // TRAILING ENABLED: always bot-manage TP (so we don't auto-close at the
+      // designed level — peak can ride past it). Send a much-wider TP to Deriv
+      // as a safety-net cap in case the bot misses ticks. The designed TP$
+      // stored on botManagedTakeProfit serves as the arm threshold reference.
+      if (trailingOn && tp != null) {
         botManagedTp = +tp.toFixed(4);
+        tp = Math.max(tp * 10, TP_SL_FLOOR);
+      }
+      if (tp != null && tp < TP_SL_FLOOR) {
+        botManagedTp = botManagedTp ?? +tp.toFixed(4);
         tp = TP_SL_FLOOR;
       }
       if (sl != null && sl < TP_SL_FLOOR) {
@@ -603,7 +619,7 @@ export class RealEngine extends EventEmitter {
         sl = TP_SL_FLOOR;
       }
       if (botManagedTp != null || botManagedSl != null) {
-        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed TP/SL: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP $${tp} / SL $${sl}. Bot will sell when currentProfit crosses designed.`);
+        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP $${tp} / SL $${sl}${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct}` : ""}.`);
       }
 
       const { proposal, buy } = await this.deriv.placeMultiplier({
@@ -642,6 +658,9 @@ export class RealEngine extends EventEmitter {
         botManagedStopLoss: botManagedSl,
         peakProfit: null,
         trailArmed: false,
+        trailingExitEnabled: trailingOn,
+        trailingArmPct: trailingOn ? params.trailingArmPct ?? 0.95 : undefined,
+        trailingRetracePct: trailingOn ? params.trailingRetracePct ?? 0.20 : undefined,
         openedAt: contractOpenedAt,
         closedAt: null,
         status: "open",
@@ -701,37 +720,57 @@ export class RealEngine extends EventEmitter {
       info.status === "lost";
 
     if (!settled) {
-      // BOT-MANAGED TP/SL: when Deriv-side levels are clamped to the broker
-      // floor (wider than the strategy's designed values), the bot needs to
-      // exit at the DESIGNED levels by manually selling. Check current
-      // unrealized profit against designed thresholds and fire `sell` if
-      // either side trips. Deriv's broker-side TP/SL act only as a fallback.
+      // BOT-MANAGED TP/SL + TRAILING EXIT.
       //
-      // Peak tracking + trail-arm flag are also maintained here so the
-      // trailing-exit logic (to be wired by the sandbox listener) has
-      // access to the running max.
+      // On every contract update tick:
+      //   1. Update peakProfit (max profit seen so far for this contract).
+      //   2. SL check: if profit drops below -botManagedStopLoss, sell.
+      //   3. Trail logic (if trailingExitEnabled):
+      //      - Arm once peakProfit >= designedTpPnl * trailingArmPct.
+      //      - While armed, sell when profit retraces by trailingRetracePct
+      //        from peakProfit. This LETS peak overshoot the designed TP —
+      //        you reap any profit beyond TP that the price runs to.
+      //   4. Static-TP fallback (if NOT trailing): sell at designed TP.
+      // Deriv's broker-side TP/SL serve as outer safety net only.
+      //
+      // sellInFlight prevents racing ticks from firing duplicate sells.
       const profit = info.profit;
       if (profit != null) {
-        // Peak update + trail-arm (just bookkeeping for now; trail trigger
-        // logic decides in a future iteration).
         if (trade.peakProfit == null || profit > trade.peakProfit) trade.peakProfit = profit;
 
-        // In-flight guard: once a sell has been dispatched for a contract,
-        // don't fire another from subsequent ticks. The sell completion
-        // arrives via the next contract update with is_sold=1; until then,
-        // we suppress repeated triggers.
         if (!this.sellInFlight.has(trade.contractId)) {
-          let trigger: { side: "SL" | "TP"; threshold: number } | null = null;
+          let trigger: { side: "SL" | "TP" | "TRAIL"; reason: string } | null = null;
+
+          // 1. SL fires regardless of trailing mode.
           if (trade.botManagedStopLoss != null && profit <= -trade.botManagedStopLoss) {
-            trigger = { side: "SL", threshold: -trade.botManagedStopLoss };
-          } else if (trade.botManagedTakeProfit != null && profit >= trade.botManagedTakeProfit) {
-            trigger = { side: "TP", threshold: trade.botManagedTakeProfit };
+            trigger = { side: "SL", reason: `profit=$${profit.toFixed(3)} <= -$${trade.botManagedStopLoss.toFixed(3)}` };
           }
+          // 2. Trailing path
+          else if (trade.trailingExitEnabled && trade.botManagedTakeProfit != null) {
+            const armPct = trade.trailingArmPct ?? 0.95;
+            const retracePct = trade.trailingRetracePct ?? 0.20;
+            const armThreshold = trade.botManagedTakeProfit * armPct;
+            if (!trade.trailArmed && (trade.peakProfit ?? 0) >= armThreshold) {
+              trade.trailArmed = true;
+              console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
+            }
+            if (trade.trailArmed) {
+              const exitProfit = (trade.peakProfit ?? 0) * (1 - retracePct);
+              if (profit <= exitProfit) {
+                trigger = { side: "TRAIL", reason: `profit=$${profit.toFixed(3)} retraced from peak=$${trade.peakProfit?.toFixed(3)} past $${exitProfit.toFixed(3)} threshold (${(retracePct*100).toFixed(0)}% retrace)` };
+              }
+            }
+          }
+          // 3. Static TP only when trailing is OFF
+          else if (trade.botManagedTakeProfit != null && profit >= trade.botManagedTakeProfit) {
+            trigger = { side: "TP", reason: `profit=$${profit.toFixed(3)} >= $${trade.botManagedTakeProfit.toFixed(3)}` };
+          }
+
           if (trigger) {
-            console.log(`[real.botManaged${trigger.side}] ${trade.symbol} contract=${trade.contractId} profit=$${profit.toFixed(3)} crosses designed $${trigger.threshold.toFixed(3)}. Selling.`);
+            console.log(`[real.bot${trigger.side}] ${trade.symbol} contract=${trade.contractId} ${trigger.reason}. Selling.`);
             this.sellInFlight.add(trade.contractId);
             this.deriv.sellContract(trade.contractId, 0).catch((e) => {
-              console.error(`[real.botManaged${trigger!.side}] sell failed: ${(e as Error).message}`);
+              console.error(`[real.bot${trigger!.side}] sell failed: ${(e as Error).message}`);
               this.sellInFlight.delete(trade.contractId);
             });
           }

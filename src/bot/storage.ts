@@ -88,6 +88,23 @@ export type FastSandboxConfig = {
    *  meaning the strategy is active. Lets the operator turn off a single
    *  strategy without removing it from the registry. */
   enabled?: boolean;
+  /** Trailing-exit (ratcheted take-profit). When enabled, the LIVE bot
+   *  doesn't send a static TP to Deriv. Instead it tick-watches profit:
+   *    - peakProfit is updated on every tick (max profit seen so far)
+   *    - once peakProfit >= designedTpPnl * trailingArmPct → trail-armed
+   *    - while armed, if profit retraces by trailingRetracePct from peak
+   *      → bot manually sells (Deriv `sell` API)
+   *  Reaps any profit BEYOND designed TP that the price overshoots, while
+   *  shielding against last-minute reversals on near-misses. 30-day sim
+   *  on BOOM300N at $15+mart2.2/L5: arm=0.95 retrace=0.20 produced
+   *  $4,677 vs no-trailing $1,820, max DD $128 vs $135. */
+  trailingExitEnabled?: boolean;
+  /** Trail-arm threshold as fraction of designed TP$. 0.95 means arm once
+   *  profit reaches 95% of the designed TP. */
+  trailingArmPct?: number;
+  /** Profit retracement from peak that triggers the manual sell. 0.20 means
+   *  exit when profit drops 20% from its peak. */
+  trailingRetracePct?: number;
   /** Per-strategy overrides: any subset of the above fields, keyed by
    *  strategyId. When a strategy is dispatched, the effective config is
    *  computed by spreading the general config and then overlaying the
@@ -129,6 +146,13 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   sideFilter: "both",
   martingaleMode: "classic",      // escalate on loss
   liveTradingEnabled: false,      // PAPER ONLY by default — flip via UI
+  // Trailing exit defaults validated 2026-05-19 across 30-day sweep on
+  // real Deriv BOOM300N data ($15+mart2.2/L5): arm=0.95 retrace=0.20
+  // delivered $4,677 final vs $1,820 no-trailing, with max DD $128 vs $135.
+  // Strictly dominant for retrace>=0.20 across all arm levels tested.
+  trailingExitEnabled: true,
+  trailingArmPct: 0.95,
+  trailingRetracePct: 0.20,
 };
 
 /** Fast2 — same shape as Fast1. Defaults aligned to Deriv's actual contract

@@ -85,7 +85,10 @@ export function FastPanel({ doAction, pending }: {
     pendingCfg.perTradeCap !== paper.config.perTradeCap ||
     pendingCfg.commissionPct !== paper.config.commissionPct ||
     pendingCfg.entrySpreadBps !== paper.config.entrySpreadBps ||
-    pendingCfg.forceMartingale !== paper.config.forceMartingale
+    pendingCfg.forceMartingale !== paper.config.forceMartingale ||
+    pendingCfg.trailingExitEnabled !== paper.config.trailingExitEnabled ||
+    pendingCfg.trailingArmPct !== paper.config.trailingArmPct ||
+    pendingCfg.trailingRetracePct !== paper.config.trailingRetracePct
   );
   const symbols = Array.from(new Set([
     ...trades.map((t) => t.symbol),
@@ -252,6 +255,43 @@ export function FastPanel({ doAction, pending }: {
                 {cfg.forceMartingale ? "ON — every strategy ladders" : "OFF — registry decides"}
               </span>
             </label>
+          </ConfigField>
+          <ConfigField label="Trailing Exit (ratcheted TP)">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 6 }}
+                   title="When ON, the bot lets price overshoot the designed TP, tracks peak profit, and exits when profit retraces by the configured % from peak. Captures upside above TP, shields against last-minute reversals.">
+              <input
+                type="checkbox"
+                checked={cfg.trailingExitEnabled ?? true}
+                onChange={(e) => setCfg({ trailingExitEnabled: e.target.checked })}
+              />
+              <span className={`mono ${(cfg.trailingExitEnabled ?? true) ? "pos" : "muted"}`}>
+                {(cfg.trailingExitEnabled ?? true) ? "ON" : "OFF — static TP"}
+              </span>
+            </label>
+          </ConfigField>
+          <ConfigField label="Trail Arm % of TP">
+            <input
+              className="filter-input"
+              type="number"
+              step="0.05"
+              min="0.50"
+              max="1.00"
+              value={cfg.trailingArmPct ?? 0.95}
+              onChange={(e) => setCfg({ trailingArmPct: Number(e.target.value) })}
+              title="Arm the trail once peak profit reaches this fraction of designed TP. Default 0.95 = arm at 95% of TP."
+            />
+          </ConfigField>
+          <ConfigField label="Trail Retrace % from peak">
+            <input
+              className="filter-input"
+              type="number"
+              step="0.05"
+              min="0.05"
+              max="0.50"
+              value={cfg.trailingRetracePct ?? 0.20}
+              onChange={(e) => setCfg({ trailingRetracePct: Number(e.target.value) })}
+              title="Exit when profit retraces by this fraction from peak. Default 0.20 = 20% retrace triggers exit."
+            />
           </ConfigField>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

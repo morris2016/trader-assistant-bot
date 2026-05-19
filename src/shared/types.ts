@@ -187,6 +187,13 @@ export type RealTrade = {
   peakProfit?: number | null;
   /** True once peakProfit crossed the trail-arm threshold. */
   trailArmed?: boolean;
+  /** Trailing-exit ON/OFF for this trade — captured at placeTrade so a
+   *  mid-trade config change doesn't toggle behavior. */
+  trailingExitEnabled?: boolean;
+  /** Arm threshold as fraction of designed TP$ (e.g. 0.95 = arm at 95% of TP). */
+  trailingArmPct?: number;
+  /** Retracement from peak that triggers manual sell (e.g. 0.20 = 20%). */
+  trailingRetracePct?: number;
   openedAt: number;
   closedAt: number | null;
   status: "open" | "won" | "lost" | "cancelled";
