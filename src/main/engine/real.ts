@@ -1024,6 +1024,7 @@ export class RealEngine extends EventEmitter {
                 : null,
               slAt: trade.botManagedStopLoss != null ? -trade.botManagedStopLoss : null,
               brokerTp: trade.brokerTpAmount ?? null,
+              brokerSl: trade.brokerSlAmount ?? null,
             });
           }
         }
