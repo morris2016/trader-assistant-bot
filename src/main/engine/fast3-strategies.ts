@@ -76,15 +76,17 @@ export const fast3JD75DigitOdd    = makeStrat("JD75",     0.5518, 203);
 export const fast3HZ50VDigitOdd   = makeStrat("1HZ50V",   0.5524, 110);
 export const fast3HZ100VDigitOdd  = makeStrat("1HZ100V",  0.5511, 344);
 
+// SILENCED 2026-05-19: Fast3 sandbox empty while Fade iteration is active.
+// Re-enable by uncommenting.
 export const FAST3_STRATEGIES: StrategyDescriptor[] = [
-  fast3HZ100VDigitOdd,   // best last-hour contributor (+$344, 57.6% WR)
-  fast3HZ50VDigitOdd,
-  fast3JD75DigitOdd,
-  fast3RDBullDigitOdd,
-  fast3R75DigitOdd,
-  fast3R50DigitOdd,
-  fast3RDBearDigitOdd,
-  fast3R100DigitOdd,
+  // fast3HZ100VDigitOdd,
+  // fast3HZ50VDigitOdd,
+  // fast3JD75DigitOdd,
+  // fast3RDBullDigitOdd,
+  // fast3R75DigitOdd,
+  // fast3R50DigitOdd,
+  // fast3RDBearDigitOdd,
+  // fast3R100DigitOdd,
 ];
 
 export const FAST3_DETECTOR_TAG = TICK_DIGITODD_DETECTOR;

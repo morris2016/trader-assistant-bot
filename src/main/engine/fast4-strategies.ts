@@ -64,15 +64,17 @@ export const fast4JD75DigitOdd    = makeStrat("JD75",     0.5518, 203);
 export const fast4HZ50VDigitOdd   = makeStrat("1HZ50V",   0.5524, 110);
 export const fast4HZ100VDigitOdd  = makeStrat("1HZ100V",  0.5511, 344);
 
+// SILENCED 2026-05-19: Fast4 sandbox empty while Fade iteration is active.
+// Re-enable by uncommenting.
 export const FAST4_STRATEGIES: StrategyDescriptor[] = [
-  fast4HZ100VDigitOdd,
-  fast4HZ50VDigitOdd,
-  fast4JD75DigitOdd,
-  fast4RDBullDigitOdd,
-  fast4R75DigitOdd,
-  fast4R50DigitOdd,
-  fast4RDBearDigitOdd,
-  fast4R100DigitOdd,
+  // fast4HZ100VDigitOdd,
+  // fast4HZ50VDigitOdd,
+  // fast4JD75DigitOdd,
+  // fast4RDBullDigitOdd,
+  // fast4R75DigitOdd,
+  // fast4R50DigitOdd,
+  // fast4RDBearDigitOdd,
+  // fast4R100DigitOdd,
 ];
 
 export const FAST4_DETECTOR_TAG = TICK_DIGITODD_DETECTOR;

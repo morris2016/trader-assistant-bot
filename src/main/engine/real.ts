@@ -746,6 +746,8 @@ export class RealEngine extends EventEmitter {
       //
       // sellInFlight prevents racing ticks from firing duplicate sells.
       const profit = info.profit;
+      const peakBefore = trade.peakProfit;
+      const armedBefore = trade.trailArmed;
       if (profit != null) {
         if (trade.peakProfit == null || profit > trade.peakProfit) trade.peakProfit = profit;
 
@@ -783,6 +785,37 @@ export class RealEngine extends EventEmitter {
             this.deriv.sellContract(trade.contractId, 0).catch((e) => {
               console.error(`[real.bot${trigger!.side}] sell failed: ${(e as Error).message}`);
               this.sellInFlight.delete(trade.contractId);
+            });
+            this.emit("tickDiag", {
+              contractId: trade.contractId,
+              sandbox: trade.sandbox,
+              event: "sell-triggered",
+              side: trigger.side,
+              profit,
+              peak: trade.peakProfit,
+              armed: trade.trailArmed,
+              reason: trigger.reason,
+            });
+          } else {
+            // Always emit a diagnostic tick so the operator can watch
+            // profit/peak/armed evolve in the log. Bot listens and writes
+            // a structured log entry for sandbox="fast" contracts.
+            this.emit("tickDiag", {
+              contractId: trade.contractId,
+              sandbox: trade.sandbox,
+              event: (!armedBefore && trade.trailArmed) ? "armed"
+                   : (peakBefore == null || (trade.peakProfit != null && trade.peakProfit > peakBefore)) ? "peak-up"
+                   : "tick",
+              profit,
+              peak: trade.peakProfit,
+              armed: trade.trailArmed,
+              armThreshold: trade.botManagedTakeProfit != null && trade.trailingArmPct != null
+                ? +(trade.botManagedTakeProfit * trade.trailingArmPct).toFixed(4)
+                : null,
+              trailExitAt: trade.trailArmed && trade.peakProfit != null && trade.trailingRetracePct != null
+                ? +(trade.peakProfit * (1 - trade.trailingRetracePct)).toFixed(4)
+                : null,
+              slAt: trade.botManagedStopLoss != null ? -trade.botManagedStopLoss : null,
             });
           }
         }

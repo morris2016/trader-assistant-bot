@@ -517,9 +517,12 @@ export const fast2R75DigitOver0 = makeDigitOver0Strat("R_75", 1.0000);
 // "Synth" but internal storage/sandbox tag stays "fast2" to avoid a wider
 // rename. Both strategies are 5m candle-mode on Deriv synthetics with
 // validated 3-window OOS — see synth-strategies.ts for stats.
+// SILENCED 2026-05-19: Synth sandbox temporarily empty while Fade live
+// iteration is active. Strategy descriptors remain in synth-strategies.ts;
+// re-enable by uncommenting the entries below.
 export const FAST2_STRATEGIES: StrategyDescriptor[] = [
-  boom300nDrift,
-  rdbullBreakout,
+  // boom300nDrift,
+  // rdbullBreakout,
 ];
 // boom300n_fade_fast moved to FAST_STRATEGIES (Fast tab) 2026-05-06 — the
 // asymmetric-RR config (1m, k=1, 0.3/3.0 SL/TP) needed its own config

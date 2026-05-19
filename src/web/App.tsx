@@ -22,14 +22,17 @@ const REFRESH_MS = 3000;
 
 type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "fast4" | "adaptive" | "logs" | "settings";
 
+// SILENCED 2026-05-19: synth/fast3/fast4 tabs hidden while Fade iteration is
+// active. Their panels still build (no runtime cost) but aren't reachable
+// from the nav. Re-enable by uncommenting.
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
   { id: "charts",     label: "Charts",     icon: "📈" },
   { id: "real",       label: "Real",       icon: "$" },
-  { id: "synth",      label: "Synth",      icon: "🧬" },
+  // { id: "synth",      label: "Synth",      icon: "🧬" },
   { id: "fade",       label: "Fade",       icon: "💥" },
-  { id: "fast3",      label: "Fast3",      icon: "🎯" },
-  { id: "fast4",      label: "Fast4",      icon: "🔬" },
+  // { id: "fast3",      label: "Fast3",      icon: "🎯" },
+  // { id: "fast4",      label: "Fast4",      icon: "🔬" },
   { id: "adaptive",   label: "Adaptive",   icon: "🛡" },
   { id: "logs",       label: "Logs",       icon: "📋" },
   { id: "settings",   label: "Settings",   icon: "⚙" },

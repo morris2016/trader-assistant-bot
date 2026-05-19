@@ -709,6 +709,26 @@ async function main() {
   real.on("capHit", (loss, cap) => { log.warn("daily loss cap hit", { loss, cap }); persist(); });
   real.on("adaptiveShiftChanged", () => { log.info("adaptive shift updated", { state: real.describeAdaptiveShift() }); persist(); });
   real.on("error", (err) => log.error("real engine error", { err: err.message }));
+  // Diagnostic tick logger for Fade live contracts. Writes a structured
+  // entry on every proposal_open_contract update so the operator can watch
+  // profit / peak / armed / trail-exit threshold evolve in real time.
+  // Filtered to sandbox="fast" to keep the log signal-dense.
+  real.on("tickDiag", (d: { sandbox?: string; contractId: number; event: string; profit: number;
+    peak: number | null; armed: boolean | undefined; armThreshold: number | null;
+    trailExitAt: number | null; slAt: number | null; side?: string; reason?: string }) => {
+    if (d.sandbox !== "fast") return;
+    log.info(`fade-tick`, {
+      contract: d.contractId,
+      event: d.event,
+      profit: +d.profit.toFixed(4),
+      peak: d.peak != null ? +d.peak.toFixed(4) : null,
+      armed: d.armed ?? false,
+      armAt: d.armThreshold,
+      trailAt: d.trailExitAt,
+      slAt: d.slAt,
+      ...(d.side ? { side: d.side, reason: d.reason } : {}),
+    });
+  });
 
   // HTTP server (API + static UI)
   const httpServer = startHttpServer({
