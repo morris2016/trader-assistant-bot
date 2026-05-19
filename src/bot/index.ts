@@ -1843,12 +1843,33 @@ async function main() {
               handledFast = true;
             } else {
               const liveMult = clampDerivMultiplier(fast1Config.tradeMultiplier);
-              const liveStake = Math.min(DERIV_MAX_STAKE_USD, Math.max(DERIV_MIN_STAKE_USD, stake));
+              // Balance-aware stake clamp: when the ladder asks for more than
+              // the account holds, scale DOWN to the available balance instead
+              // of skipping. Only skip when balance is below Deriv's stake
+              // minimum (where Deriv itself would reject). This keeps small
+              // accounts trading on deep streaks (where they need wins most),
+              // accepting that the recovery $ at the clamped stake will be
+              // smaller than the designed ladder level intended.
+              const availBalance = account?.balance ?? 0;
+              let liveStake: number | null = Math.min(DERIV_MAX_STAKE_USD, Math.max(DERIV_MIN_STAKE_USD, stake));
+              if (liveStake > availBalance) {
+                if (availBalance < DERIV_MIN_STAKE_USD) {
+                  log.warn(`fast LIVE blocked: balance $${availBalance.toFixed(2)} < Deriv min stake $${DERIV_MIN_STAKE_USD}`);
+                  liveStake = null;
+                } else {
+                  const clamped = Math.floor(availBalance * 100) / 100;
+                  log.warn(`fast LIVE: ladder stake $${liveStake} > balance $${availBalance.toFixed(2)} → clamping to $${clamped} (balance-floor)`);
+                  liveStake = Math.max(DERIV_MIN_STAKE_USD, clamped);
+                }
+              }
+              if (liveStake == null) {
+                handledFast = true;
+              } else {
               if (liveMult !== fast1Config.tradeMultiplier) {
                 log.warn(`fast LIVE: tradeMultiplier ${fast1Config.tradeMultiplier}× → ${liveMult}× (Deriv-valid clamp)`);
               }
               if (liveStake !== stake) {
-                log.warn(`fast LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD})`);
+                log.warn(`fast LIVE: stake $${stake} → $${liveStake} (Deriv stake range $${DERIV_MIN_STAKE_USD}-$${DERIV_MAX_STAKE_USD} or balance-clamped)`);
               }
               try {
                 const trade = await real.placeTrade({
@@ -1878,6 +1899,7 @@ async function main() {
                 log.error(`fast LIVE placeTrade failed`, { err: msg, symbol: sig.symbol, side: sig.action, strategy: fastMatch.id });
               }
               handledFast = true;
+              }  // end if (liveStake != null)
             }
           } else {
             // ── PAPER PATH (default): existing simulation flow. ───────────
