@@ -989,8 +989,28 @@ export class RealEngine extends EventEmitter {
             console.log(`[real.bot${trigger.side}] ${trade.symbol} contract=${trade.contractId} ${trigger.reason}. Selling.`);
             this.sellInFlight.add(trade.contractId);
             this.deriv.sellContract(trade.contractId, 0).catch((e) => {
-              console.error(`[real.bot${trigger!.side}] sell failed: ${(e as Error).message}`);
-              this.sellInFlight.delete(trade.contractId);
+              // CRITICAL: do NOT delete sellInFlight on error. The old
+              // behaviour cleared the flag, which let the next tick re-fire
+              // the trigger → retry sell → fail → loop forever (verified
+              // 2026-05-19: contract 76181677021 fired sell-triggered every
+              // second for 90+ seconds while stuck at profit=-$0.50, all
+              // from this catch path).
+              //
+              // Keep the flag set so subsequent ticks skip the trigger eval;
+              // the contract will settle via Deriv's natural flow (broker-SL
+              // floor or contract time-exit). Emit a structured event so the
+              // operator sees the failure in the ndjson stream.
+              this.emit("tickDiag", {
+                contractId: trade.contractId,
+                sandbox: trade.sandbox,
+                event: "sell-failed",
+                side: trigger!.side,
+                profit,
+                peak: trade.peakProfit,
+                armed: trade.trailArmed,
+                brokerSl: trade.brokerSlAmount ?? null,
+                reason: `sellContract threw: ${(e as Error).message}`,
+              });
             });
             this.emit("tickDiag", {
               contractId: trade.contractId,
@@ -1000,6 +1020,7 @@ export class RealEngine extends EventEmitter {
               profit,
               peak: trade.peakProfit,
               armed: trade.trailArmed,
+              brokerSl: trade.brokerSlAmount ?? null,
               reason: trigger.reason,
             });
           } else {
