@@ -19,11 +19,15 @@ export type { StrategyDescriptor } from "./types";
  *
  * Earlier drops 2026-04-28: silver_sweep, eth_ob, eth_sweep, eth_fvg, gold_sweep.
  */
+// SILENCED 2026-05-19: all "real" asset strategies disabled while Fade-only
+// focus is active. Bot runs the boom300n_fade_fast strategy in the Fast
+// sandbox only. Re-enable by uncommenting any entry below; the imports
+// above are kept so re-enabling is a one-line edit.
 export const STRATEGIES: StrategyDescriptor[] = [
-  silverOb,
-  silverFvg,
-  goldFvg,
-  platFvg,
+  // silverOb,
+  // silverFvg,
+  // goldFvg,
+  // platFvg,
 ];
 
 export function strategyById(id: string): StrategyDescriptor | undefined {

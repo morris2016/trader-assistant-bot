@@ -351,7 +351,16 @@ export class DerivClient extends EventEmitter {
     this.openContractIds.add(contractId);
     if (!this.isOpen()) return; // resubscribeAll will pick it up on connect
     this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 })
-      .catch((e) => this.emit("error", e instanceof Error ? e : new Error(String(e))));
+      .catch((e) => {
+        // AlreadySubscribed is benign — we already have a live stream for this
+        // contract. The stuck-contract-watchdog deliberately re-attempts after
+        // long-running trades to ensure tick updates haven't silently dropped;
+        // when the stream is healthy, Deriv responds with this error which
+        // should not be propagated as an "error" event.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("AlreadySubscribed")) return;
+        this.emit("error", e instanceof Error ? e : new Error(msg));
+      });
   }
 
   send(req: DerivRequest): Promise<DerivResponse> {

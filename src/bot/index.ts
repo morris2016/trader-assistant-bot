@@ -2465,7 +2465,12 @@ async function main() {
   // arrives through the normal flow.
   safeInterval("stuck-contract-watchdog", async () => {
     const THRESHOLD_BY_SANDBOX: Record<string, number> = {
-      fast:  300_000,   // 5 min — MULTIPLIER on 1m bars (Fade)
+      // Fade trades on BOOM 300N regularly run 5-11 minutes (validated
+      // 2026-05-19: contract 76179158861 ran 11min 18s, won +$0.46 via
+      // broker-TP ratchet). 300s was too tight; the watchdog fired every
+      // 20s for 8+ minutes of a normal trade, each reconcile causing an
+      // AlreadySubscribed error. Bumped to 1200s (20min).
+      fast:  1_200_000,
       fast2: 600_000,   // 10 min — MULTIPLIER on 5m bars
       fast3: 30_000,    // 30s — DIGITODD
       fast4: 30_000,    // 30s — DIGITODD
