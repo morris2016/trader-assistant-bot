@@ -169,8 +169,24 @@ export type RealTrade = {
   durationTicks?: number;
   // Multiplier only
   multiplier?: number;
-  takeProfit?: number | null;   // absolute profit in currency
-  stopLoss?: number | null;     // absolute loss in currency (positive number)
+  takeProfit?: number | null;   // absolute profit in currency (sent to Deriv)
+  stopLoss?: number | null;     // absolute loss in currency (sent to Deriv, positive number)
+  /** Bot-managed take-profit threshold in $. When the designed TP$ falls
+   *  below Deriv's minimum (Deriv rejects too-tight TP/SL on MULT contracts
+   *  for certain symbols, e.g. BOOM300N requires ≥$0.61), the bot sends a
+   *  Deriv-compliant wider TP to satisfy the broker, but TICK-watches and
+   *  manually sells when currentProfit ≥ botManagedTp$. Preserves the
+   *  validated SL/TP geometry from the strategy descriptor regardless of
+   *  Deriv's contract-level minimums. Null = Deriv's TP is the only stop. */
+  botManagedTakeProfit?: number | null;
+  /** Bot-managed stop-loss threshold in $ (positive). Same pattern as
+   *  botManagedTakeProfit but for the loss side. Bot sells when
+   *  currentProfit ≤ -botManagedSl$. */
+  botManagedStopLoss?: number | null;
+  /** Peak profit seen on this contract (for trailing-exit logic). */
+  peakProfit?: number | null;
+  /** True once peakProfit crossed the trail-arm threshold. */
+  trailArmed?: boolean;
   openedAt: number;
   closedAt: number | null;
   status: "open" | "won" | "lost" | "cancelled";

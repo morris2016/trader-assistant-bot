@@ -51,6 +51,10 @@ export class RealEngine extends EventEmitter {
   private closed: RealTrade[] = [];
   private daily: RealState["daily"] = emptyDaily();
   private byContractId = new Map<number, RealTrade>();
+  /** Set of contract IDs with an in-flight sell — prevents multiple ticks
+   *  from each firing a duplicate manual-sell when the bot-managed TP/SL
+   *  trips. Cleared on settlement (when the contract leaves byContractId). */
+  private sellInFlight = new Set<number>();
   private account: AccountInfo | null = null;
   private perTradeMaxStake = 0;
   private dailyMaxLoss = 0;
@@ -572,20 +576,34 @@ export class RealEngine extends EventEmitter {
         }
       }
 
-      // Deriv enforces a $0.10 minimum on take_profit and stop_loss amounts.
-      // When stake × MULT × price_distance / entry rounds below the floor,
-      // the buy endpoint rejects with ContractBuyValidationError. Snap the
-      // computed values up to the floor so the trade goes through. The price
-      // distance to actually trigger the level becomes slightly wider than
-      // the strategy intended — operator should bump base stake or MULT to
-      // keep the validated paper geometry intact.
-      const TP_SL_FLOOR = 0.10;
-      const tpRaw = tp;
-      const slRaw = sl;
-      if (tp != null && tp < TP_SL_FLOOR) tp = TP_SL_FLOOR;
-      if (sl != null && sl < TP_SL_FLOOR) sl = TP_SL_FLOOR;
-      if (tp !== tpRaw || sl !== slRaw) {
-        console.log(`[real.placeTrade] ${params.symbol} ${params.side} TP/SL clamped to Deriv $${TP_SL_FLOOR.toFixed(2)} floor (TP ${tpRaw} → ${tp}, SL ${slRaw} → ${sl}). Bump stake or MULT to restore validated geometry.`);
+      // Deriv enforces a per-symbol minimum on take_profit/stop_loss order
+      // amounts. For BOOM300N MULT it's $0.61 (verified 2026-05-19 via
+      // ContractBuyValidationError). The earlier $0.10 constant was wrong
+      // for some symbols. Use a safer $1.00 floor that's high enough for
+      // every synthetic-index/forex MULT contract we trade.
+      //
+      // BOT-MANAGED TP/SL: when the designed TP$ or SL$ (from strategy
+      // geometry) falls below the Deriv floor, send the FLOOR value to
+      // Deriv (so the broker accepts the contract) AND store the designed
+      // value on the trade as `botManagedTp/Sl`. The tick-watch in
+      // onContractUpdate then manually sells when currentProfit crosses
+      // the designed threshold — preserving the validated SL/TP geometry
+      // regardless of Deriv's contract-level minimums.
+      const TP_SL_FLOOR = 1.00;
+      const tpDesigned = tp;
+      const slDesigned = sl;
+      let botManagedTp: number | null = null;
+      let botManagedSl: number | null = null;
+      if (tp != null && tp < TP_SL_FLOOR) {
+        botManagedTp = +tp.toFixed(4);
+        tp = TP_SL_FLOOR;
+      }
+      if (sl != null && sl < TP_SL_FLOOR) {
+        botManagedSl = +sl.toFixed(4);
+        sl = TP_SL_FLOOR;
+      }
+      if (botManagedTp != null || botManagedSl != null) {
+        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed TP/SL: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP $${tp} / SL $${sl}. Bot will sell when currentProfit crosses designed.`);
       }
 
       const { proposal, buy } = await this.deriv.placeMultiplier({
@@ -620,6 +638,10 @@ export class RealEngine extends EventEmitter {
         multiplier,
         takeProfit: tp ?? null,
         stopLoss: sl ?? null,
+        botManagedTakeProfit: botManagedTp,
+        botManagedStopLoss: botManagedSl,
+        peakProfit: null,
+        trailArmed: false,
         openedAt: contractOpenedAt,
         closedAt: null,
         status: "open",
@@ -656,6 +678,14 @@ export class RealEngine extends EventEmitter {
   private onContractUpdate(info: OpenContractInfo) {
     const trade = this.byContractId.get(info.contract_id);
     if (!trade) return;
+    // Idempotency guard: a trade that's already been settled must not re-fire
+    // the settle path. Without this, the stuck-contract watchdog's reconcile
+    // call (which pipes proposal_open_contract back through onContractUpdate)
+    // would emit "settled" a second time → sandbox listeners (Fast/Fast2/
+    // Fast3/Fast4) advance the martingale ladder twice for the same loss.
+    // Observed 2026-05-19 on fast LIVE: contract 76161423781 settled at
+    // 05:15:08.991 (L0→L1) then again at 05:15:08.998 (L1→L0 with false CB).
+    if (trade.closedAt != null) return;
 
     if (info.entry_spot != null && trade.entrySpot == null) trade.entrySpot = info.entry_spot;
 
@@ -671,6 +701,42 @@ export class RealEngine extends EventEmitter {
       info.status === "lost";
 
     if (!settled) {
+      // BOT-MANAGED TP/SL: when Deriv-side levels are clamped to the broker
+      // floor (wider than the strategy's designed values), the bot needs to
+      // exit at the DESIGNED levels by manually selling. Check current
+      // unrealized profit against designed thresholds and fire `sell` if
+      // either side trips. Deriv's broker-side TP/SL act only as a fallback.
+      //
+      // Peak tracking + trail-arm flag are also maintained here so the
+      // trailing-exit logic (to be wired by the sandbox listener) has
+      // access to the running max.
+      const profit = info.profit;
+      if (profit != null) {
+        // Peak update + trail-arm (just bookkeeping for now; trail trigger
+        // logic decides in a future iteration).
+        if (trade.peakProfit == null || profit > trade.peakProfit) trade.peakProfit = profit;
+
+        // In-flight guard: once a sell has been dispatched for a contract,
+        // don't fire another from subsequent ticks. The sell completion
+        // arrives via the next contract update with is_sold=1; until then,
+        // we suppress repeated triggers.
+        if (!this.sellInFlight.has(trade.contractId)) {
+          let trigger: { side: "SL" | "TP"; threshold: number } | null = null;
+          if (trade.botManagedStopLoss != null && profit <= -trade.botManagedStopLoss) {
+            trigger = { side: "SL", threshold: -trade.botManagedStopLoss };
+          } else if (trade.botManagedTakeProfit != null && profit >= trade.botManagedTakeProfit) {
+            trigger = { side: "TP", threshold: trade.botManagedTakeProfit };
+          }
+          if (trigger) {
+            console.log(`[real.botManaged${trigger.side}] ${trade.symbol} contract=${trade.contractId} profit=$${profit.toFixed(3)} crosses designed $${trigger.threshold.toFixed(3)}. Selling.`);
+            this.sellInFlight.add(trade.contractId);
+            this.deriv.sellContract(trade.contractId, 0).catch((e) => {
+              console.error(`[real.botManaged${trigger!.side}] sell failed: ${(e as Error).message}`);
+              this.sellInFlight.delete(trade.contractId);
+            });
+          }
+        }
+      }
       this.emit("stateChanged");
       return;
     }
@@ -680,8 +746,13 @@ export class RealEngine extends EventEmitter {
     trade.profit = info.profit ?? 0;
     trade.status = info.status === "won" ? "won" : info.status === "lost" ? "lost" : trade.profit >= 0 ? "won" : "lost";
 
-    // Move from open → closed
+    // Move from open → closed. ALSO remove from the byContractId map so a
+    // subsequent reconcile pass (watchdog) doesn't pick this trade up and
+    // attempt to re-settle it. The closedAt guard above is a belt; this is
+    // the suspenders.
     this.open = this.open.filter((t) => t.id !== trade.id);
+    this.byContractId.delete(info.contract_id);
+    this.sellInFlight.delete(info.contract_id);
     this.closed.unshift(trade);
     if (this.closed.length > 500) this.closed.length = 500;
 
