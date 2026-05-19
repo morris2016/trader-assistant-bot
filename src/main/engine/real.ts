@@ -788,30 +788,45 @@ export class RealEngine extends EventEmitter {
             if (justArmed) {
               trade.trailArmed = true;
               console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak-movement=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
-              // BROKER-SIDE TP: at the moment of arming, push the Deriv
-              // take_profit to the CAP (stake × 0.45, well below Deriv's
-              // ~50% upper bound). Pushed ONCE — no ratcheting, because
-              // Deriv's take_profit fires when profit FIRST CROSSES the
-              // value upward, not on retracement. Pushing a value below
-              // current profit causes either silent rejection or immediate
-              // close — neither matches the intent.
-              //
-              // The cap acts as a server-side guarantee: when profit climbs
-              // to stake × 0.45, Deriv auto-closes at that exact level even
-              // during a single-tick spike that would skip the bot's tick-
-              // watch. For peaks below the cap, the bot's tick-watch fires
-              // the trail-exit at peak × (1 − retracePct) before the cap is
-              // hit, so the cap is only the "ceiling" exit.
-              //
-              // Pre-condition: current profit MUST be below cap for Deriv
-              // to accept the update. armThreshold (e.g. $0.342 at $1 stake)
-              // is below cap ($0.45 at $1 stake), so this holds at arm time.
-              const capTp = +(trade.stake * 0.45).toFixed(2);
-              if (profit < capTp && !this.brokerTpUpdateInFlight.has(trade.contractId)) {
+            }
+            // BROKER-SIDE TP RATCHET: after arming, keep Deriv's take_profit
+            // close above current profit. As profit rises, push TP up by a
+            // small buffer. Deriv's TP fires when profit crosses the value
+            // going UP — captures spike-ups in a single Deriv tick, before
+            // the bot's tick-watch can even see them.
+            //
+            // Why ratchet (not one-time cap):
+            //   - "Best upper movements" means following the profit up so
+            //     any subsequent spike past the latest TP triggers there.
+            //     Static cap at stake×0.45 leaves the trade unprotected
+            //     between arm and cap (most ticks).
+            //
+            // Why TP must be > current profit:
+            //   - Deriv rejects take_profit ≤ current profit (would close
+            //     immediately). prevTp+buffer guarantees > profit at push.
+            //
+            // Tuning:
+            //   - buffer    = stake × 0.05 → 5% of stake above current profit.
+            //                 Wide enough that normal drift takes ~5 ticks to
+            //                 trigger; tight enough to capture spike-ups.
+            //   - minStep   = stake × 0.03 → only push when target is 3% of
+            //                 stake higher than the last accepted broker-TP.
+            //                 Avoids API spam during slow climbs.
+            //   - MIN_FLOOR = $0.61 → BOOM300N broker minimum (observed via
+            //                 ContractBuyValidationError on 2026-05-19).
+            if (trade.trailArmed) {
+              const MIN_BROKER_TP = 0.61;
+              const tpBuffer = trade.stake * 0.05;
+              const minStep = trade.stake * 0.03;
+              const desiredTp = +Math.max(profit + tpBuffer, MIN_BROKER_TP).toFixed(2);
+              const currentBrokerTp = trade.brokerTpAmount ?? 0;
+              if (desiredTp > currentBrokerTp + minStep
+                  && desiredTp > profit
+                  && !this.brokerTpUpdateInFlight.has(trade.contractId)) {
                 this.brokerTpUpdateInFlight.add(trade.contractId);
                 const prevTp = trade.brokerTpAmount;
-                trade.brokerTpAmount = capTp;
-                this.deriv.updateContract(trade.contractId, { takeProfit: capTp })
+                trade.brokerTpAmount = desiredTp;
+                this.deriv.updateContract(trade.contractId, { takeProfit: desiredTp })
                   .then((resp) => {
                     const errMsg = (resp as { error?: { message?: string } }).error?.message;
                     if (errMsg) {
@@ -825,7 +840,7 @@ export class RealEngine extends EventEmitter {
                         peak: trade.peakProfit,
                         armed: trade.trailArmed,
                         brokerTp: prevTp,
-                        reason: `Deriv rejected take_profit=$${capTp}: ${errMsg}`,
+                        reason: `Deriv rejected take_profit=$${desiredTp}: ${errMsg}`,
                       });
                     } else {
                       this.emit("tickDiag", {
@@ -836,8 +851,8 @@ export class RealEngine extends EventEmitter {
                         movement,
                         peak: trade.peakProfit,
                         armed: trade.trailArmed,
-                        brokerTp: capTp,
-                        reason: `Deriv accepted take_profit=$${capTp} (cap=stake×0.45)`,
+                        brokerTp: desiredTp,
+                        reason: `Deriv accepted ratchet take_profit=$${desiredTp} (profit=$${profit.toFixed(2)} + buffer=$${tpBuffer.toFixed(2)})`,
                       });
                     }
                   })
