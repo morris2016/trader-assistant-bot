@@ -789,36 +789,54 @@ export class RealEngine extends EventEmitter {
               trade.trailArmed = true;
               console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak-movement=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
             }
-            // BROKER-SIDE TP RATCHET: after arming, keep Deriv's take_profit
-            // close above current profit. As profit rises, push TP up by a
-            // small buffer. Deriv's TP fires when profit crosses the value
-            // going UP — captures spike-ups in a single Deriv tick, before
-            // the bot's tick-watch can even see them.
+            // BROKER-SIDE TP RATCHET (peak-anchored): after arming, push
+            // Deriv's take_profit to `peak + stake × 0.10`. Deriv fires TP
+            // when profit crosses the value going UP. Since profit ≤ peak
+            // by definition, TP is never below current profit — only a
+            // SPIKE that exceeds peak by 10% of stake triggers it.
             //
-            // Why ratchet (not one-time cap):
-            //   - "Best upper movements" means following the profit up so
-            //     any subsequent spike past the latest TP triggers there.
-            //     Static cap at stake×0.45 leaves the trade unprotected
-            //     between arm and cap (most ticks).
+            // Why peak-anchored (not profit-anchored):
+            //   - Profit-anchored ratchet (profit + small buffer) caps the
+            //     upside when the broker floor ($0.61) dominates at small
+            //     stakes — e.g. at $1 stake, broker-TP sits at $0.61 from
+            //     arm onwards and fires the moment profit climbs through
+            //     it. Verified by tracing the $1.03 trade on 2026-05-19.
+            //   - Peak-anchored TP > peak ≥ profit at all times, so it can
+            //     NEVER fire on a slow climb (peak monotonic-max means
+            //     profit reaching peak doesn't cross TP). It only fires
+            //     when profit makes a NEW high above peak by buffer — the
+            //     spike-up case, which is what we want to capture.
             //
-            // Why TP must be > current profit:
-            //   - Deriv rejects take_profit ≤ current profit (would close
-            //     immediately). prevTp+buffer guarantees > profit at push.
+            // Effect on the spike-retrace trade (2026-05-19 cn=76168899921,
+            // peak $12.46 → settled $1.68 via tick-watch): broker-TP would
+            // sit at (pre-spike peak + stake × 0.10). When the spike fires
+            // the upward crossing, Deriv closes at that level (~$5-$7
+            // depending on pre-spike peak), not at the post-spike $1.68.
+            //
+            // Effect on the slow-climb trade (2026-05-19 stake $2.20 peak
+            // $1.06 → settled $1.03 via tick-watch): TP stays at peak+$0.22
+            // = ~$1.28, profit max is $1.03, no fire — tick-watch handles
+            // as before. NO REGRESSION.
             //
             // Tuning:
-            //   - buffer    = stake × 0.05 → 5% of stake above current profit.
-            //                 Wide enough that normal drift takes ~5 ticks to
-            //                 trigger; tight enough to capture spike-ups.
-            //   - minStep   = stake × 0.03 → only push when target is 3% of
-            //                 stake higher than the last accepted broker-TP.
-            //                 Avoids API spam during slow climbs.
-            //   - MIN_FLOOR = $0.61 → BOOM300N broker minimum (observed via
-            //                 ContractBuyValidationError on 2026-05-19).
+            //   - buffer    = stake × 0.10 → 10% of stake above peak.
+            //                 Wide enough that BOOM noise (sub-2% spikes)
+            //                 doesn't trigger; tight enough that real
+            //                 spikes (>$5 price points / >50% of stake)
+            //                 cross it during the spike tick.
+            //   - minStep   = stake × 0.05 → only re-push when target is
+            //                 5% of stake higher than the last accepted
+            //                 broker-TP. Avoids API spam during steady
+            //                 ratcheting; broker-TP ends up lagging peak
+            //                 by up to one minStep.
+            //   - MIN_FLOOR = $0.61 → BOOM300N broker minimum (observed
+            //                 via ContractBuyValidationError 2026-05-19).
             if (trade.trailArmed) {
               const MIN_BROKER_TP = 0.61;
-              const tpBuffer = trade.stake * 0.05;
-              const minStep = trade.stake * 0.03;
-              const desiredTp = +Math.max(profit + tpBuffer, MIN_BROKER_TP).toFixed(2);
+              const tpBuffer = trade.stake * 0.10;
+              const minStep = trade.stake * 0.05;
+              const peakAnchor = Math.max(trade.peakProfit ?? 0, profit);
+              const desiredTp = +Math.max(peakAnchor + tpBuffer, MIN_BROKER_TP).toFixed(2);
               const currentBrokerTp = trade.brokerTpAmount ?? 0;
               if (desiredTp > currentBrokerTp + minStep
                   && desiredTp > profit
@@ -852,7 +870,7 @@ export class RealEngine extends EventEmitter {
                         peak: trade.peakProfit,
                         armed: trade.trailArmed,
                         brokerTp: desiredTp,
-                        reason: `Deriv accepted ratchet take_profit=$${desiredTp} (profit=$${profit.toFixed(2)} + buffer=$${tpBuffer.toFixed(2)})`,
+                        reason: `Deriv accepted ratchet take_profit=$${desiredTp} (peak=$${peakAnchor.toFixed(2)} + buffer=$${tpBuffer.toFixed(2)})`,
                       });
                     }
                   })
