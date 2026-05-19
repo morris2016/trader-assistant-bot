@@ -714,13 +714,14 @@ async function main() {
   // profit / peak / armed / trail-exit threshold evolve in real time.
   // Filtered to sandbox="fast" to keep the log signal-dense.
   real.on("tickDiag", (d: { sandbox?: string; contractId: number; event: string; profit: number;
-    peak: number | null; armed: boolean | undefined; armThreshold: number | null;
+    movement?: number; peak: number | null; armed: boolean | undefined; armThreshold: number | null;
     trailExitAt: number | null; slAt: number | null; side?: string; reason?: string }) => {
     if (d.sandbox !== "fast") return;
     log.info(`fade-tick`, {
       contract: d.contractId,
       event: d.event,
       profit: +d.profit.toFixed(4),
+      movement: d.movement != null ? +d.movement.toFixed(4) : null,
       peak: d.peak != null ? +d.peak.toFixed(4) : null,
       armed: d.armed ?? false,
       armAt: d.armThreshold,

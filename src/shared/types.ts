@@ -183,6 +183,11 @@ export type RealTrade = {
    *  botManagedTakeProfit but for the loss side. Bot sells when
    *  currentProfit ≤ -botManagedSl$. */
   botManagedStopLoss?: number | null;
+  /** Initial profit value at trade open (essentially negative the commission
+   *  for MULTIPLIER contracts, since Deriv reports profit = bid - buy_price
+   *  and ask=bid at open). Used as a baseline so bot-managed SL/TP compare
+   *  PRICE-MOVEMENT only, not the commission overhead. */
+  openProfit?: number | null;
   /** Peak profit seen on this contract (for trailing-exit logic). */
   peakProfit?: number | null;
   /** True once peakProfit crossed the trail-arm threshold. */

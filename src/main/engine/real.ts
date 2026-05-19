@@ -749,14 +749,23 @@ export class RealEngine extends EventEmitter {
       const peakBefore = trade.peakProfit;
       const armedBefore = trade.trailArmed;
       if (profit != null) {
-        if (trade.peakProfit == null || profit > trade.peakProfit) trade.peakProfit = profit;
+        // Capture the open-time profit baseline (≈ -commission for MULT)
+        // so SL/TP comparisons measure PRICE MOVEMENT only. Without this,
+        // when designed SL$ ≈ commission, the SL triggers immediately on
+        // the first tick (observed 2026-05-19 contract 76167285861).
+        if (trade.openProfit == null) trade.openProfit = profit;
+        const movement = profit - trade.openProfit;
+        if (trade.peakProfit == null || movement > trade.peakProfit) trade.peakProfit = movement;
 
         if (!this.sellInFlight.has(trade.contractId)) {
           let trigger: { side: "SL" | "TP" | "TRAIL"; reason: string } | null = null;
+          // All comparisons use `movement` (= profit − openProfit) so
+          // commission overhead doesn't trip the SL on the first tick.
+          // movement = 0 at trade open, then tracks pure price-movement P&L.
 
           // 1. SL fires regardless of trailing mode.
-          if (trade.botManagedStopLoss != null && profit <= -trade.botManagedStopLoss) {
-            trigger = { side: "SL", reason: `profit=$${profit.toFixed(3)} <= -$${trade.botManagedStopLoss.toFixed(3)}` };
+          if (trade.botManagedStopLoss != null && movement <= -trade.botManagedStopLoss) {
+            trigger = { side: "SL", reason: `movement=$${movement.toFixed(3)} <= -$${trade.botManagedStopLoss.toFixed(3)} (profit=$${profit.toFixed(3)})` };
           }
           // 2. Trailing path
           else if (trade.trailingExitEnabled && trade.botManagedTakeProfit != null) {
@@ -765,18 +774,18 @@ export class RealEngine extends EventEmitter {
             const armThreshold = trade.botManagedTakeProfit * armPct;
             if (!trade.trailArmed && (trade.peakProfit ?? 0) >= armThreshold) {
               trade.trailArmed = true;
-              console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
+              console.log(`[real.trail] ${trade.symbol} contract=${trade.contractId} trail ARMED at peak-movement=$${trade.peakProfit?.toFixed(3)} (threshold $${armThreshold.toFixed(3)})`);
             }
             if (trade.trailArmed) {
-              const exitProfit = (trade.peakProfit ?? 0) * (1 - retracePct);
-              if (profit <= exitProfit) {
-                trigger = { side: "TRAIL", reason: `profit=$${profit.toFixed(3)} retraced from peak=$${trade.peakProfit?.toFixed(3)} past $${exitProfit.toFixed(3)} threshold (${(retracePct*100).toFixed(0)}% retrace)` };
+              const exitMovement = (trade.peakProfit ?? 0) * (1 - retracePct);
+              if (movement <= exitMovement) {
+                trigger = { side: "TRAIL", reason: `movement=$${movement.toFixed(3)} retraced from peak=$${trade.peakProfit?.toFixed(3)} past $${exitMovement.toFixed(3)} threshold (${(retracePct*100).toFixed(0)}% retrace; profit=$${profit.toFixed(3)})` };
               }
             }
           }
           // 3. Static TP only when trailing is OFF
-          else if (trade.botManagedTakeProfit != null && profit >= trade.botManagedTakeProfit) {
-            trigger = { side: "TP", reason: `profit=$${profit.toFixed(3)} >= $${trade.botManagedTakeProfit.toFixed(3)}` };
+          else if (trade.botManagedTakeProfit != null && movement >= trade.botManagedTakeProfit) {
+            trigger = { side: "TP", reason: `movement=$${movement.toFixed(3)} >= $${trade.botManagedTakeProfit.toFixed(3)} (profit=$${profit.toFixed(3)})` };
           }
 
           if (trigger) {
@@ -807,6 +816,7 @@ export class RealEngine extends EventEmitter {
                    : (peakBefore == null || (trade.peakProfit != null && trade.peakProfit > peakBefore)) ? "peak-up"
                    : "tick",
               profit,
+              movement,
               peak: trade.peakProfit,
               armed: trade.trailArmed,
               armThreshold: trade.botManagedTakeProfit != null && trade.trailingArmPct != null
