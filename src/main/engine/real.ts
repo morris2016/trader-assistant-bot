@@ -62,15 +62,6 @@ export class RealEngine extends EventEmitter {
   /** Set of contract IDs with an in-flight broker-SL update — prevents
    *  racing updates from the arm-tighten path. */
   private brokerSlUpdateInFlight = new Set<number>();
-  /** Auto-learned Deriv minimum for SL/TP limit_order amounts, per symbol.
-   *  Deriv tightens this dynamically on synthetic indices (observed jump
-   *  from $0.10 → $0.15 on 2026-05-20). When placeMultiplier rejects with
-   *  "Enter an amount equal to or higher than X", we parse X and cache it
-   *  here so every subsequent trade on this symbol starts with the correct
-   *  floor — no fail-and-retry needed. Cache survives bot session; on
-   *  restart it re-discovers via the first rejection (one wasted trade max
-   *  per session). */
-  private derivSlTpMins = new Map<string, number>();
   private account: AccountInfo | null = null;
   private perTradeMaxStake = 0;
   private dailyMaxLoss = 0;
@@ -623,99 +614,54 @@ export class RealEngine extends EventEmitter {
       // preserving the validated SL/TP geometry. Whichever fires first
       // wins (tick-watch usually first in normal conditions; broker fires
       // first during spike-gap ticks).
-      // Auto-learned floor for this symbol. Defaults to a sane starting
-      // value but the retry-loop below updates it on the FIRST validation
-      // error of the session, so every subsequent trade starts with the
-      // correct value.
-      const DERIV_MIN = this.derivSlTpMins.get(params.symbol) ?? 0.15;
+      // CLEAN-BUY DESIGN 2026-05-20: don't send limit_order on the buy at all.
+      // Just buy the contract. Then push SL via contract_update AFTER the
+      // contract is open. This guarantees the buy succeeds in ONE attempt —
+      // no validation error can block the trade, because the buy carries no
+      // SL/TP for Deriv to validate.
+      //
+      // Post-buy, we attempt to set broker-SL via contract_update. If Deriv
+      // rejects with "≥ X" we accept X (silently) and use that value.
+      // If even that fails, broker-SL remains unset and the bot's tick-watch
+      // is the sole stop. The trade is ALREADY OPEN at this point, so no
+      // signal is dropped.
+      //
+      // Broker-TP is similarly not sent on buy — it ratchets via
+      // contract_update after arm (see onContractUpdate trail logic).
       const DERIV_MAX_PCT = 0.50;
       const derivMax = +(stake * DERIV_MAX_PCT).toFixed(2);
-      const clampForDeriv = (v: number) => +Math.min(derivMax, Math.max(DERIV_MIN, v)).toFixed(2);
       const tpDesigned = tp;
       const slDesigned = sl;
       let botManagedTp: number | null = null;
       let botManagedSl: number | null = null;
       const trailingOn = params.trailingExitEnabled === true;
-      // TRAILING ENABLED:
-      // - TP omitted from Deriv buy request. Bot pushes broker-TP via
-      //   contract_update AFTER arm (peak-anchored ratchet, see
-      //   onContractUpdate). Sending TP at order open hits the stake × 0.50
-      //   upper bound when the designed wide-safety-net value exceeds it.
-      // - SL sent to Deriv, clamped into [DERIV_MIN, stake × 0.50]. This
-      //   catches BOOM/CRASH single-tick spikes against the position that
-      //   the bot's tick-watch can't see in time (observed 2026-05-19
-      //   contract 149551657261: designed SL ~$0.64 but bot exited at
-      //   -$8.10 because no broker-SL was in place).
-      //
-      // NON-TRAILING path: send both TP and SL, clamped into the same
-      // range. Bot's tick-watch fires at the designed level if it's
-      // tighter than the clamp.
-      if (trailingOn) {
-        if (tp != null) { botManagedTp = +tp.toFixed(4); tp = undefined; }
-        if (sl != null) {
-          botManagedSl = +sl.toFixed(4);
-          sl = clampForDeriv(sl);
-        }
-      } else {
-        if (tp != null) {
-          botManagedTp = +tp.toFixed(4);
-          tp = clampForDeriv(tp);
-        }
-        if (sl != null) {
-          botManagedSl = +sl.toFixed(4);
-          sl = clampForDeriv(sl);
-        }
-      }
+      // Always strip both for the buy request. The designed values stay on
+      // the trade record for bot tick-watch + the post-buy broker-SL push.
+      if (tp != null) { botManagedTp = +tp.toFixed(4); }
+      if (sl != null) { botManagedSl = +sl.toFixed(4); }
+      tp = undefined;
+      sl = undefined;
       if (botManagedTp != null || botManagedSl != null) {
-        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP ${tp ?? "(none)"} / SL ${sl ?? "(none)"}${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct} brokerTpBuf=${params.brokerTpBufferPct} brokerTpMinStep=${params.brokerTpMinStepPct}` : ""}.`);
+        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; sending buy WITHOUT limit_order (broker-SL added post-open via contract_update)${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct} brokerTpBuf=${params.brokerTpBufferPct} brokerTpMinStep=${params.brokerTpMinStepPct}` : ""}.`);
       }
 
-      // Auto-discover and cache the Deriv SL/TP minimum. Deriv tightens
-      // this dynamically on synthetic indices without notice (observed
-      // 2026-05-20: floor jumped from $0.10 → $0.15 mid-day, 6 trades
-      // rejected before the bot picked it up). The retry loop here:
-      //   1. Parses the new minimum from "Enter an amount equal to or
-      //      higher than X" error message
-      //   2. CACHES it on the engine so the next trade uses the right
-      //      floor immediately (no fail-and-retry on every trade)
-      //   3. Re-attempts the current buy with the new value
-      //
-      // If Deriv ever tightens further, the first trade after the change
-      // pays the same one-time cost, then the cache updates again.
-      let placeAttempt = 0;
+      // Single-attempt buy. limit_order is omitted entirely so Deriv can't
+      // reject for SL/TP validation. The trade ALWAYS opens (assuming
+      // balance, market open, etc.).
       let proposal: Awaited<ReturnType<typeof this.deriv.placeMultiplier>>["proposal"];
       let buy: Awaited<ReturnType<typeof this.deriv.placeMultiplier>>["buy"];
-      while (true) {
-        try {
-          const result = await this.deriv.placeMultiplier({
-            symbol: params.symbol,
-            contract_type: contractType,
-            stake,
-            currency: this.account.currency,
-            multiplier,
-            takeProfit: tp,
-            stopLoss: sl,
-          });
-          proposal = result.proposal;
-          buy = result.buy;
-          break;
-        } catch (e) {
-          const msg = (e as Error).message ?? "";
-          const m = msg.match(/equal to or higher than (\d+\.?\d*)/);
-          if (placeAttempt === 0 && m) {
-            const newMin = parseFloat(m[1]);
-            const prevCached = this.derivSlTpMins.get(params.symbol);
-            this.derivSlTpMins.set(params.symbol, newMin);
-            console.warn(`[real.placeTrade] Deriv min for ${params.symbol} learned: ${prevCached ?? "—"} → $${newMin}. Bumping this trade's SL/TP and retrying.`);
-            if (sl != null && sl < newMin) sl = Math.min(derivMax, newMin);
-            if (tp != null && tp < newMin) tp = Math.min(derivMax, newMin);
-            // Also re-clamp the bot-managed values so the trade-record
-            // stores the actual values used.
-            placeAttempt++;
-            continue;
-          }
-          throw e;
-        }
+      try {
+        const result = await this.deriv.placeMultiplier({
+          symbol: params.symbol,
+          contract_type: contractType,
+          stake,
+          currency: this.account.currency,
+          multiplier,
+        });
+        proposal = result.proposal;
+        buy = result.buy;
+      } catch (e) {
+        throw e;
       }
       const contractOpenedAt = Date.now();
       const entrySpot = proposal.spot ?? null;
@@ -742,7 +688,9 @@ export class RealEngine extends EventEmitter {
         stopLoss: sl ?? null,
         botManagedTakeProfit: botManagedTp,
         botManagedStopLoss: botManagedSl,
-        brokerSlAmount: sl ?? null,
+        // brokerSlAmount starts null — set after buy succeeds via
+        // the post-buy contract_update push below.
+        brokerSlAmount: null,
         peakProfit: null,
         trailArmed: false,
         trailingExitEnabled: trailingOn,
@@ -770,6 +718,47 @@ export class RealEngine extends EventEmitter {
     this.daily.tradesOpened++;
     this.emit("opened", trade);
     this.emit("stateChanged");
+
+    // POST-BUY SL PUSH: now that the contract is open, attempt to set
+    // broker-SL. If Deriv accepts the strategy's designed value, great.
+    // If Deriv rejects with "≥ X", silently use X. If even that fails,
+    // log and continue — bot tick-watch remains the sole SL trigger.
+    // No retries, no caching, no learning. Fire-and-forget per the
+    // user's 2026-05-20 design directive: "place the trade in the
+    // first attempt; let Deriv decide the SL".
+    if (trade.family === "MULTIPLIER" && trade.botManagedStopLoss != null) {
+      const desiredSl = trade.botManagedStopLoss;
+      this.deriv.updateContract(trade.contractId, { stopLoss: desiredSl })
+        .then((resp) => {
+          const errMsg = (resp as { error?: { message?: string } }).error?.message;
+          if (!errMsg) {
+            trade.brokerSlAmount = desiredSl;
+            return;
+          }
+          // Parse Deriv's minimum and use it directly. One follow-up call,
+          // no retry beyond that.
+          const m = errMsg.match(/equal to or higher than (\d+\.?\d*)/);
+          if (!m) {
+            console.warn(`[real.placeTrade] broker-SL post-buy failed (no retry): ${errMsg}`);
+            return;
+          }
+          const newMin = parseFloat(m[1]);
+          const derivMax = +(trade.stake * 0.50).toFixed(2);
+          const clamped = +Math.min(derivMax, newMin).toFixed(2);
+          this.deriv.updateContract(trade.contractId, { stopLoss: clamped })
+            .then((r2) => {
+              const e2 = (r2 as { error?: { message?: string } }).error?.message;
+              if (e2) {
+                console.warn(`[real.placeTrade] broker-SL secondary push also rejected ($${clamped}): ${e2}`);
+                return;
+              }
+              trade.brokerSlAmount = clamped;
+              console.log(`[real.placeTrade] broker-SL accepted at Deriv minimum $${clamped} (designed $${desiredSl})`);
+            })
+            .catch((e) => console.warn(`[real.placeTrade] broker-SL secondary push threw: ${(e as Error).message}`));
+        })
+        .catch((e) => console.warn(`[real.placeTrade] broker-SL post-buy threw: ${(e as Error).message}`));
+    }
     return trade;
   }
 
@@ -972,7 +961,11 @@ export class RealEngine extends EventEmitter {
             //                 tick-watch trail-exit only; this is the same
             //                 protection level as before broker-TP existed.
             if (trade.trailArmed) {
-              const DERIV_MIN = this.derivSlTpMins.get(trade.symbol) ?? 0.15;
+              // Defensive default for broker-TP ratchet floor. The ratchet
+              // pushes peak + buffer; only relevant when the buffered value
+              // would be below this. Deriv may reject — we silently accept
+              // its minimum if so (see broker-tp-rejected handler below).
+              const DERIV_MIN = 0.10;
               const DERIV_MAX = +(trade.stake * 0.50).toFixed(2);
               // Configurable: brokerTpBufferPct controls how far above peak
               // the broker-TP sits. Tighter (e.g. 0.04) catches retracement
