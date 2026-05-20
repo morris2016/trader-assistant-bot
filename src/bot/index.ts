@@ -788,6 +788,8 @@ async function main() {
         if (typeof next.trailingExitEnabled !== "boolean") next.trailingExitEnabled = before.trailingExitEnabled ?? true;
         if (!isFinite(next.trailingArmPct as number) || (next.trailingArmPct as number) <= 0 || (next.trailingArmPct as number) > 1) next.trailingArmPct = before.trailingArmPct ?? 0.95;
         if (!isFinite(next.trailingRetracePct as number) || (next.trailingRetracePct as number) <= 0 || (next.trailingRetracePct as number) >= 1) next.trailingRetracePct = before.trailingRetracePct ?? 0.20;
+        if (!isFinite(next.brokerTpBufferPct as number) || (next.brokerTpBufferPct as number) <= 0.005 || (next.brokerTpBufferPct as number) >= 0.50) next.brokerTpBufferPct = before.brokerTpBufferPct ?? 0.04;
+        if (!isFinite(next.brokerTpMinStepPct as number) || (next.brokerTpMinStepPct as number) <= 0.005 || (next.brokerTpMinStepPct as number) >= 0.20) next.brokerTpMinStepPct = before.brokerTpMinStepPct ?? 0.02;
         fast1Config = next;
         persist();
         log.warn("fast1Config updated via API", { before, after: next });
@@ -1918,6 +1920,8 @@ async function main() {
                   trailingExitEnabled: fast1Config.trailingExitEnabled ?? false,
                   trailingArmPct: fast1Config.trailingArmPct ?? 0.95,
                   trailingRetracePct: fast1Config.trailingRetracePct ?? 0.20,
+                  brokerTpBufferPct: fast1Config.brokerTpBufferPct ?? 0.04,
+                  brokerTpMinStepPct: fast1Config.brokerTpMinStepPct ?? 0.02,
                 });
                 log.info(`fast LIVE opened ${trade.symbol} ${trade.side} strategy=${fastMatch.id} stake=$${trade.stake.toFixed(2)} lvl=${ladder.level} MULT=${liveMult}× mart=${params.multiplier}× contract=${trade.contractId} latencyMs=${trade.openLatencyMs ?? "?"} slippage=${trade.entrySlippage?.toFixed(5) ?? "?"}`);
               } catch (e) {

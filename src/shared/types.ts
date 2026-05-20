@@ -199,6 +199,12 @@ export type RealTrade = {
   trailingArmPct?: number;
   /** Retracement from peak that triggers manual sell (e.g. 0.20 = 20%). */
   trailingRetracePct?: number;
+  /** Buffer (as fraction of stake) above peak for the broker-TP ratchet.
+   *  e.g. 0.04 = broker-TP at peak + stake × 0.04. Default if missing: 0.04. */
+  brokerTpBufferPct?: number;
+  /** Min step (as fraction of stake) between broker-TP re-pushes. Default
+   *  0.02. Smaller = more frequent updates (closer tracking). */
+  brokerTpMinStepPct?: number;
   /** Latest broker-side TP$ pushed via contract_update. Used to ratchet
    *  the Deriv take_profit upward as peak grows so a single-tick spike
    *  (e.g. BOOM 300N boom event) auto-closes at the broker-side threshold

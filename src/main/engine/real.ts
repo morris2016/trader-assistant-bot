@@ -402,6 +402,10 @@ export class RealEngine extends EventEmitter {
     trailingExitEnabled?: boolean;
     trailingArmPct?: number;
     trailingRetracePct?: number;
+    /** Buffer above peak for broker-TP ratchet. Default 0.04 (4% of stake). */
+    brokerTpBufferPct?: number;
+    /** Min step for broker-TP re-push. Default 0.02 (2% of stake). */
+    brokerTpMinStepPct?: number;
   }): Promise<RealTrade> {
     const gate = this.canOpen();
     if (!gate.ok) throw new Error(gate.reason);
@@ -645,7 +649,7 @@ export class RealEngine extends EventEmitter {
         }
       }
       if (botManagedTp != null || botManagedSl != null) {
-        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP ${tp ?? "(none)"} / SL ${sl ?? "(none)"}${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct}` : ""}.`);
+        console.log(`[real.placeTrade] ${params.symbol} ${params.side} bot-managed: designed TP $${tpDesigned} / SL $${slDesigned}; Deriv-side TP ${tp ?? "(none)"} / SL ${sl ?? "(none)"}${trailingOn ? `; trailing arm=${params.trailingArmPct} retrace=${params.trailingRetracePct} brokerTpBuf=${params.brokerTpBufferPct} brokerTpMinStep=${params.brokerTpMinStepPct}` : ""}.`);
       }
 
       const { proposal, buy } = await this.deriv.placeMultiplier({
@@ -688,6 +692,8 @@ export class RealEngine extends EventEmitter {
         trailingExitEnabled: trailingOn,
         trailingArmPct: trailingOn ? params.trailingArmPct ?? 0.95 : undefined,
         trailingRetracePct: trailingOn ? params.trailingRetracePct ?? 0.20 : undefined,
+        brokerTpBufferPct: trailingOn ? params.brokerTpBufferPct ?? 0.04 : undefined,
+        brokerTpMinStepPct: trailingOn ? params.brokerTpMinStepPct ?? 0.02 : undefined,
         openedAt: contractOpenedAt,
         closedAt: null,
         status: "open",
@@ -912,8 +918,14 @@ export class RealEngine extends EventEmitter {
             if (trade.trailArmed) {
               const DERIV_MIN = 0.10;
               const DERIV_MAX = +(trade.stake * 0.50).toFixed(2);
-              const tpBuffer = trade.stake * 0.10;
-              const minStep = trade.stake * 0.05;
+              // Configurable: brokerTpBufferPct controls how far above peak
+              // the broker-TP sits. Tighter (e.g. 0.04) catches retracement
+              // crashes earlier — fires when profit climbs through it. Looser
+              // (e.g. 0.10) only catches real spike-ups. Default 0.04 per
+              // 2026-05-20 analysis of contract 76202325741 (peak +$0.31 →
+              // settled −$0.06 because buffer 0.10 was too loose).
+              const tpBuffer = trade.stake * (trade.brokerTpBufferPct ?? 0.04);
+              const minStep = trade.stake * (trade.brokerTpMinStepPct ?? 0.02);
               const peakAnchor = Math.max(trade.peakProfit ?? 0, profit);
               const desiredTpRaw = +(peakAnchor + tpBuffer).toFixed(2);
               const desiredTp = +Math.max(desiredTpRaw, DERIV_MIN).toFixed(2);

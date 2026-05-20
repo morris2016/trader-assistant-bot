@@ -105,6 +105,18 @@ export type FastSandboxConfig = {
   /** Profit retracement from peak that triggers the manual sell. 0.20 means
    *  exit when profit drops 20% from its peak. */
   trailingRetracePct?: number;
+  /** Buffer above peak for the broker-TP ratchet. The Deriv-side take_profit
+   *  is pushed to (peak + stake × brokerTpBufferPct) after arm and ratcheted
+   *  up as peak rises. Smaller buffer = broker-TP closer to peak → fires
+   *  more often on small upticks → smaller wins but higher WR (catches
+   *  retracements before they crash). Default 0.04 (4% of stake). Range
+   *  0.02 - 0.50; values < 0.02 risk premature fire on noise. */
+  brokerTpBufferPct?: number;
+  /** Min ratchet step as fraction of stake. The broker-TP only re-pushes if
+   *  the new desired value exceeds the last accepted by this fraction of
+   *  stake. Smaller value = more frequent API calls (closer tracking);
+   *  larger value = fewer calls (broker-TP lags more). Default 0.02. */
+  brokerTpMinStepPct?: number;
   /** Per-strategy overrides: any subset of the above fields, keyed by
    *  strategyId. When a strategy is dispatched, the effective config is
    *  computed by spreading the general config and then overlaying the
@@ -153,6 +165,13 @@ export const DEFAULT_FAST1_CONFIG: Fast1Config = {
   trailingExitEnabled: true,
   trailingArmPct: 0.95,
   trailingRetracePct: 0.20,
+  // Broker-TP buffer tightened 2026-05-20 from 0.10 -> 0.04 after observing
+  // contract 76202325741 peak $0.31 → settled −$0.06 (broker-TP at $0.40
+  // never fired because peak retraced before reaching it). Tighter buffer
+  // captures more winners before retracement crashes. Trade-off: smaller
+  // average win per fired-TP event.
+  brokerTpBufferPct: 0.04,
+  brokerTpMinStepPct: 0.02,
 };
 
 /** Fast2 — same shape as Fast1. Defaults aligned to Deriv's actual contract
