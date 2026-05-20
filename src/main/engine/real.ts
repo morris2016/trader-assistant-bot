@@ -726,38 +726,83 @@ export class RealEngine extends EventEmitter {
     // No retries, no caching, no learning. Fire-and-forget per the
     // user's 2026-05-20 design directive: "place the trade in the
     // first attempt; let Deriv decide the SL".
+    //
+    // Results are surfaced as tickDiag events so the operator sees them
+    // in the structured ndjson stream (console.warn doesn't propagate).
     if (trade.family === "MULTIPLIER" && trade.botManagedStopLoss != null) {
       const desiredSl = trade.botManagedStopLoss;
-      this.deriv.updateContract(trade.contractId, { stopLoss: desiredSl })
+      const captured = trade; // capture for closure
+      this.deriv.updateContract(captured.contractId, { stopLoss: desiredSl })
         .then((resp) => {
           const errMsg = (resp as { error?: { message?: string } }).error?.message;
           if (!errMsg) {
-            trade.brokerSlAmount = desiredSl;
+            captured.brokerSlAmount = desiredSl;
+            this.emit("tickDiag", {
+              contractId: captured.contractId,
+              sandbox: captured.sandbox,
+              event: "broker-sl-post-buy-set",
+              profit: 0, movement: 0, peak: null, armed: false,
+              brokerSl: desiredSl,
+              reason: `Deriv accepted post-buy stop_loss=$${desiredSl}`,
+            });
             return;
           }
-          // Parse Deriv's minimum and use it directly. One follow-up call,
-          // no retry beyond that.
           const m = errMsg.match(/equal to or higher than (\d+\.?\d*)/);
           if (!m) {
-            console.warn(`[real.placeTrade] broker-SL post-buy failed (no retry): ${errMsg}`);
+            this.emit("tickDiag", {
+              contractId: captured.contractId,
+              sandbox: captured.sandbox,
+              event: "broker-sl-post-buy-failed",
+              profit: 0, movement: 0, peak: null, armed: false,
+              brokerSl: null,
+              reason: `Deriv rejected post-buy stop_loss=$${desiredSl}: ${errMsg}`,
+            });
             return;
           }
           const newMin = parseFloat(m[1]);
-          const derivMax = +(trade.stake * 0.50).toFixed(2);
+          const derivMax = +(captured.stake * 0.50).toFixed(2);
           const clamped = +Math.min(derivMax, newMin).toFixed(2);
-          this.deriv.updateContract(trade.contractId, { stopLoss: clamped })
+          this.deriv.updateContract(captured.contractId, { stopLoss: clamped })
             .then((r2) => {
               const e2 = (r2 as { error?: { message?: string } }).error?.message;
               if (e2) {
-                console.warn(`[real.placeTrade] broker-SL secondary push also rejected ($${clamped}): ${e2}`);
+                this.emit("tickDiag", {
+                  contractId: captured.contractId,
+                  sandbox: captured.sandbox,
+                  event: "broker-sl-post-buy-failed",
+                  profit: 0, movement: 0, peak: null, armed: false,
+                  brokerSl: null,
+                  reason: `Deriv rejected secondary stop_loss=$${clamped}: ${e2}`,
+                });
                 return;
               }
-              trade.brokerSlAmount = clamped;
-              console.log(`[real.placeTrade] broker-SL accepted at Deriv minimum $${clamped} (designed $${desiredSl})`);
+              captured.brokerSlAmount = clamped;
+              this.emit("tickDiag", {
+                contractId: captured.contractId,
+                sandbox: captured.sandbox,
+                event: "broker-sl-post-buy-set",
+                profit: 0, movement: 0, peak: null, armed: false,
+                brokerSl: clamped,
+                reason: `Deriv accepted at min $${clamped} (designed $${desiredSl})`,
+              });
             })
-            .catch((e) => console.warn(`[real.placeTrade] broker-SL secondary push threw: ${(e as Error).message}`));
+            .catch((e) => this.emit("tickDiag", {
+              contractId: captured.contractId,
+              sandbox: captured.sandbox,
+              event: "broker-sl-post-buy-error",
+              profit: 0, movement: 0, peak: null, armed: false,
+              brokerSl: null,
+              reason: `Secondary contract_update threw: ${(e as Error).message}`,
+            }));
         })
-        .catch((e) => console.warn(`[real.placeTrade] broker-SL post-buy threw: ${(e as Error).message}`));
+        .catch((e) => this.emit("tickDiag", {
+          contractId: captured.contractId,
+          sandbox: captured.sandbox,
+          event: "broker-sl-post-buy-error",
+          profit: 0, movement: 0, peak: null, armed: false,
+          brokerSl: null,
+          reason: `Initial contract_update threw: ${(e as Error).message}`,
+        }));
     }
     return trade;
   }
