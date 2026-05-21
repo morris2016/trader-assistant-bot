@@ -59,6 +59,19 @@ const api = {
   setDeepseekKey: (key: string): Promise<boolean> => ipcRenderer.invoke(CH.setDeepseekKey, key),
   clearDeepseekKey: (): Promise<boolean> => ipcRenderer.invoke(CH.clearDeepseekKey),
 
+  hasBinanceCreds: (): Promise<boolean> => ipcRenderer.invoke(CH.hasBinanceCreds),
+  setBinanceCreds: (apiKey: string, apiSecret: string): Promise<boolean> =>
+    ipcRenderer.invoke(CH.setBinanceCreds, apiKey, apiSecret),
+  clearBinanceCreds: (): Promise<boolean> => ipcRenderer.invoke(CH.clearBinanceCreds),
+  getBinanceTestnet: (): Promise<boolean> => ipcRenderer.invoke(CH.getBinanceTestnet),
+  setBinanceTestnet: (testnet: boolean): Promise<boolean> => ipcRenderer.invoke(CH.setBinanceTestnet, testnet),
+  testBinanceConnection: (): Promise<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string }> =>
+    ipcRenderer.invoke(CH.testBinanceConnection),
+  startBinance: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke(CH.startBinance),
+  stopBinance: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.stopBinance),
+  getBinanceState: (): Promise<{ state: any; enabled: boolean; hasCreds: boolean; testnet: boolean }> =>
+    ipcRenderer.invoke(CH.getBinanceState),
+
   onEvent: (handler: (ev: MainEvent) => void): (() => void) => {
     const listener = (_e: Electron.IpcRendererEvent, ev: MainEvent) => handler(ev);
     ipcRenderer.on(CH.event, listener);

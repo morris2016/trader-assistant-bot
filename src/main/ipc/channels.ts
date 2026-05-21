@@ -19,6 +19,16 @@ export const CH = {
   clearDeepseekKey: "auth:clearDeepseekKey",
   hasDeepseekKey: "auth:hasDeepseekKey",
 
+  setBinanceCreds: "auth:setBinanceCreds",
+  clearBinanceCreds: "auth:clearBinanceCreds",
+  hasBinanceCreds: "auth:hasBinanceCreds",
+  getBinanceTestnet: "auth:getBinanceTestnet",
+  setBinanceTestnet: "auth:setBinanceTestnet",
+  testBinanceConnection: "binance:testConnection",
+  startBinance: "binance:start",
+  stopBinance: "binance:stop",
+  getBinanceState: "binance:state",
+
   runBacktest: "backtest:run",
 
   getSymbolMeta: "app:getSymbolMeta",

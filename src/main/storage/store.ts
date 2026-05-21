@@ -1,5 +1,6 @@
 import Store from "electron-store";
 import { safeStorage } from "electron";
+import type { BinanceState } from "../engine/binance";
 import type {
   ClosedPaperPosition,
   PaperPosition,
@@ -26,6 +27,14 @@ type Schema = {
   encryptedToken: string;
   /** DeepSeek API key, encrypted at rest the same way as the Deriv token. */
   encryptedDeepseekKey: string;
+  /** Binance Futures API key + secret, encrypted. testnet flag chooses
+   *  between testnet.binancefuture.com (paper) and fapi.binance.com (live). */
+  encryptedBinanceKey: string;
+  encryptedBinanceSecret: string;
+  binanceTestnet: boolean;
+  /** Binance engine state — open + closed trades + daily PnL */
+  binance: BinanceState;
+  binanceEnabled: boolean;
 };
 
 const defaults: Schema = {
@@ -64,6 +73,11 @@ const defaults: Schema = {
   adaptiveShift: emptyAdaptiveShiftState(),
   encryptedToken: "",
   encryptedDeepseekKey: "",
+  encryptedBinanceKey: "",
+  encryptedBinanceSecret: "",
+  binanceTestnet: false,
+  binance: { open: [], closed: [], daily: { date: "", profit: 0, tradesOpened: 0, capHit: false } },
+  binanceEnabled: false,
 };
 
 const store = new Store<Schema>({
@@ -193,4 +207,61 @@ export function setDeepseekKey(key: string | null) {
 
 export function hasDeepseekKey(): boolean {
   return !!store.get("encryptedDeepseekKey");
+}
+
+// ─── Binance keys (key + secret) ───────────────────────────────────────────
+
+export function getBinanceKey(): string | null {
+  const blob = store.get("encryptedBinanceKey");
+  if (!blob) return null;
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try { return safeStorage.decryptString(Buffer.from(blob, "base64")); } catch { return null; }
+}
+
+export function getBinanceSecret(): string | null {
+  const blob = store.get("encryptedBinanceSecret");
+  if (!blob) return null;
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try { return safeStorage.decryptString(Buffer.from(blob, "base64")); } catch { return null; }
+}
+
+export function setBinanceCreds(key: string | null, secret: string | null) {
+  if (!key || !secret) {
+    store.set("encryptedBinanceKey", "");
+    store.set("encryptedBinanceSecret", "");
+    return;
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("OS keychain unavailable; cannot encrypt Binance creds");
+  }
+  store.set("encryptedBinanceKey", safeStorage.encryptString(key).toString("base64"));
+  store.set("encryptedBinanceSecret", safeStorage.encryptString(secret).toString("base64"));
+}
+
+export function hasBinanceCreds(): boolean {
+  return !!store.get("encryptedBinanceKey") && !!store.get("encryptedBinanceSecret");
+}
+
+export function getBinanceTestnet(): boolean {
+  return !!store.get("binanceTestnet");
+}
+
+export function setBinanceTestnet(testnet: boolean) {
+  store.set("binanceTestnet", testnet);
+}
+
+export function getBinanceState(): BinanceState {
+  return store.get("binance");
+}
+
+export function setBinanceState(state: BinanceState) {
+  store.set("binance", state);
+}
+
+export function getBinanceEnabled(): boolean {
+  return !!store.get("binanceEnabled");
+}
+
+export function setBinanceEnabled(enabled: boolean) {
+  store.set("binanceEnabled", enabled);
 }

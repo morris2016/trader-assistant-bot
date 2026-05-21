@@ -1,6 +1,9 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import { join } from "node:path";
 import { DerivClient } from "./deriv/client";
+import { BinanceClient } from "./binance/client";
+import { BinanceEngine } from "./engine/binance";
+import { BINANCE_ASSETS } from "@shared/binance-assets";
 import { Engine } from "./engine/runner";
 import { PaperEngine } from "./engine/paper";
 import { RealEngine } from "./engine/real";
@@ -16,9 +19,19 @@ import {
   getPaperState,
   getRealState,
   getSettings,
+  getBinanceKey,
+  getBinanceSecret,
+  hasBinanceCreds,
   hasDeepseekKey,
   hasToken,
+  getBinanceTestnet,
+  getBinanceState,
+  getBinanceEnabled,
   setAdaptiveShiftState,
+  setBinanceCreds,
+  setBinanceTestnet,
+  setBinanceState,
+  setBinanceEnabled,
   setDeepseekKey,
   setDerivToken,
   setPaperState,
@@ -54,6 +67,26 @@ real.on("adaptiveShiftChanged", (state) => {
   setAdaptiveShiftState(state);
   console.log(`[adaptive-shift] state: ${real.describeAdaptiveShift()}`);
 });
+
+// Binance Futures crypto engine — runs alongside Deriv. Starts only when:
+//   - Creds present, AND user explicitly enabled it via UI (binanceEnabled flag).
+const binanceClient = new BinanceClient();
+const binanceEngine = new BinanceEngine(binanceClient);
+binanceEngine.load(getBinanceState());
+binanceEngine.configure({ assets: [...BINANCE_ASSETS], stake: 15, leverage: 30, dailyMaxLoss: 100, perTradeMaxStake: 30 });
+binanceEngine.on("stateChanged", () => {
+  setBinanceState(binanceEngine.state());
+});
+binanceEngine.on("error", (err) => console.error("[binance]", err.message));
+binanceEngine.on("opened", (t) => console.log(`[binance] opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`));
+binanceEngine.on("closed", (t) => console.log(`[binance] closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`));
+
+function configureBinanceClient() {
+  const apiKey = getBinanceKey();
+  const apiSecret = getBinanceSecret();
+  binanceClient.configure(apiKey && apiSecret ? { apiKey, apiSecret } : null, { testnet: getBinanceTestnet() });
+}
+configureBinanceClient();
 
 /**
  * Multi-symbol bot subscriptions.
@@ -596,6 +629,63 @@ function registerIpc() {
     clearAdvisorCooldown();
     return true;
   });
+
+  ipcMain.handle(CH.hasBinanceCreds, () => hasBinanceCreds());
+  ipcMain.handle(CH.setBinanceCreds, (_e, apiKey: string, apiSecret: string) => {
+    setBinanceCreds(apiKey, apiSecret);
+    configureBinanceClient();
+    return true;
+  });
+  ipcMain.handle(CH.clearBinanceCreds, () => {
+    setBinanceCreds(null, null);
+    configureBinanceClient();
+    return true;
+  });
+  ipcMain.handle(CH.getBinanceTestnet, () => getBinanceTestnet());
+  ipcMain.handle(CH.setBinanceTestnet, (_e, testnet: boolean) => {
+    setBinanceTestnet(testnet);
+    configureBinanceClient();
+    return true;
+  });
+
+  // Smoke test — authenticated read-only call. Verifies key works without
+  // placing any orders. Returns { ok: true, balanceUsdt } on success.
+  ipcMain.handle(CH.testBinanceConnection, async () => {
+    try {
+      configureBinanceClient();
+      await binanceClient.syncTime();
+      const bals = await binanceClient.getBalances();
+      const usdt = bals.find((b) => b.asset === "USDT");
+      return { ok: true, balanceUsdt: usdt?.balance ?? 0, available: usdt?.availableBalance ?? 0, testnet: getBinanceTestnet() };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  ipcMain.handle(CH.startBinance, async () => {
+    try {
+      if (!hasBinanceCreds()) return { ok: false, error: "No Binance creds saved" };
+      configureBinanceClient();
+      setBinanceEnabled(true);
+      await binanceEngine.start();
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  ipcMain.handle(CH.stopBinance, async () => {
+    setBinanceEnabled(false);
+    await binanceEngine.stop();
+    return { ok: true };
+  });
+
+  ipcMain.handle(CH.getBinanceState, () => ({
+    state: binanceEngine.state(),
+    enabled: getBinanceEnabled(),
+    hasCreds: hasBinanceCreds(),
+    testnet: getBinanceTestnet(),
+  }));
 
   ipcMain.handle(CH.hasToken, () => hasToken());
   ipcMain.handle(CH.setToken, (_e, token: string) => {

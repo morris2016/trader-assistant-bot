@@ -26,10 +26,56 @@ export default function SettingsRoute() {
   const [hasDsKey, setHasDsKey] = useState(false);
   const [dsKeyError, setDsKeyError] = useState<string | null>(null);
 
+  const [bKey, setBKey] = useState("");
+  const [bSecret, setBSecret] = useState("");
+  const [hasBCreds, setHasBCreds] = useState(false);
+  const [bTestnet, setBTestnet] = useState(false);
+  const [bError, setBError] = useState<string | null>(null);
+  const [bTestResult, setBTestResult] = useState<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string } | null>(null);
+  const [bRunning, setBRunning] = useState(false);
+  const [bState, setBState] = useState<any>(null);
+
   useEffect(() => {
     window.api.hasToken().then(setHasToken);
     window.api.hasDeepseekKey().then(setHasDsKey);
+    window.api.hasBinanceCreds().then(setHasBCreds);
+    window.api.getBinanceTestnet().then(setBTestnet);
+    window.api.getBinanceState().then((s) => { setBRunning(s.enabled); setBState(s.state); });
   }, []);
+
+  const testBConnection = async () => {
+    setBTestResult(null);
+    const r = await window.api.testBinanceConnection();
+    setBTestResult(r);
+  };
+  const startB = async () => {
+    setBTestResult(null);
+    const r = await window.api.startBinance();
+    if (r.ok) setBRunning(true); else setBTestResult({ ok: false, error: r.error });
+  };
+  const stopB = async () => {
+    await window.api.stopBinance();
+    setBRunning(false);
+  };
+
+  const saveBCreds = async () => {
+    setBError(null);
+    const k = bKey.trim(), s = bSecret.trim();
+    if (!k || !s) { setBError("Key and secret both required"); return; }
+    if (k.length < 32 || s.length < 32) { setBError("Key/secret look too short (Binance keys are 64 chars)"); return; }
+    await window.api.setBinanceCreds(k, s);
+    setBKey(""); setBSecret("");
+    setHasBCreds(true);
+  };
+  const clearBCreds = async () => {
+    await window.api.clearBinanceCreds();
+    setHasBCreds(false);
+    setBError(null);
+  };
+  const toggleBTestnet = async (v: boolean) => {
+    await window.api.setBinanceTestnet(v);
+    setBTestnet(v);
+  };
 
   const saveDsKey = async () => {
     setDsKeyError(null);
@@ -210,6 +256,88 @@ export default function SettingsRoute() {
         )}
         {dsKeyError && (
           <div style={{ color: "#d4a35f", marginTop: 8, fontSize: 12 }}>{dsKeyError}</div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3 className="section-title">Binance Futures (crypto trading)</h3>
+        <p style={{ color: "#8a95b8", fontSize: 13, marginTop: 0 }}>
+          API key + secret for Binance Futures. Used by the crypto SMC strategies
+          (15 assets). Get a <b>Testnet</b> key at <code>testnet.binancefuture.com → API Management</code>
+          {" "}for paper trading (fake balance, real prices). Get a <b>live</b> key at
+          {" "}<code>binance.com → API Management</code> for real money.
+          Stored encrypted via OS keychain. <b>Enable Futures + Reading</b> permissions only;
+          consider IP whitelisting for security.
+        </p>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+          <label style={{ color: "#e0e5f5", fontSize: 13 }}>
+            <input
+              type="checkbox"
+              checked={bTestnet}
+              onChange={(e) => toggleBTestnet(e.target.checked)}
+              style={{ marginRight: 6 }}
+            />
+            Testnet (paper trading — recommended first)
+          </label>
+        </div>
+
+        {hasBCreds ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <span style={{ color: "#5fd4a4" }}>● Binance {bTestnet ? "Testnet" : "LIVE"} creds stored</span>
+            <button className="btn btn-danger" onClick={clearBCreds}>Remove keys</button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <input
+              type="password"
+              placeholder="API Key"
+              value={bKey}
+              onChange={(e) => { setBKey(e.target.value); setBError(null); }}
+              style={{ background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "10px 12px", borderRadius: 6 }}
+            />
+            <input
+              type="password"
+              placeholder="API Secret"
+              value={bSecret}
+              onChange={(e) => { setBSecret(e.target.value); setBError(null); }}
+              style={{ background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "10px 12px", borderRadius: 6 }}
+            />
+            <button className="btn btn-primary" onClick={saveBCreds} style={{ alignSelf: "flex-start" }}>Save</button>
+          </div>
+        )}
+        {bError && (
+          <div style={{ color: "#d4a35f", marginTop: 8, fontSize: 12 }}>{bError}</div>
+        )}
+
+        {hasBCreds && (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn" onClick={testBConnection}>Test connection</button>
+              {!bRunning ? (
+                <button className="btn btn-primary" onClick={startB}>Start trading</button>
+              ) : (
+                <button className="btn btn-danger" onClick={stopB}>Stop trading</button>
+              )}
+              <span style={{ alignSelf: "center", fontSize: 12, color: bRunning ? "#5fd4a4" : "#8a95b8" }}>
+                {bRunning ? "● Running" : "○ Stopped"}
+              </span>
+            </div>
+            {bTestResult && (
+              bTestResult.ok ? (
+                <div style={{ color: "#5fd4a4", fontSize: 12 }}>
+                  ✓ Connected ({bTestResult.testnet ? "TESTNET" : "LIVE"}) — USDT balance: ${bTestResult.balanceUsdt?.toFixed(2)} (available: ${bTestResult.available?.toFixed(2)})
+                </div>
+              ) : (
+                <div style={{ color: "#d4a35f", fontSize: 12 }}>✗ {bTestResult.error}</div>
+              )
+            )}
+            {bState && (bState.open?.length > 0 || bState.closed?.length > 0) && (
+              <div style={{ fontSize: 12, color: "#8a95b8" }}>
+                Open: {bState.open?.length ?? 0} | Closed today: {bState.closed?.filter((c: any) => c.closeEpoch && new Date(c.closeEpoch * 1000).toISOString().slice(0,10) === new Date().toISOString().slice(0,10)).length ?? 0} | Daily P&L: ${bState.daily?.profit?.toFixed(2) ?? "0.00"}
+              </div>
+            )}
+          </div>
         )}
 
         <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "auto 1fr", gap: 10, alignItems: "center" }}>
