@@ -433,6 +433,14 @@ export const api = {
   resetDaily: () => post<{ ok: boolean }>("/api/control/reset-daily"),
   resetPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-paper${balance ? `?balance=${balance}` : ""}`),
 
+  // ── Auth ────────────────────────────────────────────────────────────────
+  authCheck: () => get<{ hasAdmin: boolean; authenticated: boolean }>("/api/auth/check"),
+  authSetup: (username: string, password: string) =>
+    postJson<{ ok: boolean; error?: string }>("/api/auth/setup", { username, password }),
+  authLogin: (username: string, password: string) =>
+    postJson<{ ok: boolean; error?: string }>("/api/auth/login", { username, password }),
+  authLogout: () => post<{ ok: boolean }>("/api/auth/logout"),
+
   // ── Binance Futures ──────────────────────────────────────────────────────
   binanceState: () => get<{ hasCreds: boolean; running: boolean; state: any; testnet: boolean }>("/api/binance/state"),
   binanceSetCreds: (apiKey: string, apiSecret: string, testnet: boolean) =>

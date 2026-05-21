@@ -152,6 +152,18 @@ function Sidebar({ tab, setTab, state, subs, strategies }: {
             <span className="nav-item-icon">⏱</span>
             <span className="muted">{fmtUptime(state.health.uptimeSec)}</span>
           </div>
+          <div
+            className="nav-item"
+            style={{ cursor: "pointer", marginTop: 8, color: "#d4a35f" }}
+            onClick={async () => {
+              if (!confirm("Sign out?")) return;
+              await fetch("/api/auth/logout", { method: "POST" });
+              window.location.reload();
+            }}
+          >
+            <span className="nav-item-icon">⎋</span>
+            <span>Sign out</span>
+          </div>
         </div>
       )}
     </div>

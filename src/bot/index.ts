@@ -15,6 +15,7 @@ import { BinanceClient } from "../main/binance/client";
 import { BinanceEngine } from "../main/engine/binance";
 import { BINANCE_ASSETS } from "@shared/binance-assets";
 import { loadBinanceCreds, saveBinanceCreds, clearBinanceCreds, hasBinanceCreds, type BinanceCreds } from "./binance-store";
+import { AuthStore } from "./auth-store";
 import { Engine, defaultDetectorConfigs } from "../main/engine/runner";
 import { RealEngine } from "../main/engine/real";
 import { STRATEGIES } from "../main/engine/strategies";
@@ -460,6 +461,13 @@ async function main() {
     return { ok: true, testnet: creds.testnet };
   }
   await configureBinanceFromCreds();
+
+  // Single-admin auth store. First visit: UI prompts to create admin.
+  // After setup, login required. No way to register additional admins
+  // unless the on-disk admin.json is manually deleted.
+  const authStore = new AuthStore(cfg.stateDir);
+  // GC expired sessions hourly
+  setInterval(() => authStore.gcSessions().catch(() => {}), 60 * 60 * 1000);
 
   let wsConnected = false;
   let authorized = false;
@@ -1412,6 +1420,13 @@ async function main() {
       });
     },
     getRecentLogs: (limit: number) => log.tail(limit),
+    auth: {
+      hasAdmin: () => authStore.hasAdmin(),
+      setupAdmin: (u, p) => authStore.setupAdmin(u, p),
+      login: (u, p) => authStore.login(u, p),
+      validateSession: (t) => authStore.validateSession(t),
+      logout: (t) => authStore.logout(t),
+    },
     binance: {
       hasCreds: () => hasBinanceCreds(cfg.stateDir),
       isRunning: () => binanceRunning,

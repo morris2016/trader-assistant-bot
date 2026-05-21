@@ -10,6 +10,7 @@ import type { BotState, Fast1Config, Fast2Config, Fast3Config, Fast4Config, Real
 import type { Logger } from "./logger";
 import type { Candle, Signal, RealTrade, AccountInfo, SymbolCode } from "@shared/types";
 import type { PaperState } from "./paper-engine";
+import { parseSessionCookie } from "./auth-store";
 
 export type HealthSnapshot = {
   wsConnected: boolean;
@@ -185,6 +186,14 @@ export function startHttpServer(opts: {
   getLastPriceFor: (symbol: string) => number | null;
   /** Recent in-memory log entries for the web UI's Logs panel. */
   getRecentLogs: (limit: number) => Array<import("./logger").LogEntry>;
+  /** Single-admin auth — first-time setup via UI, then login required. */
+  auth?: {
+    hasAdmin: () => Promise<boolean>;
+    setupAdmin: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+    login: (username: string, password: string) => Promise<{ ok: true; token: string } | { ok: false; error: string }>;
+    validateSession: (token: string) => Promise<boolean>;
+    logout: (token: string) => Promise<void>;
+  };
   /** Binance Futures crypto trading engine — optional. When provided, exposes
    *  /api/binance/* endpoints. Keys persisted encrypted on disk via binance-store. */
   binance?: {
@@ -204,41 +213,80 @@ export function startHttpServer(opts: {
       const url = new URL(req.url ?? "/", "http://localhost");
       const path0 = url.pathname;
 
-      // ───── HTTP Basic Auth gate ─────────────────────────────────────
-      // Enabled when BOT_PASSWORD env is set. Single operator pattern.
-      // Username defaults to "admin" but configurable via BOT_USERNAME.
-      // Bypassed for /health and /ready (Railway liveness/readiness probes
-      // must reach these without credentials).
-      const requiresAuth = path0 !== "/health" && path0 !== "/ready";
-      const botPassword = process.env.BOT_PASSWORD;
-      if (requiresAuth && botPassword) {
-        const botUsername = process.env.BOT_USERNAME ?? "admin";
-        const hdr = req.headers["authorization"] ?? "";
-        let ok = false;
-        if (hdr.startsWith("Basic ")) {
-          try {
-            const decoded = Buffer.from(hdr.slice(6), "base64").toString("utf8");
-            const idx = decoded.indexOf(":");
-            if (idx > 0) {
-              const u = decoded.slice(0, idx);
-              const p = decoded.slice(idx + 1);
-              // Timing-safe equality on equal-length pairs
-              const uBuf = Buffer.from(u);
-              const expectedU = Buffer.from(botUsername);
-              const pBuf = Buffer.from(p);
-              const expectedP = Buffer.from(botPassword);
-              const uMatch = uBuf.length === expectedU.length && require("node:crypto").timingSafeEqual(uBuf, expectedU);
-              const pMatch = pBuf.length === expectedP.length && require("node:crypto").timingSafeEqual(pBuf, expectedP);
-              ok = uMatch && pMatch;
-            }
-          } catch {}
+      // ───── Session-based auth gate ──────────────────────────────────
+      // Bypassed for: /health, /ready (Railway probes), /api/auth/* (login flow),
+      // and the static UI bundle (so the login screen itself loads).
+      // Static assets are loaded by the React app AFTER auth is shown, but the
+      // login screen IS the React app, so we let static files through.
+      const isAuthRoute = path0.startsWith("/api/auth/");
+      const isHealth = path0 === "/health" || path0 === "/ready";
+      const isStatic = !path0.startsWith("/api/") && !isHealth;
+      const requiresAuth = !isAuthRoute && !isHealth && !isStatic;
+      if (requiresAuth && opts.auth) {
+        const cookie = req.headers["cookie"] ?? "";
+        const session = parseSessionCookie(cookie);
+        const valid = session ? await opts.auth.validateSession(session) : false;
+        if (!valid) {
+          json(res, 401, { ok: false, error: "Not authenticated" });
+          return;
         }
-        if (!ok) {
-          res.writeHead(401, {
-            "WWW-Authenticate": 'Basic realm="trader-bot", charset="UTF-8"',
-            "Content-Type": "text/plain; charset=utf-8",
+      }
+
+      // ───── Auth routes (no auth required here) ──────────────────────
+      if (opts.auth && path0.startsWith("/api/auth/")) {
+        const a = opts.auth;
+        if (req.method === "GET" && path0 === "/api/auth/check") {
+          const hasAdmin = await a.hasAdmin();
+          const cookie = req.headers["cookie"] ?? "";
+          const tok = parseSessionCookie(cookie);
+          const authenticated = tok ? await a.validateSession(tok) : false;
+          json(res, 200, { hasAdmin, authenticated });
+          return;
+        }
+        if (req.method === "POST" && path0 === "/api/auth/setup") {
+          const body = await readBody(req);
+          try {
+            const p = JSON.parse(body) as { username?: string; password?: string };
+            if (await a.hasAdmin()) { json(res, 409, { ok: false, error: "Admin already exists" }); return; }
+            const r = await a.setupAdmin(p.username ?? "", p.password ?? "");
+            if (!r.ok) { json(res, 400, r); return; }
+            // Auto-login the new admin
+            const login = await a.login(p.username ?? "", p.password ?? "");
+            if (login.ok) {
+              res.writeHead(200, {
+                "Set-Cookie": `bot_session=${login.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${30*24*60*60}${req.headers["x-forwarded-proto"] === "https" || (req.socket as any).encrypted ? "; Secure" : ""}`,
+                "Content-Type": "application/json; charset=utf-8",
+              });
+              res.end(JSON.stringify({ ok: true }));
+              return;
+            }
+            json(res, 200, { ok: true });
+          } catch (e: any) { json(res, 400, { ok: false, error: e?.message ?? "Bad body" }); }
+          return;
+        }
+        if (req.method === "POST" && path0 === "/api/auth/login") {
+          const body = await readBody(req);
+          try {
+            const p = JSON.parse(body) as { username?: string; password?: string };
+            const r = await a.login(p.username ?? "", p.password ?? "");
+            if (!r.ok) { json(res, 401, r); return; }
+            res.writeHead(200, {
+              "Set-Cookie": `bot_session=${r.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${30*24*60*60}${req.headers["x-forwarded-proto"] === "https" || (req.socket as any).encrypted ? "; Secure" : ""}`,
+              "Content-Type": "application/json; charset=utf-8",
+            });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e: any) { json(res, 400, { ok: false, error: e?.message ?? "Bad body" }); }
+          return;
+        }
+        if (req.method === "POST" && path0 === "/api/auth/logout") {
+          const cookie = req.headers["cookie"] ?? "";
+          const tok = parseSessionCookie(cookie);
+          if (tok) await a.logout(tok);
+          res.writeHead(200, {
+            "Set-Cookie": `bot_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`,
+            "Content-Type": "application/json; charset=utf-8",
           });
-          res.end("Unauthorized");
+          res.end(JSON.stringify({ ok: true }));
           return;
         }
       }
@@ -475,24 +523,7 @@ export function startHttpServer(opts: {
           json(res, 200, { ok: true });
           return;
         }
-        if (req.method !== "GET") { json(res, 405, { error: "method not allowed" }); return; }
-
-        if (path0 === "/health" || path0 === "/api/health") {
-          // Liveness check used by Railway. 200 unless the bot is HUNG —
-          // hung means: been alive >2min AND heartbeat stale >3min, indicating
-          // the event loop is blocked. In that case 503 → Railway restarts.
-          const h = opts.getHealth();
-          res.statusCode = h.hung ? 503 : 200;
-          res.end(JSON.stringify({ healthy: !h.hung, ...h, paused: opts.manualControls.isPaused() }));
-          return;
-        }
-        if (path0 === "/ready" || path0 === "/api/ready") {
-          const h = opts.getHealth();
-          const ready = h.wsConnected && h.authorized;
-          json(res, ready ? 200 : 503, { ready, ...h });
-          return;
-        }
-        // ─── Binance Futures routes ──────────────────────────────────────
+        // ─── Binance Futures routes (mixed GET/POST — keep before GET-only gate) ──
         if (opts.binance && path0.startsWith("/api/binance/")) {
           const b = opts.binance;
           if (req.method === "GET" && path0 === "/api/binance/state") {
@@ -536,6 +567,23 @@ export function startHttpServer(opts: {
           }
         }
 
+        if (req.method !== "GET") { json(res, 405, { error: "method not allowed" }); return; }
+
+        if (path0 === "/health" || path0 === "/api/health") {
+          // Liveness check used by Railway. 200 unless the bot is HUNG —
+          // hung means: been alive >2min AND heartbeat stale >3min, indicating
+          // the event loop is blocked. In that case 503 → Railway restarts.
+          const h = opts.getHealth();
+          res.statusCode = h.hung ? 503 : 200;
+          res.end(JSON.stringify({ healthy: !h.hung, ...h, paused: opts.manualControls.isPaused() }));
+          return;
+        }
+        if (path0 === "/ready" || path0 === "/api/ready") {
+          const h = opts.getHealth();
+          const ready = h.wsConnected && h.authorized;
+          json(res, ready ? 200 : 503, { ready, ...h });
+          return;
+        }
         if (path0 === "/api/state") {
           const s = opts.getState();
           json(res, 200, {
