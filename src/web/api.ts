@@ -449,6 +449,18 @@ export const api = {
   binanceTest: () => post<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string }>("/api/binance/test"),
   binanceStart: () => post<{ ok: boolean; error?: string }>("/api/binance/start"),
   binanceStop: () => post<{ ok: boolean }>("/api/binance/stop"),
+  binanceConfig: () => get<{ config: BinanceConfig }>("/api/binance/config"),
+  binanceUpdateConfig: (patch: Partial<BinanceConfig>) =>
+    postJson<{ ok: boolean; config?: BinanceConfig; error?: string }>("/api/binance/update-config", patch),
+};
+
+export type BinanceConfig = {
+  stake: number;
+  leverage: number;
+  dailyMaxLoss: number;
+  perTradeMaxStake: number;
+  perAssetEnabled: Record<string, boolean>;
+  perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean };
 };
 
 export function fmtTime(ms: number | null): string {

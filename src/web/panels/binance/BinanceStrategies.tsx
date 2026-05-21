@@ -2,7 +2,7 @@
 // Helps spot underperforming pairs at a glance.
 
 import React, { useEffect, useState } from "react";
-import { api } from "../../api";
+import { api, type BinanceConfig } from "../../api";
 
 const ASSETS = [
   "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
@@ -13,12 +13,29 @@ const PATTERNS = ["OB_BULL", "OB_BEAR", "BOS_UP"] as const;
 
 export function BinanceStrategiesPanel() {
   const [bs, setBs] = useState<any>(null);
+  const [config, setConfig] = useState<BinanceConfig | null>(null);
   useEffect(() => {
-    const refresh = async () => { try { setBs(await api.binanceState()); } catch {} };
+    const refresh = async () => {
+      try { setBs(await api.binanceState()); } catch {}
+      try { const c = await api.binanceConfig(); setConfig(c.config); } catch {}
+    };
     refresh();
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
   }, []);
+
+  async function toggleAsset(asset: string, enabled: boolean) {
+    if (!config) return;
+    const next = { ...config.perAssetEnabled, [asset]: enabled };
+    await api.binanceUpdateConfig({ perAssetEnabled: next });
+    setConfig({ ...config, perAssetEnabled: next });
+  }
+  async function togglePattern(pattern: "OB_BULL" | "OB_BEAR" | "BOS_UP", enabled: boolean) {
+    if (!config) return;
+    const next = { ...config.perPatternEnabled, [pattern]: enabled };
+    await api.binanceUpdateConfig({ perPatternEnabled: next });
+    setConfig({ ...config, perPatternEnabled: next });
+  }
 
   if (!bs) return <div className="empty-state">Loading…</div>;
   if (!bs.hasCreds) return <div className="banner banner-warn">No Binance credentials. Go to Settings.</div>;
@@ -69,12 +86,20 @@ export function BinanceStrategiesPanel() {
         </div>
         <div className="card card-padded">
           <table className="table">
-            <thead><tr><th>Asset</th><th>OB_BULL</th><th>OB_BEAR</th><th>BOS_UP</th><th>Total trades</th><th>Total P&amp;L</th></tr></thead>
+            <thead><tr><th>On</th><th>Asset</th><th>OB_BULL</th><th>OB_BEAR</th><th>BOS_UP</th><th>Total trades</th><th>Total P&amp;L</th></tr></thead>
             <tbody>
               {ASSETS.map((asset) => {
                 const totals = byAsset.get(asset);
+                const enabled = config?.perAssetEnabled[asset] !== false;
                 return (
-                  <tr key={asset}>
+                  <tr key={asset} style={{ opacity: enabled ? 1 : 0.4 }}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={(e) => toggleAsset(asset, e.target.checked)}
+                      />
+                    </td>
                     <td className="mono">{asset}</td>
                     {PATTERNS.map((p) => {
                       const c = matrix.get(`${asset}|${p}`);
@@ -95,7 +120,23 @@ export function BinanceStrategiesPanel() {
               })}
             </tbody>
             <tfoot>
+              <tr style={{ borderTop: "2px solid #1e2842", fontSize: 11 }}>
+                <td></td>
+                <td className="muted">Pattern on/off →</td>
+                {PATTERNS.map((p) => (
+                  <td key={p}>
+                    <input
+                      type="checkbox"
+                      checked={config?.perPatternEnabled[p] !== false}
+                      onChange={(e) => togglePattern(p, e.target.checked)}
+                    />
+                    <span style={{ marginLeft: 6 }}>{config?.perPatternEnabled[p] !== false ? "on" : "off"}</span>
+                  </td>
+                ))}
+                <td></td><td></td>
+              </tr>
               <tr style={{ borderTop: "2px solid #1e2842", fontWeight: 600 }}>
+                <td></td>
                 <td>Pattern total</td>
                 {PATTERNS.map((p) => {
                   const c = byPattern.get(p);
@@ -107,8 +148,8 @@ export function BinanceStrategiesPanel() {
                   );
                 })}
                 <td className="mono">{closed.length}</td>
-                <td className="mono" style={{ color: closed.reduce((s, c) => s + (c.pnl ?? 0), 0) >= 0 ? "#5fd4a4" : "#d4655f" }}>
-                  {closed.reduce((s, c) => s + (c.pnl ?? 0), 0) >= 0 ? "+" : ""}${closed.reduce((s, c) => s + (c.pnl ?? 0), 0).toFixed(2)}
+                <td className="mono" style={{ color: closed.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0) >= 0 ? "#5fd4a4" : "#d4655f" }}>
+                  {closed.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0) >= 0 ? "+" : ""}${closed.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0).toFixed(2)}
                 </td>
               </tr>
             </tfoot>

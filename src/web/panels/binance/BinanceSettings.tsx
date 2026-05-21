@@ -1,20 +1,24 @@
-// Binance Futures Settings — credential entry + engine controls. One of
-// 5 panels in the dedicated Binance mode (Overview / Positions / Trades /
-// Strategies / Settings).
+// Binance Settings — credential entry + engine controls + config knobs.
 
 import React, { useEffect, useState } from "react";
-import { api } from "../../api";
+import { api, type BinanceConfig } from "../../api";
 
 export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
   const [hasCreds, setHasCreds] = useState(false);
   const [running, setRunning] = useState(false);
   const [testnet, setTestnet] = useState(false);
-  const [state, setState] = useState<any>(null);
   const [key, setKey] = useState("");
   const [secret, setSecret] = useState("");
   const [useTestnet, setUseTestnet] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string } | null>(null);
+  const [config, setConfig] = useState<BinanceConfig | null>(null);
+  const [stake, setStake] = useState("15");
+  const [leverage, setLeverage] = useState("30");
+  const [dailyMaxLoss, setDailyMaxLoss] = useState("100");
+  const [perTradeMaxStake, setPerTradeMaxStake] = useState("30");
+  const [configMsg, setConfigMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [configBusy, setConfigBusy] = useState(false);
 
   async function refresh() {
     try {
@@ -22,14 +26,17 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
       setHasCreds(r.hasCreds);
       setRunning(r.running);
       setTestnet(r.testnet);
-      setState(r.state);
+    } catch {}
+    try {
+      const c = await api.binanceConfig();
+      setConfig(c.config);
+      setStake(String(c.config.stake));
+      setLeverage(String(c.config.leverage));
+      setDailyMaxLoss(String(c.config.dailyMaxLoss));
+      setPerTradeMaxStake(String(c.config.perTradeMaxStake));
     } catch {}
   }
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, []);
+  useEffect(() => { refresh(); const id = setInterval(refresh, 5000); return () => clearInterval(id); }, []);
 
   async function saveCreds() {
     setErr(null);
@@ -63,39 +70,43 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
     await refresh();
   }
 
+  async function saveConfig() {
+    setConfigMsg(null);
+    const patch: Partial<BinanceConfig> = {
+      stake: Number(stake), leverage: Number(leverage),
+      dailyMaxLoss: Number(dailyMaxLoss), perTradeMaxStake: Number(perTradeMaxStake),
+    };
+    if (!isFinite(patch.stake!) || patch.stake! <= 0) { setConfigMsg({ ok: false, text: "Stake must be > 0" }); return; }
+    if (!isFinite(patch.leverage!) || patch.leverage! < 1 || patch.leverage! > 125) { setConfigMsg({ ok: false, text: "Leverage must be 1–125" }); return; }
+    if (!isFinite(patch.dailyMaxLoss!) || patch.dailyMaxLoss! <= 0) { setConfigMsg({ ok: false, text: "Daily max loss must be > 0" }); return; }
+    if (!isFinite(patch.perTradeMaxStake!) || patch.perTradeMaxStake! <= 0) { setConfigMsg({ ok: false, text: "Per-trade max stake must be > 0" }); return; }
+    setConfigBusy(true);
+    const r = await api.binanceUpdateConfig(patch);
+    setConfigBusy(false);
+    if (!r.ok) { setConfigMsg({ ok: false, text: r.error ?? "Save failed" }); return; }
+    setConfigMsg({ ok: true, text: "Config saved" });
+    await refresh();
+  }
+
   return (
     <>
       <div className="section">
         <div className="section-header">
-          <div className="section-title">Binance Futures (crypto)</div>
-          <div className="section-sub">
-            15-asset trained SMC strategy (OB_BULL / OB_BEAR / BOS_UP) — validated 85% WR / +$5,400 over 6 months on $300 / $15 stake.
-          </div>
+          <div className="section-title">Credentials</div>
         </div>
         <div className="card card-padded">
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
               <span className={`pill ${hasCreds ? "pill-green" : "pill-red"}`}>
                 <span className="pill-dot" />{hasCreds ? "Creds saved" : "No creds"}
               </span>
-              {hasCreds && (
-                <span className={`pill ${running ? "pill-green" : "pill-amber"}`}>
-                  <span className="pill-dot" />{running ? "Engine running" : "Stopped"}
-                </span>
-              )}
-              {hasCreds && (
-                <span className={`pill ${testnet ? "pill-cyan" : "pill-red"}`}>
-                  <span className="pill-dot" />{testnet ? "TESTNET" : "LIVE"}
-                </span>
-              )}
+              {hasCreds && <span className={`pill ${running ? "pill-green" : "pill-amber"}`}><span className="pill-dot" />{running ? "Engine running" : "Stopped"}</span>}
+              {hasCreds && <span className={`pill ${testnet ? "pill-cyan" : "pill-red"}`}><span className="pill-dot" />{testnet ? "TESTNET" : "LIVE"}</span>}
             </div>
-
             {!hasCreds ? (
               <>
                 <div className="card-sub">
-                  Enter API Key + Secret. <b>Live</b> key: <code>binance.com → API Management</code> (Enable Futures, recommend IP whitelist).
-                  {" "}<b>Testnet</b> key: <code>testnet.binancefuture.com → API Management</code>.
-                  Stored encrypted at rest (AES-256-GCM, keyed by <code>BOT_SECRET</code> env).
+                  <b>Live</b>: <code>binance.com → API Management</code> (Enable Futures, IP whitelist recommended). <b>Testnet</b>: <code>testnet.binancefuture.com → API Management</code>. Stored AES-256-GCM encrypted, keyed by <code>BOT_SECRET</code> env.
                 </div>
                 <input type="password" placeholder="API Key (64 chars)" value={key} onChange={(e) => { setKey(e.target.value); setErr(null); }}
                   style={{ background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "10px 12px", borderRadius: 6 }} />
@@ -103,11 +114,9 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
                   style={{ background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "10px 12px", borderRadius: 6 }} />
                 <label style={{ fontSize: 13 }}>
                   <input type="checkbox" checked={useTestnet} onChange={(e) => setUseTestnet(e.target.checked)} style={{ marginRight: 6 }} />
-                  Testnet (paper trading)
+                  Testnet
                 </label>
-                <div className="row">
-                  <button className="btn btn-primary" onClick={saveCreds} disabled={pending !== null}>Save credentials</button>
-                </div>
+                <div className="row"><button className="btn btn-primary" onClick={saveCreds} disabled={pending !== null}>Save credentials</button></div>
                 {err && <div style={{ color: "#d4a35f", fontSize: 12 }}>{err}</div>}
               </>
             ) : (
@@ -121,56 +130,52 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
                   )}
                   <button className="btn btn-danger" onClick={clearCreds} disabled={pending !== null}>Clear keys</button>
                 </div>
-                {testResult && (
-                  testResult.ok ? (
-                    <div style={{ color: "#5fd4a4", fontSize: 13 }}>
-                      ✓ Connected ({testResult.testnet ? "TESTNET" : "LIVE"}) — USDT balance: ${testResult.balanceUsdt?.toFixed(2)} (available: ${testResult.available?.toFixed(2)})
-                    </div>
-                  ) : (
-                    <div style={{ color: "#d4a35f", fontSize: 13 }}>✗ {testResult.error}</div>
-                  )
-                )}
+                {testResult && (testResult.ok
+                  ? <div style={{ color: "#5fd4a4", fontSize: 13 }}>✓ Connected ({testResult.testnet ? "TESTNET" : "LIVE"}) — USDT ${testResult.balanceUsdt?.toFixed(2)} / available ${testResult.available?.toFixed(2)}</div>
+                  : <div style={{ color: "#d4a35f", fontSize: 13 }}>✗ {testResult.error}</div>)}
               </>
             )}
           </div>
         </div>
       </div>
 
-      {state && hasCreds && (
-        <div className="section">
-          <div className="section-header">
-            <div className="section-title">Status</div>
-          </div>
-          <div className="card card-padded">
-            <div className="kv-list">
-              <div className="kv-row"><div className="kv-key">Open positions</div><div className="kv-val mono">{state.open?.length ?? 0}</div></div>
-              <div className="kv-row"><div className="kv-key">Closed today</div><div className="kv-val mono">{state.closed?.filter((c: any) => c.closeEpoch && new Date(c.closeEpoch * 1000).toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10)).length ?? 0}</div></div>
-              <div className="kv-row"><div className="kv-key">Daily P&amp;L</div><div className="kv-val mono">${(state.daily?.profit ?? 0).toFixed(2)}</div></div>
-              <div className="kv-row"><div className="kv-key">Trades opened today</div><div className="kv-val mono">{state.daily?.tradesOpened ?? 0}</div></div>
-            </div>
-          </div>
-
-          {state.open && state.open.length > 0 && (
-            <div className="card card-padded" style={{ marginTop: 12 }}>
-              <div className="card-title">Open positions</div>
-              <table className="table" style={{ marginTop: 8 }}>
-                <thead><tr><th>Asset</th><th>Pattern</th><th>Side</th><th>Entry</th><th>Peak</th><th>Armed</th></tr></thead>
-                <tbody>
-                  {state.open.map((t: any) => (
-                    <tr key={t.id}>
-                      <td>{t.asset}</td><td>{t.pattern}</td>
-                      <td><span className={`pill ${t.side === "LONG" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
-                      <td className="mono">${(+t.entryPrice).toFixed(5)}</td>
-                      <td className="mono">${(+t.peakFav).toFixed(5)}</td>
-                      <td>{t.armed ? "✓" : "·"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">Engine config</div>
+          <div className="section-sub">Apply immediately to the running engine. Persisted to disk; survives restart.</div>
         </div>
-      )}
+        <div className="card card-padded">
+          <div className="grid grid-2">
+            <ConfigField label="Stake ($)" value={stake} onChange={setStake} hint="Base $ per trade. Validated default: 15." />
+            <ConfigField label="Leverage (×)" value={leverage} onChange={setLeverage} hint="Position multiplier. Binance max 125 on some pairs." />
+            <ConfigField label="Daily max loss ($)" value={dailyMaxLoss} onChange={setDailyMaxLoss} hint="Engine pauses for the day when realized loss crosses this." />
+            <ConfigField label="Per-trade max stake ($)" value={perTradeMaxStake} onChange={setPerTradeMaxStake} hint="Hard ceiling on any single trade's stake." />
+          </div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="btn btn-primary" onClick={saveConfig} disabled={configBusy}>{configBusy ? "Saving…" : "Save config"}</button>
+            {configMsg && (
+              <span style={{ color: configMsg.ok ? "#5fd4a4" : "#d4a35f", fontSize: 13 }}>
+                {configMsg.ok ? "✓" : "✗"} {configMsg.text}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
     </>
+  );
+}
+
+function ConfigField({ label, value, onChange, hint }: { label: string; value: string; onChange: (v: string) => void; hint?: string }) {
+  return (
+    <div className="card card-padded">
+      <div className="card-title">{label}</div>
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ width: "100%", boxSizing: "border-box", background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "8px 10px", borderRadius: 6, marginTop: 6, fontFamily: "monospace" }}
+      />
+      {hint && <div className="card-sub" style={{ marginTop: 6 }}>{hint}</div>}
+    </div>
   );
 }

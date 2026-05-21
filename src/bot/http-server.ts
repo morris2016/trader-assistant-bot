@@ -206,6 +206,8 @@ export function startHttpServer(opts: {
     testConnection: () => Promise<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string }>;
     start: () => Promise<{ ok: boolean; error?: string }>;
     stop: () => Promise<{ ok: boolean }>;
+    getConfig: () => any;
+    updateConfig: (patch: any) => Promise<void>;
   };
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
@@ -568,6 +570,21 @@ export function startHttpServer(opts: {
           if (req.method === "POST" && path0 === "/api/binance/stop") {
             const r = await b.stop();
             json(res, 200, r);
+            return;
+          }
+          if (req.method === "GET" && path0 === "/api/binance/config") {
+            json(res, 200, { config: b.getConfig() });
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/update-config") {
+            const body = await readBody(req);
+            try {
+              const patch = JSON.parse(body);
+              await b.updateConfig(patch);
+              json(res, 200, { ok: true, config: b.getConfig() });
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+            }
             return;
           }
         }

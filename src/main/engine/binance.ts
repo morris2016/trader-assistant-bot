@@ -181,6 +181,8 @@ export class BinanceEngine extends EventEmitter {
   private leverage = 30;
   private dailyMaxLoss = 100;
   private perTradeMaxStake = 30;
+  private perAssetEnabled: Record<string, boolean> = {};
+  private perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean } = { OB_BULL: true, OB_BEAR: true, BOS_UP: true };
   private running = false;
   private signalLoopTimer: NodeJS.Timeout | null = null;
   private positionLoopTimer: NodeJS.Timeout | null = null;
@@ -201,12 +203,14 @@ export class BinanceEngine extends EventEmitter {
 
   state(): BinanceState { return { open: this.open, closed: this.closed, daily: this.daily }; }
 
-  configure(opts: { assets?: string[]; stake?: number; leverage?: number; dailyMaxLoss?: number; perTradeMaxStake?: number }) {
+  configure(opts: { assets?: string[]; stake?: number; leverage?: number; dailyMaxLoss?: number; perTradeMaxStake?: number; perAssetEnabled?: Record<string, boolean>; perPatternEnabled?: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean } }) {
     if (opts.assets) this.assets = opts.assets;
     if (opts.stake !== undefined) this.stake = opts.stake;
     if (opts.leverage !== undefined) this.leverage = opts.leverage;
     if (opts.dailyMaxLoss !== undefined) this.dailyMaxLoss = opts.dailyMaxLoss;
     if (opts.perTradeMaxStake !== undefined) this.perTradeMaxStake = opts.perTradeMaxStake;
+    if (opts.perAssetEnabled) this.perAssetEnabled = opts.perAssetEnabled;
+    if (opts.perPatternEnabled) this.perPatternEnabled = opts.perPatternEnabled;
   }
 
   private rollDayIfNeeded() {
@@ -295,9 +299,13 @@ export class BinanceEngine extends EventEmitter {
   private async checkSignalsFor(sym: string) {
     const buf = this.bars.get(sym);
     if (!buf || buf.length < SMA_PERIOD + 10) return;
+    // Per-asset disable
+    if (this.perAssetEnabled[sym] === false) return;
     const i = buf.length - 1;
     const sigs = detectSignals(buf, i);
     for (const s of sigs) {
+      // Per-pattern disable
+      if (this.perPatternEnabled[s.pattern] === false) continue;
       // Skip if same (asset, pattern, side) already open
       if (this.open.find((t) => t.asset === sym && t.pattern === s.pattern && t.side === s.side)) continue;
       // Cap: per-trade stake

@@ -15,6 +15,7 @@ import { BinanceClient } from "../main/binance/client";
 import { BinanceEngine } from "../main/engine/binance";
 import { BINANCE_ASSETS } from "@shared/binance-assets";
 import { loadBinanceCreds, saveBinanceCreds, clearBinanceCreds, hasBinanceCreds, type BinanceCreds } from "./binance-store";
+import { loadBinanceConfig, saveBinanceConfig, type BinanceConfig } from "./binance-config";
 import { AuthStore } from "./auth-store";
 import { Engine, defaultDetectorConfigs } from "../main/engine/runner";
 import { RealEngine } from "../main/engine/real";
@@ -447,7 +448,16 @@ async function main() {
   // Engine only starts trading when operator clicks Start on the web UI.
   const binanceClient = new BinanceClient();
   const binanceEngine = new BinanceEngine(binanceClient);
-  binanceEngine.configure({ assets: [...BINANCE_ASSETS], stake: 15, leverage: 30, dailyMaxLoss: 100, perTradeMaxStake: 30 });
+  let binanceConfig = loadBinanceConfig(cfg.stateDir);
+  binanceEngine.configure({
+    assets: [...BINANCE_ASSETS],
+    stake: binanceConfig.stake,
+    leverage: binanceConfig.leverage,
+    dailyMaxLoss: binanceConfig.dailyMaxLoss,
+    perTradeMaxStake: binanceConfig.perTradeMaxStake,
+    perAssetEnabled: binanceConfig.perAssetEnabled,
+    perPatternEnabled: binanceConfig.perPatternEnabled,
+  });
   binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
   binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`));
   binanceEngine.on("closed", (t) => log.info(`binance closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`));
@@ -1432,6 +1442,25 @@ async function main() {
       isRunning: () => binanceRunning,
       getState: () => binanceEngine.state(),
       getTestnet: () => binanceTestnet,
+      getConfig: () => binanceConfig,
+      updateConfig: async (patch: Partial<BinanceConfig>) => {
+        binanceConfig = {
+          ...binanceConfig,
+          ...patch,
+          perAssetEnabled: { ...binanceConfig.perAssetEnabled, ...(patch.perAssetEnabled ?? {}) },
+          perPatternEnabled: { ...binanceConfig.perPatternEnabled, ...(patch.perPatternEnabled ?? {}) },
+        };
+        await saveBinanceConfig(cfg.stateDir, binanceConfig);
+        binanceEngine.configure({
+          stake: binanceConfig.stake,
+          leverage: binanceConfig.leverage,
+          dailyMaxLoss: binanceConfig.dailyMaxLoss,
+          perTradeMaxStake: binanceConfig.perTradeMaxStake,
+          perAssetEnabled: binanceConfig.perAssetEnabled,
+          perPatternEnabled: binanceConfig.perPatternEnabled,
+        });
+        log.info("binance config updated", { ...binanceConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
+      },
       setCreds: async (apiKey: string, apiSecret: string, testnet: boolean) => {
         await saveBinanceCreds(cfg.stateDir, { apiKey, apiSecret, testnet });
         await configureBinanceFromCreds();
