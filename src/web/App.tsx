@@ -17,12 +17,25 @@ import { Fast2Panel } from "./panels/Fast2";
 import { Fast3Panel } from "./panels/Fast3";
 import { Fast4Panel } from "./panels/Fast4";
 import { LogsPanel } from "./panels/Logs";
-import { BinancePanel } from "./panels/Binance";
+import { BinanceOverviewPanel } from "./panels/binance/BinanceOverview";
+import { BinancePositionsPanel } from "./panels/binance/BinancePositions";
+import { BinanceTradesPanel } from "./panels/binance/BinanceTrades";
+import { BinanceStrategiesPanel } from "./panels/binance/BinanceStrategies";
+import { BinanceSettingsPanel } from "./panels/binance/BinanceSettings";
 
 const REFRESH_MS = 3000;
 
 type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "fast4" | "adaptive" | "logs" | "settings";
+type BinanceTabId = "overview" | "positions" | "trades" | "strategies" | "settings";
 type Mode = "deriv" | "binance";
+
+const BINANCE_TABS: { id: BinanceTabId; label: string; icon: string }[] = [
+  { id: "overview",   label: "Overview",   icon: "◆" },
+  { id: "positions",  label: "Positions",  icon: "▣" },
+  { id: "trades",     label: "Trades",     icon: "≡" },
+  { id: "strategies", label: "Strategies", icon: "⚛" },
+  { id: "settings",   label: "Settings",   icon: "⚙" },
+];
 
 // SILENCED 2026-05-19: synth/fast3/fast4 tabs hidden while Fade iteration is
 // active. Their panels still build (no runtime cost) but aren't reachable
@@ -42,6 +55,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
 
 export function App() {
   const [tab, setTab] = useState<TabId>("overview");
+  const [bTab, setBTab] = useState<BinanceTabId>("overview");
   const [mode, setMode] = useState<Mode>("deriv");
   const [state, setState] = useState<StateResp | null>(null);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
@@ -86,12 +100,20 @@ export function App() {
 
   return (
     <div className="shell">
-      <Sidebar tab={tab} setTab={setTab} state={state} subs={subs} strategies={strategies} />
+      {mode === "binance"
+        ? <BinanceSidebar tab={bTab} setTab={setBTab} />
+        : <Sidebar tab={tab} setTab={setTab} state={state} subs={subs} strategies={strategies} />}
       <div className="main">
         <Header state={state} stale={stale} error={error} />
         <ModeSwitcher mode={mode} setMode={setMode} />
         {mode === "binance" ? (
-          <BinancePanel pending={actionPending} />
+          <>
+            {bTab === "overview"   && <BinanceOverviewPanel />}
+            {bTab === "positions"  && <BinancePositionsPanel />}
+            {bTab === "trades"     && <BinanceTradesPanel />}
+            {bTab === "strategies" && <BinanceStrategiesPanel />}
+            {bTab === "settings"   && <BinanceSettingsPanel pending={actionPending} />}
+          </>
         ) : (
           <>
             {!state && !error && <SkeletonGrid />}
@@ -224,6 +246,53 @@ function Header({ state, stale, error }: { state: StateResp | null; stale: boole
 
 function titleForTab() {
   return "Dashboard";
+}
+
+function BinanceSidebar({ tab, setTab }: { tab: BinanceTabId; setTab: (t: BinanceTabId) => void }) {
+  return (
+    <div className="sidebar">
+      <div className="sidebar-brand">
+        <div className="brand-icon">₿</div>
+        <div className="brand-text"><div className="brand-title">Binance</div><div className="brand-sub">Futures crypto</div></div>
+      </div>
+      <div className="sidebar-section">
+        <div className="sidebar-section-title">Navigation</div>
+        {BINANCE_TABS.map((t) => (
+          <div key={t.id} className={`nav-item ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
+            <span className="nav-item-icon">{t.icon}</span>
+            <span>{t.label}</span>
+          </div>
+        ))}
+      </div>
+      <div className="sidebar-section">
+        <div className="sidebar-section-title">Reference</div>
+        <div className="nav-item" style={{ cursor: "default" }}>
+          <span className="nav-item-icon">📊</span>
+          <span className="muted">15 assets · 3 patterns</span>
+        </div>
+        <div className="nav-item" style={{ cursor: "default" }}>
+          <span className="nav-item-icon">⚡</span>
+          <span className="muted">30× leverage</span>
+        </div>
+        <div className="nav-item" style={{ cursor: "default" }}>
+          <span className="nav-item-icon">$</span>
+          <span className="muted">$15 flat stake</span>
+        </div>
+      </div>
+      <div className="sidebar-section">
+        <div className="sidebar-section-title">Account</div>
+        <div className="nav-item" style={{ cursor: "pointer", color: "#d4a35f" }}
+          onClick={async () => {
+            if (!confirm("Sign out?")) return;
+            await fetch("/api/auth/logout", { method: "POST" });
+            window.location.reload();
+          }}>
+          <span className="nav-item-icon">⎋</span>
+          <span>Sign out</span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ModeSwitcher({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => void }) {

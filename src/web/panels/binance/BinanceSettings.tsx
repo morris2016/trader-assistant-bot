@@ -1,11 +1,11 @@
-// Binance Futures panel — separate from the Deriv-focused tabs. Operator
-// enters API key + secret via UI; the bot stores them encrypted on disk
-// (AES-256-GCM keyed by BOT_SECRET env var). After saving, Test/Start/Stop.
+// Binance Futures Settings — credential entry + engine controls. One of
+// 5 panels in the dedicated Binance mode (Overview / Positions / Trades /
+// Strategies / Settings).
 
 import React, { useEffect, useState } from "react";
-import { api } from "../api";
+import { api } from "../../api";
 
-export function BinancePanel({ pending }: { pending: string | null }) {
+export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
   const [hasCreds, setHasCreds] = useState(false);
   const [running, setRunning] = useState(false);
   const [testnet, setTestnet] = useState(false);
