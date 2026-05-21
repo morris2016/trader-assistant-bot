@@ -123,6 +123,16 @@ async function post<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  // Don't throw on 4xx — let caller inspect ok/error
+  return res.json() as Promise<T>;
+}
+
 export type PaperPosition = {
   id: string; signalId: string; symbol: string; side: "BUY" | "SELL"; detector: string;
   stake: number; multiplier: number; entryPrice: number; stopPrice: number; takeProfitPrice: number;
@@ -422,6 +432,15 @@ export const api = {
   resetAdaptive: () => post<{ ok: boolean }>("/api/control/reset-adaptive"),
   resetDaily: () => post<{ ok: boolean }>("/api/control/reset-daily"),
   resetPaper: (balance?: number) => post<{ ok: boolean }>(`/api/control/reset-paper${balance ? `?balance=${balance}` : ""}`),
+
+  // ── Binance Futures ──────────────────────────────────────────────────────
+  binanceState: () => get<{ hasCreds: boolean; running: boolean; state: any; testnet: boolean }>("/api/binance/state"),
+  binanceSetCreds: (apiKey: string, apiSecret: string, testnet: boolean) =>
+    postJson<{ ok: boolean; error?: string }>("/api/binance/set-creds", { apiKey, apiSecret, testnet }),
+  binanceClearCreds: () => post<{ ok: boolean }>("/api/binance/clear-creds"),
+  binanceTest: () => post<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string }>("/api/binance/test"),
+  binanceStart: () => post<{ ok: boolean; error?: string }>("/api/binance/start"),
+  binanceStop: () => post<{ ok: boolean }>("/api/binance/stop"),
 };
 
 export function fmtTime(ms: number | null): string {

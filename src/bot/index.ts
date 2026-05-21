@@ -11,6 +11,10 @@
 //   - Graceful SIGTERM shutdown
 
 import { DerivClient } from "../main/deriv/client";
+import { BinanceClient } from "../main/binance/client";
+import { BinanceEngine } from "../main/engine/binance";
+import { BINANCE_ASSETS } from "@shared/binance-assets";
+import { loadBinanceCreds, saveBinanceCreds, clearBinanceCreds, hasBinanceCreds, type BinanceCreds } from "./binance-store";
 import { Engine, defaultDetectorConfigs } from "../main/engine/runner";
 import { RealEngine } from "../main/engine/real";
 import { STRATEGIES } from "../main/engine/strategies";
@@ -436,6 +440,26 @@ async function main() {
   // Set via env DERIV_PRICE_TOL_BPS to override (0 disables).
   const priceTolBps = Number(process.env.DERIV_PRICE_TOL_BPS ?? 5);
   real.setPriceTolerance(priceTolBps / 10000);
+
+  // ─── Binance Futures crypto engine ────────────────────────────────────────
+  // Independent of Deriv. Loads encrypted creds from stateDir when set via UI.
+  // Engine only starts trading when operator clicks Start on the web UI.
+  const binanceClient = new BinanceClient();
+  const binanceEngine = new BinanceEngine(binanceClient);
+  binanceEngine.configure({ assets: [...BINANCE_ASSETS], stake: 15, leverage: 30, dailyMaxLoss: 100, perTradeMaxStake: 30 });
+  binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
+  binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`));
+  binanceEngine.on("closed", (t) => log.info(`binance closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`));
+  let binanceRunning = false;
+  let binanceTestnet = false;
+  async function configureBinanceFromCreds(): Promise<{ ok: boolean; testnet: boolean }> {
+    const creds = await loadBinanceCreds(cfg.stateDir);
+    if (!creds) { binanceClient.configure(null, { testnet: false }); binanceTestnet = false; return { ok: false, testnet: false }; }
+    binanceClient.configure({ apiKey: creds.apiKey, apiSecret: creds.apiSecret }, { testnet: creds.testnet });
+    binanceTestnet = creds.testnet;
+    return { ok: true, testnet: creds.testnet };
+  }
+  await configureBinanceFromCreds();
 
   let wsConnected = false;
   let authorized = false;
@@ -1388,6 +1412,52 @@ async function main() {
       });
     },
     getRecentLogs: (limit: number) => log.tail(limit),
+    binance: {
+      hasCreds: () => hasBinanceCreds(cfg.stateDir),
+      isRunning: () => binanceRunning,
+      getState: () => binanceEngine.state(),
+      getTestnet: () => binanceTestnet,
+      setCreds: async (apiKey: string, apiSecret: string, testnet: boolean) => {
+        await saveBinanceCreds(cfg.stateDir, { apiKey, apiSecret, testnet });
+        await configureBinanceFromCreds();
+        log.info(`binance creds saved (testnet=${testnet})`);
+      },
+      clearCreds: async () => {
+        if (binanceRunning) { await binanceEngine.stop(); binanceRunning = false; }
+        await clearBinanceCreds(cfg.stateDir);
+        binanceClient.configure(null, { testnet: false });
+        log.warn("binance creds cleared");
+      },
+      testConnection: async () => {
+        try {
+          const c = await configureBinanceFromCreds();
+          if (!c.ok) return { ok: false, error: "No creds saved" };
+          await binanceClient.syncTime();
+          const bals = await binanceClient.getBalances();
+          const usdt = bals.find((b) => b.asset === "USDT");
+          return { ok: true, balanceUsdt: usdt?.balance ?? 0, available: usdt?.availableBalance ?? 0, testnet: c.testnet };
+        } catch (e: any) {
+          return { ok: false, error: e?.message ?? String(e) };
+        }
+      },
+      start: async () => {
+        try {
+          if (!hasBinanceCreds(cfg.stateDir)) return { ok: false, error: "No creds saved" };
+          if (binanceRunning) return { ok: true };
+          await configureBinanceFromCreds();
+          await binanceEngine.start();
+          binanceRunning = true;
+          log.info("binance engine started");
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: e?.message ?? String(e) };
+        }
+      },
+      stop: async () => {
+        if (binanceRunning) { await binanceEngine.stop(); binanceRunning = false; log.warn("binance engine stopped"); }
+        return { ok: true };
+      },
+    },
   });
 
   // Build the per-(sym, gr) engine detector config by merging every strategy

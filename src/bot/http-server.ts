@@ -185,6 +185,19 @@ export function startHttpServer(opts: {
   getLastPriceFor: (symbol: string) => number | null;
   /** Recent in-memory log entries for the web UI's Logs panel. */
   getRecentLogs: (limit: number) => Array<import("./logger").LogEntry>;
+  /** Binance Futures crypto trading engine — optional. When provided, exposes
+   *  /api/binance/* endpoints. Keys persisted encrypted on disk via binance-store. */
+  binance?: {
+    hasCreds: () => boolean;
+    isRunning: () => boolean;
+    getState: () => any;
+    getTestnet: () => boolean;
+    setCreds: (apiKey: string, apiSecret: string, testnet: boolean) => Promise<void>;
+    clearCreds: () => Promise<void>;
+    testConnection: () => Promise<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string }>;
+    start: () => Promise<{ ok: boolean; error?: string }>;
+    stop: () => Promise<{ ok: boolean }>;
+  };
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -440,6 +453,50 @@ export function startHttpServer(opts: {
           json(res, ready ? 200 : 503, { ready, ...h });
           return;
         }
+        // ─── Binance Futures routes ──────────────────────────────────────
+        if (opts.binance && path0.startsWith("/api/binance/")) {
+          const b = opts.binance;
+          if (req.method === "GET" && path0 === "/api/binance/state") {
+            json(res, 200, { hasCreds: b.hasCreds(), running: b.isRunning(), state: b.getState(), testnet: b.getTestnet() });
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/set-creds") {
+            const body = await readBody(req);
+            try {
+              const parsed = JSON.parse(body) as { apiKey?: string; apiSecret?: string; testnet?: boolean };
+              if (!parsed.apiKey || !parsed.apiSecret || parsed.apiKey.length < 32 || parsed.apiSecret.length < 32) {
+                json(res, 400, { ok: false, error: "Invalid key/secret (must each be ≥32 chars)" });
+                return;
+              }
+              await b.setCreds(parsed.apiKey, parsed.apiSecret, !!parsed.testnet);
+              json(res, 200, { ok: true });
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+            }
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/clear-creds") {
+            await b.clearCreds();
+            json(res, 200, { ok: true });
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/test") {
+            const r = await b.testConnection();
+            json(res, r.ok ? 200 : 400, r);
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/start") {
+            const r = await b.start();
+            json(res, r.ok ? 200 : 400, r);
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/stop") {
+            const r = await b.stop();
+            json(res, 200, r);
+            return;
+          }
+        }
+
         if (path0 === "/api/state") {
           const s = opts.getState();
           json(res, 200, {
@@ -826,6 +883,19 @@ export function startHttpServer(opts: {
   return {
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
+}
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => {
+      chunks.push(c);
+      // Cap at 64KB to defend against silly bodies; creds are <1KB.
+      if (chunks.reduce((s, x) => s + x.length, 0) > 65536) { reject(new Error("body too large")); req.destroy(); }
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
 }
 
 function json(res: http.ServerResponse, code: number, body: unknown) {

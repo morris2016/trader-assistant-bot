@@ -7,9 +7,61 @@ export function SettingsPanel({ state, doAction, pending }: {
   pending: string | null;
 }) {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
+  // Binance state
+  const [bHasCreds, setBHasCreds] = useState(false);
+  const [bRunning, setBRunning] = useState(false);
+  const [bTestnet, setBTestnet] = useState(false);
+  const [bState, setBState] = useState<any>(null);
+  const [bKey, setBKey] = useState("");
+  const [bSecret, setBSecret] = useState("");
+  const [bUseTestnet, setBUseTestnet] = useState(false);
+  const [bErr, setBErr] = useState<string | null>(null);
+  const [bTestResult, setBTestResult] = useState<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string } | null>(null);
+
+  async function refreshBinance() {
+    try {
+      const r = await api.binanceState();
+      setBHasCreds(r.hasCreds); setBRunning(r.running); setBTestnet(r.testnet); setBState(r.state);
+    } catch {}
+  }
   useEffect(() => {
     api.config().then((r) => setConfig(r.config)).catch(() => {});
+    refreshBinance();
+    const id = setInterval(refreshBinance, 5000);
+    return () => clearInterval(id);
   }, []);
+
+  async function saveBinanceCreds() {
+    setBErr(null);
+    const k = bKey.trim(), s = bSecret.trim();
+    if (!k || !s) { setBErr("Key and secret required"); return; }
+    if (k.length < 32 || s.length < 32) { setBErr("Key/secret look too short (Binance keys are 64 chars)"); return; }
+    const r = await api.binanceSetCreds(k, s, bUseTestnet);
+    if (!r.ok) { setBErr(r.error ?? "Save failed"); return; }
+    setBKey(""); setBSecret("");
+    await refreshBinance();
+  }
+  async function clearBinanceCreds() {
+    if (!confirm("Clear Binance API key + secret? Bot will stop trading.")) return;
+    await api.binanceClearCreds();
+    setBTestResult(null);
+    await refreshBinance();
+  }
+  async function testBinance() {
+    setBTestResult(null);
+    const r = await api.binanceTest();
+    setBTestResult(r);
+  }
+  async function startBinance() {
+    setBTestResult(null);
+    const r = await api.binanceStart();
+    if (!r.ok) setBTestResult({ ok: false, error: r.error });
+    await refreshBinance();
+  }
+  async function stopBinance() {
+    await api.binanceStop();
+    await refreshBinance();
+  }
 
   return (
     <>
@@ -34,6 +86,82 @@ export function SettingsPanel({ state, doAction, pending }: {
           ) : (
             <div className="muted">Not authorized</div>
           )}
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">Binance Futures (crypto trading)</div>
+          <div className="section-sub">15 crypto assets, trained SMC strategy (OB_BULL / OB_BEAR / BOS_UP). Validated +85% WR / +$5,400 over 6 months on $300 / $15 stake.</div>
+        </div>
+        <div className="card card-padded">
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+              <span className={`pill ${bHasCreds ? "pill-green" : "pill-red"}`}>
+                <span className="pill-dot" />{bHasCreds ? "Creds saved" : "No creds"}
+              </span>
+              {bHasCreds && (
+                <span className={`pill ${bRunning ? "pill-green" : "pill-amber"}`}>
+                  <span className="pill-dot" />{bRunning ? "Engine running" : "Stopped"}
+                </span>
+              )}
+              {bHasCreds && (
+                <span className={`pill ${bTestnet ? "pill-cyan" : "pill-red"}`}>
+                  <span className="pill-dot" />{bTestnet ? "TESTNET" : "LIVE"}
+                </span>
+              )}
+            </div>
+
+            {!bHasCreds ? (
+              <>
+                <div className="card-sub">
+                  Enter API Key + Secret. Get a <b>live</b> key at <code>binance.com → API Management</code> (Enable Futures, recommend IP whitelist).
+                  Get a <b>testnet</b> key at <code>testnet.binancefuture.com → API Management</code>. Stored encrypted at rest (AES-256-GCM keyed by BOT_SECRET env).
+                </div>
+                <input type="password" placeholder="API Key (64 chars)" value={bKey} onChange={(e) => { setBKey(e.target.value); setBErr(null); }}
+                  style={{ background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "10px 12px", borderRadius: 6 }} />
+                <input type="password" placeholder="API Secret (64 chars)" value={bSecret} onChange={(e) => { setBSecret(e.target.value); setBErr(null); }}
+                  style={{ background: "#0e1528", color: "#e0e5f5", border: "1px solid #1e2842", padding: "10px 12px", borderRadius: 6 }} />
+                <label style={{ fontSize: 13 }}>
+                  <input type="checkbox" checked={bUseTestnet} onChange={(e) => setBUseTestnet(e.target.checked)} style={{ marginRight: 6 }} />
+                  Testnet (paper trading — recommended first)
+                </label>
+                <div className="row">
+                  <button className="btn btn-primary" onClick={saveBinanceCreds} disabled={pending !== null}>Save</button>
+                </div>
+                {bErr && <div style={{ color: "#d4a35f", fontSize: 12 }}>{bErr}</div>}
+              </>
+            ) : (
+              <>
+                <div className="row">
+                  <button className="btn" onClick={testBinance} disabled={pending !== null}>Test connection</button>
+                  {!bRunning ? (
+                    <button className="btn btn-primary" onClick={startBinance} disabled={pending !== null}>Start trading</button>
+                  ) : (
+                    <button className="btn btn-warn" onClick={stopBinance} disabled={pending !== null}>Stop trading</button>
+                  )}
+                  <button className="btn btn-danger" onClick={clearBinanceCreds} disabled={pending !== null}>Clear keys</button>
+                </div>
+                {bTestResult && (
+                  bTestResult.ok ? (
+                    <div style={{ color: "#5fd4a4", fontSize: 13 }}>
+                      ✓ Connected ({bTestResult.testnet ? "TESTNET" : "LIVE"}) — USDT balance: ${bTestResult.balanceUsdt?.toFixed(2)} (available: ${bTestResult.available?.toFixed(2)})
+                    </div>
+                  ) : (
+                    <div style={{ color: "#d4a35f", fontSize: 13 }}>✗ {bTestResult.error}</div>
+                  )
+                )}
+                {bState && (
+                  <div className="kv-list">
+                    <div className="kv-row"><div className="kv-key">Open positions</div><div className="kv-val mono">{bState.open?.length ?? 0}</div></div>
+                    <div className="kv-row"><div className="kv-key">Closed today</div><div className="kv-val mono">{bState.closed?.filter((c: any) => c.closeEpoch && new Date(c.closeEpoch * 1000).toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10)).length ?? 0}</div></div>
+                    <div className="kv-row"><div className="kv-key">Daily P&L</div><div className="kv-val mono">${(bState.daily?.profit ?? 0).toFixed(2)}</div></div>
+                    <div className="kv-row"><div className="kv-key">Trades opened today</div><div className="kv-val mono">{bState.daily?.tradesOpened ?? 0}</div></div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
