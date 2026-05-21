@@ -204,6 +204,45 @@ export function startHttpServer(opts: {
       const url = new URL(req.url ?? "/", "http://localhost");
       const path0 = url.pathname;
 
+      // ───── HTTP Basic Auth gate ─────────────────────────────────────
+      // Enabled when BOT_PASSWORD env is set. Single operator pattern.
+      // Username defaults to "admin" but configurable via BOT_USERNAME.
+      // Bypassed for /health and /ready (Railway liveness/readiness probes
+      // must reach these without credentials).
+      const requiresAuth = path0 !== "/health" && path0 !== "/ready";
+      const botPassword = process.env.BOT_PASSWORD;
+      if (requiresAuth && botPassword) {
+        const botUsername = process.env.BOT_USERNAME ?? "admin";
+        const hdr = req.headers["authorization"] ?? "";
+        let ok = false;
+        if (hdr.startsWith("Basic ")) {
+          try {
+            const decoded = Buffer.from(hdr.slice(6), "base64").toString("utf8");
+            const idx = decoded.indexOf(":");
+            if (idx > 0) {
+              const u = decoded.slice(0, idx);
+              const p = decoded.slice(idx + 1);
+              // Timing-safe equality on equal-length pairs
+              const uBuf = Buffer.from(u);
+              const expectedU = Buffer.from(botUsername);
+              const pBuf = Buffer.from(p);
+              const expectedP = Buffer.from(botPassword);
+              const uMatch = uBuf.length === expectedU.length && require("node:crypto").timingSafeEqual(uBuf, expectedU);
+              const pMatch = pBuf.length === expectedP.length && require("node:crypto").timingSafeEqual(pBuf, expectedP);
+              ok = uMatch && pMatch;
+            }
+          } catch {}
+        }
+        if (!ok) {
+          res.writeHead(401, {
+            "WWW-Authenticate": 'Basic realm="trader-bot", charset="UTF-8"',
+            "Content-Type": "text/plain; charset=utf-8",
+          });
+          res.end("Unauthorized");
+          return;
+        }
+      }
+
       // ───── API routes ────────────────────────────────────────────────
       if (path0.startsWith("/api/") || path0 === "/health" || path0 === "/ready") {
         if (req.method === "POST" && (path0 === "/api/control/pause" || path0 === "/api/control/resume" || path0 === "/api/control/reset-adaptive" || path0 === "/api/control/reset-daily" || path0 === "/api/control/reset-paper" || path0 === "/api/control/reset-fast-paper" || path0 === "/api/control/update-fast1-config" || path0 === "/api/control/reset-fast2-paper" || path0 === "/api/control/update-fast2-config" || path0 === "/api/control/reset-fast3-paper" || path0 === "/api/control/update-fast3-config" || path0 === "/api/control/reset-fast4-paper" || path0 === "/api/control/update-fast4-config" || path0 === "/api/control/update-real-config" || path0 === "/api/control/close-fast2-position" || path0 === "/api/control/resubscribe" || path0 === "/api/control/reconcile-contracts")) {
