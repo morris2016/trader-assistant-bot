@@ -34,10 +34,21 @@ export class AuthStore {
   private sessionsFile: string;
   private cachedAdmin: AdminRecord | null | undefined = undefined; // undefined = unread
   private sessions: Sessions | null = null;
+  private dirty = false;
+  private flushTimer: NodeJS.Timeout | null = null;
 
   constructor(private stateDir: string) {
     this.adminFile = path.join(stateDir, "admin.json");
     this.sessionsFile = path.join(stateDir, "sessions.json");
+    // Flush dirty sessions every 30s so per-request lastUsedAt updates don't
+    // pound the disk. Worst-case data loss on crash: 30s of lastUsedAt.
+    this.flushTimer = setInterval(() => { this.flush().catch(() => {}); }, 30_000);
+  }
+
+  /** Persist if dirty. Called on login/logout (immediate) and via 30s timer. */
+  private async flush(): Promise<void> {
+    if (!this.dirty || !this.sessions) return;
+    try { await this.saveSessions(); this.dirty = false; } catch {}
   }
 
   async hasAdmin(): Promise<boolean> {
@@ -95,11 +106,15 @@ export class AuthStore {
     const token = randomBytes(32).toString("base64url");
     const sessions = await this.loadSessions();
     sessions[token] = { createdAt: Date.now(), lastUsedAt: Date.now() };
-    await this.saveSessions();
+    this.dirty = true;
+    await this.flush();
     return { ok: true, token };
   }
 
-  /** Check if a session token is currently valid (extends lastUsedAt). */
+  /** Check if a session token is currently valid. Hot path — must not write
+   *  to disk on every request. Updates lastUsedAt in-memory only; the 30s
+   *  flush timer persists it. Expired sessions are deleted in-memory and
+   *  marked dirty for the next flush. */
   async validateSession(token: string): Promise<boolean> {
     if (!token) return false;
     const sessions = await this.loadSessions();
@@ -108,11 +123,11 @@ export class AuthStore {
     const age = Date.now() - s.createdAt;
     if (age > SESSION_TTL_MS) {
       delete sessions[token];
-      await this.saveSessions();
+      this.dirty = true;
       return false;
     }
     s.lastUsedAt = Date.now();
-    await this.saveSessions();
+    this.dirty = true; // flushed by the 30s timer; no disk I/O on the hot path
     return true;
   }
 
@@ -121,7 +136,8 @@ export class AuthStore {
     const sessions = await this.loadSessions();
     if (sessions[token]) {
       delete sessions[token];
-      await this.saveSessions();
+      this.dirty = true;
+      await this.flush();
     }
   }
 

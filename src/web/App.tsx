@@ -17,10 +17,12 @@ import { Fast2Panel } from "./panels/Fast2";
 import { Fast3Panel } from "./panels/Fast3";
 import { Fast4Panel } from "./panels/Fast4";
 import { LogsPanel } from "./panels/Logs";
+import { BinancePanel } from "./panels/Binance";
 
 const REFRESH_MS = 3000;
 
 type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "fast4" | "adaptive" | "logs" | "settings";
+type Mode = "deriv" | "binance";
 
 // SILENCED 2026-05-19: synth/fast3/fast4 tabs hidden while Fade iteration is
 // active. Their panels still build (no runtime cost) but aren't reachable
@@ -40,6 +42,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
 
 export function App() {
   const [tab, setTab] = useState<TabId>("overview");
+  const [mode, setMode] = useState<Mode>("deriv");
   const [state, setState] = useState<StateResp | null>(null);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
   const [subs, setSubs] = useState<Subscription[]>([]);
@@ -86,20 +89,27 @@ export function App() {
       <Sidebar tab={tab} setTab={setTab} state={state} subs={subs} strategies={strategies} />
       <div className="main">
         <Header state={state} stale={stale} error={error} />
-        {!state && !error && <SkeletonGrid />}
-        {!state && error && <div className="banner banner-danger">⚠ {error}</div>}
-        {state && (
+        <ModeSwitcher mode={mode} setMode={setMode} />
+        {mode === "binance" ? (
+          <BinancePanel pending={actionPending} />
+        ) : (
           <>
-            {tab === "overview"   && <OverviewPanel state={state} strategies={strategies} doAction={doAction} pending={actionPending} />}
-            {tab === "charts"     && <ChartsPanel subs={subs} />}
-            {tab === "real"       && <RealPanel state={state} strategies={strategies} />}
-            {tab === "synth"      && <Fast2Panel state={state} doAction={doAction} pending={actionPending} />}
-            {tab === "fade"       && <FastPanel state={state} doAction={doAction} pending={actionPending} />}
-            {tab === "fast3"      && <Fast3Panel state={state} doAction={doAction} pending={actionPending} />}
-            {tab === "fast4"      && <Fast4Panel state={state} doAction={doAction} pending={actionPending} />}
-            {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
-            {tab === "logs"       && <LogsPanel />}
-            {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}
+            {!state && !error && <SkeletonGrid />}
+            {!state && error && <div className="banner banner-danger">⚠ {error}</div>}
+            {state && (
+              <>
+                {tab === "overview"   && <OverviewPanel state={state} strategies={strategies} doAction={doAction} pending={actionPending} />}
+                {tab === "charts"     && <ChartsPanel subs={subs} />}
+                {tab === "real"       && <RealPanel state={state} strategies={strategies} />}
+                {tab === "synth"      && <Fast2Panel state={state} doAction={doAction} pending={actionPending} />}
+                {tab === "fade"       && <FastPanel state={state} doAction={doAction} pending={actionPending} />}
+                {tab === "fast3"      && <Fast3Panel state={state} doAction={doAction} pending={actionPending} />}
+                {tab === "fast4"      && <Fast4Panel state={state} doAction={doAction} pending={actionPending} />}
+                {tab === "adaptive"   && <AdaptivePanel state={state} doAction={doAction} pending={actionPending} />}
+                {tab === "logs"       && <LogsPanel />}
+                {tab === "settings"   && <SettingsPanel state={state} doAction={doAction} pending={actionPending} />}
+              </>
+            )}
           </>
         )}
         <Footer state={state} />
@@ -214,6 +224,27 @@ function Header({ state, stale, error }: { state: StateResp | null; stale: boole
 
 function titleForTab() {
   return "Dashboard";
+}
+
+function ModeSwitcher({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => void }) {
+  const baseStyle: React.CSSProperties = {
+    padding: "8px 18px", borderRadius: 8, border: "1px solid #1e2842",
+    background: "#0f1626", color: "#8a95b8", cursor: "pointer",
+    fontSize: 14, fontWeight: 600,
+  };
+  const activeStyle: React.CSSProperties = {
+    ...baseStyle, background: "#4a89e0", color: "#fff", border: "1px solid #4a89e0",
+  };
+  return (
+    <div style={{ display: "flex", gap: 10, marginBottom: 16, paddingBottom: 12, borderBottom: "1px solid #1e2842" }}>
+      <button style={mode === "deriv" ? activeStyle : baseStyle} onClick={() => setMode("deriv")}>
+        Deriv
+      </button>
+      <button style={mode === "binance" ? activeStyle : baseStyle} onClick={() => setMode("binance")}>
+        Binance
+      </button>
+    </div>
+  );
 }
 
 function SkeletonGrid() {

@@ -223,9 +223,14 @@ export function startHttpServer(opts: {
       const isStatic = !path0.startsWith("/api/") && !isHealth;
       const requiresAuth = !isAuthRoute && !isHealth && !isStatic;
       if (requiresAuth && opts.auth) {
-        const cookie = req.headers["cookie"] ?? "";
-        const session = parseSessionCookie(cookie);
-        const valid = session ? await opts.auth.validateSession(session) : false;
+        let valid = false;
+        try {
+          const cookie = req.headers["cookie"] ?? "";
+          const session = parseSessionCookie(cookie);
+          if (session) valid = await opts.auth.validateSession(session);
+        } catch (e) {
+          opts.logger.error("auth middleware error", { err: (e as Error).message });
+        }
         if (!valid) {
           json(res, 401, { ok: false, error: "Not authenticated" });
           return;
