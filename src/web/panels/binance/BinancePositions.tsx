@@ -4,6 +4,12 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
 
+function binanceUrl(symbol: string, testnet: boolean): string {
+  return testnet
+    ? `https://testnet.binancefuture.com/en/futures/${symbol}`
+    : `https://www.binance.com/en/futures/${symbol}`;
+}
+
 export function BinancePositionsPanel() {
   const [bs, setBs] = useState<any>(null);
   useEffect(() => {
@@ -17,6 +23,7 @@ export function BinancePositionsPanel() {
   if (!bs.hasCreds) return <div className="banner banner-warn">No Binance credentials. Go to Settings.</div>;
 
   const open = bs.state?.open ?? [];
+  const testnet = !!bs.testnet;
 
   return (
     <div className="section">
@@ -42,7 +49,17 @@ export function BinancePositionsPanel() {
                 const pct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
                 return (
                   <tr key={t.id}>
-                    <td className="mono">{t.asset}</td>
+                    <td className="mono">
+                      <a
+                        href={binanceUrl(t.asset, testnet)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`Open ${t.asset} on Binance Futures`}
+                        style={{ color: "#7fb3ff", textDecoration: "none" }}
+                      >
+                        {t.asset} ↗
+                      </a>
+                    </td>
                     <td>{t.pattern}</td>
                     <td><span className={`pill ${t.side === "LONG" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
                     <td className="mono">${(+t.stake).toFixed(2)}</td>

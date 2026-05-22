@@ -3,6 +3,12 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
 
+function binanceUrl(symbol: string, testnet: boolean): string {
+  return testnet
+    ? `https://testnet.binancefuture.com/en/futures/${symbol}`
+    : `https://www.binance.com/en/futures/${symbol}`;
+}
+
 export function BinanceTradesPanel() {
   const [bs, setBs] = useState<any>(null);
   const [filter, setFilter] = useState<string>("");
@@ -18,6 +24,7 @@ export function BinanceTradesPanel() {
 
   const closed = (bs.state?.closed ?? []).slice().sort((a: any, b: any) => (b.closeEpoch ?? 0) - (a.closeEpoch ?? 0));
   const filtered = filter ? closed.filter((c: any) => c.asset === filter) : closed;
+  const testnet = !!bs.testnet;
 
   const totalPnl = filtered.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0);
   const wins = filtered.filter((c: any) => (c.pnl ?? 0) > 0).length;
@@ -74,7 +81,17 @@ export function BinanceTradesPanel() {
                 {filtered.slice(0, 200).map((t: any) => (
                   <tr key={t.id}>
                     <td className="muted">{t.closeEpoch ? new Date(t.closeEpoch * 1000).toISOString().slice(5, 16).replace("T", " ") : "—"}</td>
-                    <td className="mono">{t.asset}</td>
+                    <td className="mono">
+                      <a
+                        href={binanceUrl(t.asset, testnet)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`Open ${t.asset} on Binance Futures`}
+                        style={{ color: "#7fb3ff", textDecoration: "none" }}
+                      >
+                        {t.asset} ↗
+                      </a>
+                    </td>
                     <td>{t.pattern}</td>
                     <td><span className={`pill ${t.side === "LONG" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
                     <td className="mono">${(+t.entryPrice).toFixed(5)}</td>
