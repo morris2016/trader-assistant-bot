@@ -5,7 +5,7 @@
 //   - Top performing assets today
 
 import React, { useEffect, useState } from "react";
-import { api } from "../../api";
+import { api, eatToday, eatDateOf } from "../../api";
 
 export function BinanceOverviewPanel() {
   const [bs, setBs] = useState<any>(null);
@@ -36,8 +36,8 @@ export function BinanceOverviewPanel() {
   }
 
   const state = bs.state ?? {};
-  const today = new Date().toISOString().slice(0, 10);
-  const closedToday = (state.closed ?? []).filter((c: any) => c.closeEpoch && new Date(c.closeEpoch * 1000).toISOString().slice(0, 10) === today);
+  const today = eatToday();
+  const closedToday = (state.closed ?? []).filter((c: any) => c.closeEpoch && eatDateOf(c.closeEpoch) === today);
   const winsToday = closedToday.filter((c: any) => (c.pnl ?? 0) > 0).length;
   const lossesToday = closedToday.filter((c: any) => (c.pnl ?? 0) <= 0).length;
   const dailyProfit = closedToday.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0);

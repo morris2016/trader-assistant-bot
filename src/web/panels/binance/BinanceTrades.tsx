@@ -1,7 +1,7 @@
 // Closed trade history — most recent at top, filterable by asset.
 
 import React, { useEffect, useState } from "react";
-import { api } from "../../api";
+import { api, fmtEatDateTime } from "../../api";
 
 function binanceUrl(symbol: string, testnet: boolean): string {
   return testnet
@@ -73,14 +73,14 @@ export function BinanceTradesPanel() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Closed</th><th>Asset</th><th>Pattern</th><th>Side</th>
+                  <th>Closed (EAT)</th><th>Asset</th><th>Pattern</th><th>Side</th>
                   <th>Entry</th><th>Exit</th><th>Stake</th><th>P&amp;L</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.slice(0, 200).map((t: any) => (
                   <tr key={t.id}>
-                    <td className="muted">{t.closeEpoch ? new Date(t.closeEpoch * 1000).toISOString().slice(5, 16).replace("T", " ") : "—"}</td>
+                    <td className="muted">{t.closeEpoch ? fmtEatDateTime(t.closeEpoch) : "—"}</td>
                     <td className="mono">
                       <a
                         href={binanceUrl(t.asset, testnet)}

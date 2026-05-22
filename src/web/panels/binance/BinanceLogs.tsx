@@ -3,11 +3,11 @@
 // from the BinanceEngine: opened/closed trades, errors, config updates.
 
 import React, { useEffect, useRef, useState } from "react";
-import { api, type LogEntry } from "../../api";
+import { api, type LogEntry, isoToEatHms } from "../../api";
 
 function formatEntry(e: LogEntry): string {
   const { ts, level, msg, ...meta } = e;
-  const t = ts.length >= 19 ? ts.slice(11, 19) : ts;
+  const t = isoToEatHms(ts);
   const metaStr = Object.entries(meta).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
   return `${t} ${level.toUpperCase().padEnd(5)} ${msg}${metaStr ? "  " + metaStr : ""}`;
 }

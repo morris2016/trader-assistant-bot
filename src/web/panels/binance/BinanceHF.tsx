@@ -3,7 +3,7 @@
 // equity curve, and filtered HF-only logs.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api, type BinanceConfig, type LogEntry } from "../../api";
+import { api, type BinanceConfig, type LogEntry, fmtEatTime, eatToday, eatDateOf, isoToEatHms } from "../../api";
 
 const HF_PATTERNS = ["BB_UP_SHORT", "BB_LOW_LONG"] as const;
 type HfPattern = (typeof HF_PATTERNS)[number];
@@ -14,7 +14,6 @@ function binanceUrl(symbol: string, testnet: boolean): string {
     ? `https://testnet.binancefuture.com/en/futures/${symbol}`
     : `https://www.binance.com/en/futures/${symbol}`;
 }
-function todayUtc(): string { return new Date().toISOString().slice(0, 10); }
 
 export function BinanceHFPanel() {
   const [bs, setBs] = useState<any>(null);
@@ -124,8 +123,8 @@ export function BinanceHFPanel() {
   const testnet = !!bs.testnet;
   const allOpen = (bs.state?.open ?? []) as any[];
   const hfOpen = allOpen.filter((t) => isHf(t.pattern));
-  const today = todayUtc();
-  const hfClosedToday = hfClosedAll.filter((t) => t.closeEpoch && new Date(t.closeEpoch * 1000).toISOString().slice(0, 10) === today);
+  const today = eatToday();
+  const hfClosedToday = hfClosedAll.filter((t) => t.closeEpoch && eatDateOf(t.closeEpoch) === today);
   const todayPnl = hfClosedToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
 
   async function doCancel(id: string) {
@@ -218,7 +217,7 @@ export function BinanceHFPanel() {
                   <th>Asset</th><th>Pattern</th><th>Side</th>
                   <th>Stake</th><th>Lev</th>
                   <th>Entry</th><th>Peak</th><th>Δ%</th>
-                  <th>Armed</th><th>Opened</th><th></th>
+                  <th>Armed</th><th>Opened (EAT)</th><th></th>
                 </tr>
               </thead>
               <tbody>
@@ -244,7 +243,7 @@ export function BinanceHFPanel() {
                         {pct >= 0 ? "+" : ""}{pct.toFixed(2)}%
                       </td>
                       <td>{t.armed ? <span className="pill pill-green">●</span> : <span className="muted">·</span>}</td>
-                      <td className="muted">{new Date(t.entryEpoch * 1000).toISOString().slice(11, 16)}</td>
+                      <td className="muted">{fmtEatTime(t.entryEpoch)}</td>
                       <td>
                         <button
                           className="btn btn-warn"
@@ -310,11 +309,11 @@ export function BinanceHFPanel() {
           ) : (
             <table className="table">
               <thead>
-                <tr><th>Time</th><th>Asset</th><th>Pattern(s)</th></tr>
+                <tr><th>Time (EAT)</th><th>Asset</th><th>Pattern(s)</th></tr>
               </thead>
               <tbody>
                 {recentSignals.map((e, i) => {
-                  const t = (e.ts ?? "").slice(11, 19);
+                  const t = isoToEatHms(e.ts ?? "");
                   const asset = (e as any).asset ?? "";
                   const sigs = (e as any).signals as Array<{ pattern: string; side: string; entryPrice: number }> | undefined;
                   return (
@@ -355,7 +354,7 @@ export function BinanceHFPanel() {
               <div className="muted">No HF log entries yet. Enable the HF stack to see activity.</div>
             ) : (
               logs.slice().reverse().slice(0, 200).map((e, i) => {
-                const t = (e.ts ?? "").slice(11, 19);
+                const t = isoToEatHms(e.ts ?? "");
                 const color = e.level === "error" ? "#d4655f" : e.level === "warn" ? "#d4a35f" : e.level === "info" ? "#a8b3d5" : "#6b7896";
                 const { ts, level, msg, ...meta } = e;
                 const metaStr = Object.entries(meta).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
@@ -489,7 +488,7 @@ function EquitySvg({ points }: { points: Array<{ ts: number; balance: number }> 
   const zeroY = yScale(0);
   const lastY = ys[ys.length - 1];
   const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${xScale(p.ts).toFixed(1)},${yScale(p.balance).toFixed(1)}`).join(" ");
-  const fmtDate = (ts: number) => new Date(ts * 1000).toISOString().slice(5, 10);
+  const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Africa/Nairobi" }).slice(5);
   return (
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ background: "#0e1528", borderRadius: 4 }}>
       <line x1={padL} y1={zeroY} x2={w - padR} y2={zeroY} stroke="#1e2842" strokeDasharray="2,3" />

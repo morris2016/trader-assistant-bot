@@ -2,7 +2,7 @@
 // armed status, and unrealized P&L.
 
 import React, { useEffect, useState } from "react";
-import { api } from "../../api";
+import { api, fmtEatTime } from "../../api";
 
 function binanceUrl(symbol: string, testnet: boolean): string {
   return testnet
@@ -41,7 +41,7 @@ export function BinancePositionsPanel() {
                 <th>Asset</th><th>Pattern</th><th>Side</th>
                 <th>Stake</th><th>Lev</th>
                 <th>Entry</th><th>Peak</th><th>Δ%</th>
-                <th>Armed</th><th>Opened</th>
+                <th>Armed</th><th>Opened (EAT)</th>
               </tr>
             </thead>
             <tbody>
@@ -68,7 +68,7 @@ export function BinancePositionsPanel() {
                     <td className="mono">${(+t.peakFav).toFixed(5)}</td>
                     <td className="mono" style={{ color: pct >= 0 ? "#5fd4a4" : "#d4655f" }}>{pct >= 0 ? "+" : ""}{pct.toFixed(2)}%</td>
                     <td>{t.armed ? <span className="pill pill-green">●</span> : <span className="muted">·</span>}</td>
-                    <td className="muted">{new Date(t.entryEpoch * 1000).toISOString().slice(11, 16)}</td>
+                    <td className="muted">{fmtEatTime(t.entryEpoch)}</td>
                   </tr>
                 );
               })}

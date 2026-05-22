@@ -499,6 +499,43 @@ export function fmtAgo(ms: number | null): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+// ── EAT (East Africa Time, UTC+3) formatters for the Binance panels ──────
+// Uses Intl with timeZone="Africa/Nairobi". Stable across DST changes
+// (EAT has no DST, so practically: +03:00 always).
+const EAT_TZ = "Africa/Nairobi";
+export function fmtEatTime(epochSec: number): string {
+  if (!epochSec) return "—";
+  return new Date(epochSec * 1000).toLocaleTimeString("en-GB", {
+    timeZone: EAT_TZ, hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+}
+export function fmtEatTimeSec(epochSec: number): string {
+  if (!epochSec) return "—";
+  return new Date(epochSec * 1000).toLocaleTimeString("en-GB", {
+    timeZone: EAT_TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  });
+}
+export function fmtEatDateTime(epochSec: number): string {
+  if (!epochSec) return "—";
+  const d = new Date(epochSec * 1000);
+  const date = d.toLocaleDateString("en-CA", { timeZone: EAT_TZ }); // YYYY-MM-DD
+  const time = d.toLocaleTimeString("en-GB", { timeZone: EAT_TZ, hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${date.slice(5)} ${time}`; // "MM-DD HH:MM"
+}
+export function eatToday(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: EAT_TZ });
+}
+export function eatDateOf(epochSec: number): string {
+  return new Date(epochSec * 1000).toLocaleDateString("en-CA", { timeZone: EAT_TZ });
+}
+/** Reformat a server-side log ISO timestamp (UTC) into EAT HH:MM:SS. */
+export function isoToEatHms(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(11, 19); // fallback
+  return d.toLocaleTimeString("en-GB", { timeZone: EAT_TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
 export function fmtGranularity(gr: number): string {
   if (gr === 60) return "1m";
   if (gr === 300) return "5m";
