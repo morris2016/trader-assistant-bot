@@ -732,8 +732,22 @@ export class BinanceEngine extends EventEmitter {
       if (!f) { this.emit("error", new Error(`No filters for ${sym} — cannot place order`)); return; }
       const qtyRaw = notional / refPrice;
       const qty = roundStep(qtyRaw, f.stepSize);
-      if (qty < f.minQty) { this.emit("error", new Error(`${sym} qty ${qty} below minQty ${f.minQty}`)); return; }
-      if (qty * refPrice < f.minNotional) { this.emit("error", new Error(`${sym} notional ${(qty * refPrice).toFixed(2)} below minNotional ${f.minNotional}`)); return; }
+      if (qty < f.minQty) {
+        // Not an error — it just means the stake×leverage is too small for
+        // this asset's price tier. e.g., $30 notional on BTC at $77k rounds
+        // to 0 quantity. Emit as info so it doesn't keep alerting.
+        const minStakeNeeded = (f.minQty * refPrice / (leverageOverride ?? this.leverage)).toFixed(2);
+        this.emit("info", `skip ${sym} ${s.pattern}: stake $${stake} too small (need ~$${minStakeNeeded} at ${leverageOverride ?? this.leverage}× for min qty ${f.minQty} @ $${refPrice})`, {
+          asset: sym, pattern: s.pattern, stake, refPrice, minQty: f.minQty, minStakeNeeded,
+        });
+        return;
+      }
+      if (qty * refPrice < f.minNotional) {
+        this.emit("info", `skip ${sym} ${s.pattern}: notional $${(qty * refPrice).toFixed(2)} below minNotional $${f.minNotional}`, {
+          asset: sym, pattern: s.pattern, notional: qty * refPrice, minNotional: f.minNotional,
+        });
+        return;
+      }
 
       // Logical-trade UUID is embedded in clientOrderId so user-data stream
       // updates can be matched back to this trade. Prefix differs by group
@@ -923,7 +937,13 @@ export class BinanceEngine extends EventEmitter {
       // Index by (symbol, positionSide)
       const posMap = new Map<string, number>();
       for (const p of positions) posMap.set(`${p.symbol}:${p.positionSide}`, Math.abs(p.positionAmt));
+      const nowSec = Math.floor(Date.now() / 1000);
       for (const t of [...this.open]) {
+        // Skip very young trades — Binance's positionRisk endpoint can lag
+        // 1-5s behind a market order ack, so a fresh trade looks "flat" on
+        // the API and the reconciler would spuriously close it at entry
+        // price for $0 PnL. 30s is enough for any reasonable propagation lag.
+        if (nowSec - t.entryEpoch < 30) continue;
         const sideKey = this.hedgeMode ? t.side : "BOTH";
         const amt = posMap.get(`${t.asset}:${sideKey}`) ?? 0;
         if (amt < 1e-9) {
