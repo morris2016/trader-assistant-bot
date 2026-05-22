@@ -65,7 +65,8 @@ const TRAIL_ARM_ATR = 1.0;
 const TRAIL_RETRACE_ATR = 0.3;
 const ATR_PERIOD = 14;
 const SMA_PERIOD = 50;
-const KLINE_HISTORY = 200;
+const KLINE_HISTORY = 500;  // ~21 days of 1h bars — gives swing-detection + SMA50 + pending OBs from past 3 weeks
+const STRUCTURE_OB_MAX_AGE = 50; // bars — pending OB zones older than this get pruned
 
 function utcToday(): string { return new Date().toISOString().slice(0, 10); }
 function emptyDaily(): BinanceState["daily"] { return { date: utcToday(), profit: 0, tradesOpened: 0, capHit: false }; }
@@ -111,6 +112,139 @@ function fmtPrice(price: number, precision: number): string {
 }
 
 type Signal = { pattern: BinanceTrade["pattern"]; side: BinanceTradeSide; entryPrice: number; atrEntry: number };
+
+/** Cached "active" structure per asset — built during warmup replay, updated
+ *  per bar in live mode. Lets the engine fire on OB zones that formed before
+ *  startup but haven't been retraced yet. */
+type ActiveStructure = {
+  /** OB zones that have formed but haven't been retraced (still pending entry).
+   *  When current bar's wick enters the zone, fire OB_BULL or OB_BEAR. */
+  pendingOBs: Array<{
+    bull: boolean;       // true=bullish OB (entry on long retrace), false=bearish
+    formedAt: number;    // bar index when the OB displacement happened
+    obIdx: number;       // bar index of the OB candle itself
+    zoneHigh: number;
+    zoneLow: number;
+  }>;
+  /** Most recent confirmed swing high (for BOS_UP detection). */
+  lastSwingHigh: number;
+  lastSwingHighAt: number;
+  lastSwingLow: number;
+  lastSwingLowAt: number;
+};
+
+function emptyStructure(): ActiveStructure {
+  return { pendingOBs: [], lastSwingHigh: -Infinity, lastSwingHighAt: -1, lastSwingLow: Infinity, lastSwingLowAt: -1 };
+}
+
+/** Update structure cache for a single bar transition. Idempotent per bar.
+ *  Used by both warmup replay and live forward-walk. */
+function updateStructure(structure: ActiveStructure, bars: Kline[], i: number): void {
+  // 1) Detect new OB formations: current bar i is a displacement candle
+  const a = computeATR(bars, i);
+  if (isFinite(a) && a > 0) {
+    // Bullish displacement → look back for the bearish OB candle
+    if (bars[i].close > bars[i].open && (bars[i].close - bars[i].open) >= DISP_ATR_MIN * a) {
+      for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
+        if (bars[j].close < bars[j].open) {
+          structure.pendingOBs.push({
+            bull: true, formedAt: i, obIdx: j,
+            zoneHigh: Math.max(bars[j].open, bars[j].close),
+            zoneLow: bars[j].low,
+          });
+          break;
+        }
+      }
+    }
+    // Bearish displacement
+    if (bars[i].close < bars[i].open && (bars[i].open - bars[i].close) >= DISP_ATR_MIN * a) {
+      for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
+        if (bars[j].close > bars[j].open) {
+          structure.pendingOBs.push({
+            bull: false, formedAt: i, obIdx: j,
+            zoneHigh: bars[j].high,
+            zoneLow: Math.min(bars[j].open, bars[j].close),
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  // 2) Confirm a new swing high/low (looks back SWING_LB on each side of bar j = i - SWING_LB)
+  const j = i - SWING_LB;
+  if (j >= SWING_LB) {
+    let isHigh = true, isLow = true;
+    for (let k = j - SWING_LB; k <= j + SWING_LB; k++) {
+      if (k === j) continue;
+      if (bars[k].high > bars[j].high) isHigh = false;
+      if (bars[k].low < bars[j].low) isLow = false;
+    }
+    if (isHigh && bars[j].high > structure.lastSwingHigh) {
+      structure.lastSwingHigh = bars[j].high;
+      structure.lastSwingHighAt = j;
+    }
+    if (isLow && bars[j].low < structure.lastSwingLow) {
+      structure.lastSwingLow = bars[j].low;
+      structure.lastSwingLowAt = j;
+    }
+  }
+
+  // 3) Prune OBs that are already retraced OR too old
+  structure.pendingOBs = structure.pendingOBs.filter((ob) => {
+    if (i - ob.formedAt > STRUCTURE_OB_MAX_AGE) return false;
+    // Check if any bar BETWEEN obIdx+1 and i has touched the zone
+    for (let k = ob.formedAt + 1; k <= i; k++) {
+      const touched = ob.bull
+        ? (bars[k].low <= ob.zoneHigh && bars[k].low >= ob.zoneLow)
+        : (bars[k].high >= ob.zoneLow && bars[k].high <= ob.zoneHigh);
+      if (touched) return false; // already fired its signal — gone
+    }
+    return true;
+  });
+}
+
+/** Warmup: replay all historical bars to build the structure cache.
+ *  Does NOT emit signals (we're past those bars already). */
+function buildStructureFromHistory(bars: Kline[]): ActiveStructure {
+  const s = emptyStructure();
+  // Start from the earliest bar that has both ATR + lookback context
+  const startIdx = Math.max(SWING_LB * 2 + 5, ATR_PERIOD + 1);
+  for (let i = startIdx; i < bars.length; i++) {
+    updateStructure(s, bars, i);
+  }
+  return s;
+}
+
+/** Cache-aware signal detection. Checks current bar against pending OBs from
+ *  the structure cache (including ones formed long before the bot started). */
+function detectSignalsFromCache(bars: Kline[], i: number, structure: ActiveStructure): Signal[] {
+  const out: Signal[] = [];
+  const a = computeATR(bars, i);
+  if (!isFinite(a) || a <= 0) return out;
+  const sign = smaSignAt(bars, i);
+
+  // OB triggers: any pending zone touched by THIS bar
+  for (const ob of structure.pendingOBs) {
+    if (ob.formedAt >= i) continue; // can't re-trigger on the formation bar itself
+    if (ob.bull) {
+      if (bars[i].low <= ob.zoneHigh && bars[i].low >= ob.zoneLow) {
+        out.push({ pattern: "OB_BULL", side: decideSide("OB_BULL", sign), entryPrice: ob.zoneHigh, atrEntry: a });
+      }
+    } else {
+      if (bars[i].high >= ob.zoneLow && bars[i].high <= ob.zoneHigh) {
+        out.push({ pattern: "OB_BEAR", side: decideSide("OB_BEAR", sign), entryPrice: ob.zoneLow, atrEntry: a });
+      }
+    }
+  }
+
+  // BOS_UP: close > most recent confirmed swing high (from cache, no lookback limit)
+  if (isFinite(structure.lastSwingHigh) && bars[i].close > structure.lastSwingHigh && bars[i - 1].close <= structure.lastSwingHigh) {
+    out.push({ pattern: "BOS_UP", side: decideSide("BOS_UP", sign), entryPrice: bars[i].close, atrEntry: a });
+  }
+
+  return out;
+}
 
 function detectSignals(bars: Kline[], i: number): Signal[] {
   const out: Signal[] = [];
@@ -169,6 +303,9 @@ function detectSignals(bars: Kline[], i: number): Signal[] {
 export class BinanceEngine extends EventEmitter {
   private client: BinanceClient;
   private bars: Map<string, Kline[]> = new Map();
+  /** Per-asset active-structure cache: pending OB zones + latest swing levels.
+   *  Built once during startup replay; updated incrementally on each new bar. */
+  private structures: Map<string, ActiveStructure> = new Map();
   private filters: Record<string, SymbolFilters> = {};
   /** Hedge mode = LONG and SHORT positions tracked separately by Binance.
    *  Required for our multi-pattern same-asset overlaps. Set on startup. */
@@ -246,11 +383,17 @@ export class BinanceEngine extends EventEmitter {
       this.emit("error", new Error(`Failed to start user-data stream: ${(e as Error).message}`));
     }
 
-    // Seed klines for each asset
+    // Seed klines for each asset + replay structure cache so bot recognises
+    // pending OB zones that formed before startup.
     for (const sym of this.assets) {
       try {
         const k = await this.client.getKlines(sym, "1h", KLINE_HISTORY);
         this.bars.set(sym, k);
+        const struct = buildStructureFromHistory(k);
+        this.structures.set(sym, struct);
+        // Logging warmup outcome helps verify the cache populated properly
+        const pending = struct.pendingOBs.length;
+        console.log(`[binance warmup ${sym}] ${k.length} bars, ${pending} pending OBs, swingHigh=${isFinite(struct.lastSwingHigh) ? struct.lastSwingHigh.toFixed(4) : "—"}, swingLow=${isFinite(struct.lastSwingLow) ? struct.lastSwingLow.toFixed(4) : "—"}`);
         await this.client.setMarginType(sym, "ISOLATED").catch(() => undefined);
         await this.client.setLeverage(sym, this.leverage).catch((e) => this.emit("error", e as Error));
       } catch (e) {
@@ -302,7 +445,10 @@ export class BinanceEngine extends EventEmitter {
     // Per-asset disable
     if (this.perAssetEnabled[sym] === false) return;
     const i = buf.length - 1;
-    const sigs = detectSignals(buf, i);
+    const structure = this.structures.get(sym) ?? emptyStructure();
+    // Use cache-based detection — checks pending OBs from past (including
+    // pre-startup) instead of just lookback of 20 bars from current.
+    const sigs = detectSignalsFromCache(buf, i, structure);
     for (const s of sigs) {
       // Per-pattern disable
       if (this.perPatternEnabled[s.pattern] === false) continue;
@@ -313,6 +459,10 @@ export class BinanceEngine extends EventEmitter {
       if (stake < 1) continue;
       await this.openTrade(sym, s, stake);
     }
+    // After firing on the latest bar, advance the structure cache so the
+    // next bar's check has fresh state (new OBs, new swings, pruned zones).
+    updateStructure(structure, buf, i);
+    this.structures.set(sym, structure);
   }
 
   private async openTrade(sym: string, s: Signal, stake: number) {
