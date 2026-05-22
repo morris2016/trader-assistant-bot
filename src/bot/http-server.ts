@@ -576,6 +576,32 @@ export function startHttpServer(opts: {
             json(res, 200, { config: b.getConfig() });
             return;
           }
+          if (req.method === "GET" && path0 === "/api/binance/diag") {
+            // Surface state-dir contents so the operator can verify Railway
+            // volume mount actually persists across deploys. If file timestamps
+            // are newer than the bot's startTs every redeploy, the volume
+            // isn't mounted and creds will reset on each push.
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const stateDir = process.env.STATE_DIR ?? "./state";
+            const files = ["admin.json", "sessions.json", "binance-creds.json", "binance-config.json"];
+            const fileInfo = files.map((f) => {
+              const fp = path.join(stateDir, f);
+              try {
+                const st = fs.statSync(fp);
+                return { file: f, exists: true, sizeBytes: st.size, mtime: st.mtime.toISOString() };
+              } catch {
+                return { file: f, exists: false };
+              }
+            });
+            json(res, 200, {
+              stateDir,
+              stateDirExists: fs.existsSync(stateDir),
+              files: fileInfo,
+              note: "If admin.json mtime is newer than the bot's start time and your keys keep resetting on redeploy, the Railway volume isn't mounted at this stateDir. Attach a volume at this path in the Railway dashboard.",
+            });
+            return;
+          }
           if (req.method === "POST" && path0 === "/api/binance/update-config") {
             const body = await readBody(req);
             try {

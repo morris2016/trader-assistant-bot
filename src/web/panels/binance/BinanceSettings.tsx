@@ -13,6 +13,7 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
   const [err, setErr] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; balanceUsdt?: number; available?: number; testnet?: boolean; error?: string } | null>(null);
   const [config, setConfig] = useState<BinanceConfig | null>(null);
+  const [diag, setDiag] = useState<any>(null);
   const [stake, setStake] = useState("15");
   const [leverage, setLeverage] = useState("30");
   const [dailyMaxLoss, setDailyMaxLoss] = useState("100");
@@ -35,6 +36,7 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
       setDailyMaxLoss(String(c.config.dailyMaxLoss));
       setPerTradeMaxStake(String(c.config.perTradeMaxStake));
     } catch {}
+    try { setDiag(await api.binanceDiag()); } catch {}
   }
   useEffect(() => { refresh(); const id = setInterval(refresh, 5000); return () => clearInterval(id); }, []);
 
@@ -138,6 +140,38 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
           </div>
         </div>
       </div>
+
+      {diag && (
+        <div className="section">
+          <div className="section-header">
+            <div className="section-title">Persistence diagnostic</div>
+            <div className="section-sub">If your API keys keep resetting on each redeploy, the Railway volume isn't mounted. Check the file mtimes vs the bot's start time below.</div>
+          </div>
+          <div className="card card-padded">
+            <div className="kv-list">
+              <div className="kv-row"><div className="kv-key">State directory</div><div className="kv-val mono">{diag.stateDir}</div></div>
+              <div className="kv-row"><div className="kv-key">Directory exists</div><div className="kv-val">{diag.stateDirExists ? "✓ yes" : "✗ no"}</div></div>
+            </div>
+            <table className="table" style={{ marginTop: 10 }}>
+              <thead><tr><th>File</th><th>Exists</th><th>Size</th><th>Last modified (UTC)</th></tr></thead>
+              <tbody>
+                {diag.files.map((f: any) => (
+                  <tr key={f.file}>
+                    <td className="mono">{f.file}</td>
+                    <td>{f.exists ? "✓" : <span className="muted">—</span>}</td>
+                    <td className="mono">{f.exists ? `${f.sizeBytes}b` : ""}</td>
+                    <td className="mono muted">{f.exists ? f.mtime?.slice(0, 19).replace("T", " ") : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="card-sub" style={{ marginTop: 10 }}>
+              <b>Railway fix</b>: Service → Settings → Volumes → Add volume → mount path <code>{diag.stateDir}</code>.
+              Any size will do (1GB is plenty). After attaching, the next deploy preserves all state across restarts.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="section">
         <div className="section-header">
