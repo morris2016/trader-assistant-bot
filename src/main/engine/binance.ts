@@ -651,10 +651,15 @@ export class BinanceEngine extends EventEmitter {
       try {
         let buf = this.bars15m.get(sym);
         if (!buf) {
-          // First touch — seed the buffer with HF_KLINE_HISTORY bars of 15m history
+          // First touch — seed the buffer with HF_KLINE_HISTORY bars of 15m history.
+          // Binance's klines endpoint includes the CURRENTLY-FORMING bar at the
+          // tail. We pop it so `buf` only contains fully-closed bars, otherwise
+          // the next bar boundary's close would have the same openTime as our
+          // tail and the close-detection branch would never fire.
           buf = await this.client.getKlines(sym, "15m", HF_KLINE_HISTORY);
+          if (buf.length > 0) buf.pop();
           this.bars15m.set(sym, buf);
-          this.emit("info", `HF warmup ${sym}: ${buf.length} 15m bars`, { asset: sym, bars: buf.length });
+          this.emit("info", `HF warmup ${sym}: ${buf.length} 15m bars (in-progress bar dropped)`, { asset: sym, bars: buf.length });
           continue; // skip detection on warmup tick — next bar close fires it
         }
         const latest = await this.client.getKlines(sym, "15m", 2);
