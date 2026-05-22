@@ -462,12 +462,26 @@ export class BinanceEngine extends EventEmitter {
     if (opts.perAssetEnabled) this.perAssetEnabled = opts.perAssetEnabled;
     if (opts.perPatternEnabled) this.perPatternEnabled = opts.perPatternEnabled;
     if (opts.hf) {
+      const wasEnabled = this.hfEnabled;
       if (opts.hf.enabled !== undefined) this.hfEnabled = opts.hf.enabled;
       if (opts.hf.stake !== undefined) this.hfStake = opts.hf.stake;
       if (opts.hf.leverage !== undefined) this.hfLeverage = opts.hf.leverage;
       if (opts.hf.allowMultiplePerKey !== undefined) this.hfAllowMultiplePerKey = opts.hf.allowMultiplePerKey;
       if (opts.hf.perPatternEnabled) this.hfPerPatternEnabled = opts.hf.perPatternEnabled;
       if (opts.hf.perAssetEnabled) this.hfPerAssetEnabled = opts.hf.perAssetEnabled;
+      // Immediate proof-of-life log when operator flips HF on/off at runtime.
+      if (!wasEnabled && this.hfEnabled) {
+        this.emit("info", `HF stack ENABLED at runtime: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
+          stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
+        });
+        // Don't wait for the next 30s tick — kick a warmup pass right now so
+        // the Logs panel shows activity within a second of the Save click.
+        if (this.running) {
+          this.hfSignalTick().catch((e) => this.emit("error", e as Error));
+        }
+      } else if (wasEnabled && !this.hfEnabled) {
+        this.emit("info", `HF stack DISABLED at runtime`, {});
+      }
     }
   }
 
@@ -657,8 +671,9 @@ export class BinanceEngine extends EventEmitter {
         this.emit("error", e as Error);
       }
     }
-    // Heartbeat — same idea as SMC tick: only log when bars closed OR every 30 idle ticks (~15min)
-    if (barsClosed.length > 0 || this.hfTickCount % 30 === 0) {
+    // Heartbeat — log when bars close OR every 4 idle ticks (~2min) so the
+    // UI always sees activity within ~2 minutes of enabling.
+    if (barsClosed.length > 0 || this.hfTickCount % 4 === 0) {
       this.emit("info", `HF tick: bars=${barsClosed.length}${barsClosed.length ? ` (${barsClosed.join(",")})` : ""}, signals=${signalsFired}, hfOpen=${this.open.filter(t => isHfPattern(t.pattern)).length}`, {
         tickCount: this.hfTickCount, barsClosed, signals: signalsFired,
       });

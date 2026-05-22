@@ -169,10 +169,13 @@ export function BinanceHFPanel() {
       <div className="grid grid-4">
         <div className="card card-padded">
           <div className="card-title">HF status</div>
-          <div className="card-value" style={{ color: enabled && bs.running ? "#5fd4a4" : "#888" }}>
-            {!bs.running ? "Engine off" : enabled ? "● ON" : "○ OFF"}
+          <div className="card-value" style={{ color: config.hf.enabled && bs.running ? "#5fd4a4" : "#888" }}>
+            {!bs.running ? "Engine off" : config.hf.enabled ? "● ON" : "○ OFF"}
           </div>
-          <div className="card-sub">{bs.running ? "Engine running" : "Engine stopped"}</div>
+          <div className="card-sub">
+            {bs.running ? "Engine running" : "Engine stopped"}
+            {enabled !== config.hf.enabled && <span style={{ color: "#d4a35f", marginLeft: 6 }}>unsaved</span>}
+          </div>
         </div>
         <div className="card card-padded">
           <div className="card-title">Today's HF P&amp;L</div>
