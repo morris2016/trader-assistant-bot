@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { api, fmtUptime, type StateResp, type StrategyStats, type Subscription } from "./api";
+import { api, fmtUptime, eatToday, eatDateOf, type StateResp, type StrategyStats, type Subscription } from "./api";
 import { OverviewPanel } from "./panels/Overview";
 import { ChartsPanel } from "./panels/Charts";
 import { RealPanel } from "./panels/Real";
@@ -116,7 +116,7 @@ export function App() {
         ? <BinanceSidebar tab={bTab} setTab={setBTab} />
         : <Sidebar tab={tab} setTab={setTab} state={state} subs={subs} strategies={strategies} />}
       <div className="main">
-        <Header state={state} stale={stale} error={error} />
+        <Header state={state} stale={stale} error={error} mode={mode} />
         <ModeSwitcher mode={mode} setMode={setMode} />
         {mode === "binance" ? (
           <>
@@ -217,10 +217,14 @@ function Sidebar({ tab, setTab, state, subs, strategies }: {
   );
 }
 
-function Header({ state, stale, error }: { state: StateResp | null; stale: boolean; error: string | null }) {
+function Header({ state, stale, error, mode }: { state: StateResp | null; stale: boolean; error: string | null; mode: Mode }) {
   const live = state?.health.wsConnected && state?.health.authorized;
   const status = error ? "dead" : stale ? "stale" : live ? "live" : "stale";
   const account = state?.account;
+  // In Binance mode: hide all Deriv-side pills (WS UP/DOWN, ACTIVE/PAUSED,
+  // stale/live refresh) — they describe the Deriv WebSocket which is irrelevant
+  // here — and show a Binance-specific status strip instead.
+  if (mode === "binance") return <BinanceHeader />;
   return (
     <>
       <div className="header">
@@ -256,6 +260,60 @@ function Header({ state, stale, error }: { state: StateResp | null; stale: boole
         </div>
       )}
     </>
+  );
+}
+
+/** Binance-mode header: shows engine ●/○, hasCreds, today's bot P&L,
+ *  open count (bot-tracked + external), and live/network/testnet pills.
+ *  Polls /api/binance/state every 3s. */
+function BinanceHeader() {
+  const [bs, setBs] = useState<any>(null);
+  const [ext, setExt] = useState<{ positions: any[] } | null>(null);
+  const [lastFetch, setLastFetch] = useState(Date.now());
+  useEffect(() => {
+    const refresh = async () => {
+      try { setBs(await api.binanceState()); setLastFetch(Date.now()); } catch {}
+      try { setExt(await api.binanceExternalPositions()); } catch {}
+    };
+    refresh();
+    const id = setInterval(refresh, 3000);
+    return () => clearInterval(id);
+  }, []);
+  const stale = Date.now() - lastFetch > 8000;
+  const hasCreds = !!bs?.hasCreds;
+  const running = !!bs?.running;
+  const testnet = !!bs?.testnet;
+  const botOpen = bs?.state?.open?.length ?? 0;
+  const extOpen = ext?.positions?.length ?? 0;
+  const closedToday = bs?.state?.closed?.filter((c: any) => c.closeEpoch && eatDateOf(c.closeEpoch) === eatToday()) ?? [];
+  const todayPnl = closedToday.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0);
+  const dailyCapHit = !!bs?.state?.daily?.capHit;
+  return (
+    <div className="header">
+      <div className="header-left">
+        <h1>Binance Futures</h1>
+        <div className="subtitle">
+          {!hasCreds ? "no credentials" :
+           running ? `${botOpen} bot trades · ${extOpen} external · today ${todayPnl >= 0 ? "+" : ""}$${todayPnl.toFixed(2)}` :
+           "engine stopped"}
+          {testnet ? " · TESTNET" : ""}
+        </div>
+      </div>
+      <div className="row">
+        {dailyCapHit && (
+          <span className="pill pill-red"><span className="pill-dot" />DAILY CAP HIT</span>
+        )}
+        <span className={`pill ${running ? "pill-green" : "pill-amber"}`}>
+          <span className="pill-dot" />
+          {running ? "ENGINE ●" : "ENGINE ○"}
+        </span>
+        <span className={`pill ${hasCreds ? "pill-green" : "pill-red"}`}>
+          <span className="pill-dot" />
+          {hasCreds ? "API READY" : "NO CREDS"}
+        </span>
+        <span className={`refresh ${stale ? "stale" : "live"}`}>{stale ? "stale" : "live"}</span>
+      </div>
+    </div>
   );
 }
 
