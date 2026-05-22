@@ -22,6 +22,9 @@ export type BinanceConfig = {
   perAssetEnabled: Record<string, boolean>;
   /** Per-pattern enable map — keyed by pattern id (OB_BULL/OB_BEAR/BOS_UP). */
   perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean };
+  /** Operator intent: when true, engine resumes automatically on bot boot
+   *  (e.g. after Railway redeploy). Toggled by Start/Stop in the UI. */
+  autoStart: boolean;
 };
 
 export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
@@ -31,6 +34,7 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
   perTradeMaxStake: 30,
   perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
   perPatternEnabled: { OB_BULL: true, OB_BEAR: true, BOS_UP: true },
+  autoStart: false,
 };
 
 export function loadBinanceConfig(stateDir: string): BinanceConfig {

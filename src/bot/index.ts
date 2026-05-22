@@ -1493,6 +1493,8 @@ async function main() {
           await configureBinanceFromCreds();
           await binanceEngine.start();
           binanceRunning = true;
+          binanceConfig = { ...binanceConfig, autoStart: true };
+          await saveBinanceConfig(cfg.stateDir, binanceConfig);
           log.info("binance engine started");
           return { ok: true };
         } catch (e: any) {
@@ -1501,10 +1503,24 @@ async function main() {
       },
       stop: async () => {
         if (binanceRunning) { await binanceEngine.stop(); binanceRunning = false; log.warn("binance engine stopped"); }
+        binanceConfig = { ...binanceConfig, autoStart: false };
+        await saveBinanceConfig(cfg.stateDir, binanceConfig);
         return { ok: true };
       },
     },
   });
+
+  // Auto-resume Binance engine if operator left it running before a redeploy.
+  // Intent is persisted via `autoStart` in binance-config.json, toggled by
+  // the Start / Stop buttons. Wrapped in catch so a broken cred or API hiccup
+  // doesn't crash the bot — operator can re-Start from the UI.
+  if (binanceConfig.autoStart && hasBinanceCreds(cfg.stateDir)) {
+    log.info("binance autoStart=true — resuming engine");
+    configureBinanceFromCreds()
+      .then(() => binanceEngine.start())
+      .then(() => { binanceRunning = true; log.info("binance engine auto-resumed"); })
+      .catch((e) => log.error(`binance auto-resume failed: ${e.message}`));
+  }
 
   // Build the per-(sym, gr) engine detector config by merging every strategy
   // (real + fast + fast2) that runs on this key. Each detector starts disabled with
