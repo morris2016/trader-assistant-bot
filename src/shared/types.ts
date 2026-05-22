@@ -7,7 +7,8 @@ export type SymbolCode = string;
 
 export type ContractFamily = "CALL_PUT" | "MULTIPLIER" | "DIGIT";
 
-export type Granularity = 60 | 120 | 180 | 300 | 600 | 900 | 1800 | 3600 | 7200 | 14400 | 28800 | 86400;
+/** `0` is a sentinel for tick-level / no-aggregation (used by DIGIT strategies). */
+export type Granularity = 0 | 60 | 120 | 180 | 300 | 600 | 900 | 1800 | 3600 | 7200 | 14400 | 28800 | 86400;
 
 export type Tick = {
   symbol: SymbolCode;

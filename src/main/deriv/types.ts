@@ -42,6 +42,18 @@ export type DerivRequest = {
       limit_order?: { take_profit?: number; stop_loss?: number };
       subscribe?: 1;
     }
+  | {
+      proposal: 1;
+      amount: number;
+      basis: "stake" | "payout";
+      contract_type: "DIGITODD" | "DIGITEVEN" | "DIGITOVER" | "DIGITUNDER" | "DIGITMATCH" | "DIGITDIFF";
+      currency: string;
+      duration: number;
+      duration_unit: "t" | "s" | "m" | "h" | "d";
+      symbol: string;
+      barrier?: number;
+      subscribe?: 1;
+    }
   | { buy: string; price: number }
   | { sell: string; price: number }
   | { balance: 1; subscribe?: 1 }
@@ -49,6 +61,12 @@ export type DerivRequest = {
   | { active_symbols: "brief" | "full"; product_type?: "basic" }
   | { portfolio: 1 }
   | { profit_table: 1; description?: 0 | 1; limit?: number; offset?: number; sort?: "ASC" | "DESC" }
+  | { website_status: 1 }
+  | {
+      contract_update: 1;
+      contract_id: number;
+      limit_order: { take_profit?: number | null; stop_loss?: number | null };
+    }
 );
 
 export type DerivResponse = {

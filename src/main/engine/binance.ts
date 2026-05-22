@@ -327,6 +327,9 @@ export class BinanceEngine extends EventEmitter {
   private positionLoopTimer: NodeJS.Timeout | null = null;
   // Pending API actions per trade, to prevent racing duplicate orders
   private busy: Set<string> = new Set();
+  // Heartbeat: cycle counter + per-tick signal counter (set inside checkSignalsFor)
+  private tickCount = 0;
+  private signalsThisTick = 0;
 
   constructor(client: BinanceClient) {
     super();
@@ -360,6 +363,7 @@ export class BinanceEngine extends EventEmitter {
   async start() {
     if (this.running) return;
     this.running = true;
+    this.tickCount = 0;
     this.emit("info", `engine starting: ${this.assets.length} assets, stake $${this.stake}, lev ${this.leverage}x`, {
       assets: this.assets.length, stake: this.stake, leverage: this.leverage,
     });
@@ -425,6 +429,9 @@ export class BinanceEngine extends EventEmitter {
   private async signalTick() {
     this.rollDayIfNeeded();
     if (this.daily.capHit) return;
+    this.tickCount++;
+    this.signalsThisTick = 0;
+    const barsClosed: string[] = [];
     for (const sym of this.assets) {
       const buf = this.bars.get(sym);
       if (!buf || buf.length === 0) continue;
@@ -440,11 +447,19 @@ export class BinanceEngine extends EventEmitter {
           // New 1h bar closed — append and run signal detection
           buf.push(closed);
           if (buf.length > KLINE_HISTORY) buf.splice(0, buf.length - KLINE_HISTORY);
+          barsClosed.push(sym);
           await this.checkSignalsFor(sym);
         }
       } catch (e) {
         this.emit("error", e as Error);
       }
+    }
+    // Heartbeat: log if any new bars closed this cycle, OR every 15 idle minutes
+    const idleHeartbeat = this.tickCount % 15 === 0;
+    if (barsClosed.length > 0 || idleHeartbeat) {
+      this.emit("info", `tick: bars closed=${barsClosed.length}${barsClosed.length ? ` (${barsClosed.join(",")})` : ""}, signals=${this.signalsThisTick}, open=${this.open.length}/${this.assets.length} assets`, {
+        tickCount: this.tickCount, barsClosed, signals: this.signalsThisTick, open: this.open.length, assets: this.assets.length,
+      });
     }
   }
 
@@ -456,8 +471,9 @@ export class BinanceEngine extends EventEmitter {
     const structure = this.structures.get(sym) ?? emptyStructure();
     const sigs = detectSignalsFromCache(buf, i, structure);
     if (sigs.length > 0) {
-      this.emit("info", `signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side === 1 ? "LONG" : "SHORT"}`).join(", ")}`, {
-        asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side === 1 ? "LONG" : "SHORT", entryPrice: s.entryPrice })),
+      this.signalsThisTick += sigs.length;
+      this.emit("info", `signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side}`).join(", ")}`, {
+        asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side, entryPrice: s.entryPrice })),
       });
     }
     for (const s of sigs) {
@@ -466,7 +482,7 @@ export class BinanceEngine extends EventEmitter {
         continue;
       }
       if (this.open.find((t) => t.asset === sym && t.pattern === s.pattern && t.side === s.side)) {
-        this.emit("info", `skip ${sym} ${s.pattern}/${s.side === 1 ? "LONG" : "SHORT"}: already open`, { asset: sym, pattern: s.pattern });
+        this.emit("info", `skip ${sym} ${s.pattern}/${s.side}: already open`, { asset: sym, pattern: s.pattern });
         continue;
       }
       const stake = Math.min(this.stake, this.perTradeMaxStake);

@@ -67,8 +67,11 @@ export function symbolDigits(code: SymbolCode): number {
   return symbolDef(code)?.digits ?? 3;
 }
 
-export function symbolSupports(code: SymbolCode, contract: "CALL_PUT" | "MULTIPLIER"): boolean {
+export function symbolSupports(code: SymbolCode, contract: "CALL_PUT" | "MULTIPLIER" | "DIGIT"): boolean {
   const def = symbolDef(code);
+  // DIGIT contracts work on any symbol whose quote has tick-level digits;
+  // the legacy `contracts` whitelist doesn't list it, so allow all.
+  if (contract === "DIGIT") return true;
   return def?.contracts.includes(contract) ?? false;
 }
 
