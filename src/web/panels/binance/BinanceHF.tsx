@@ -55,24 +55,24 @@ export function BinanceHFPanel() {
     }
   }, [config, synced]);
 
-  if (!bs || !config) return <div className="empty-state">Loading…</div>;
-  if (!bs.hasCreds) return <div className="banner banner-warn">No Binance credentials. Go to Settings.</div>;
-
-  const testnet = !!bs.testnet;
-  const allOpen = (bs.state?.open ?? []) as any[];
-  const allClosed = (bs.state?.closed ?? []) as any[];
-  const hfOpen = allOpen.filter((t) => isHf(t.pattern));
-  const hfClosedAll = allClosed.filter((t) => isHf(t.pattern));
-  const today = todayUtc();
-  const hfClosedToday = hfClosedAll.filter((t) => t.closeEpoch && new Date(t.closeEpoch * 1000).toISOString().slice(0, 10) === today);
-  const todayPnl = hfClosedToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
-
-  // ── Equity curve points (sorted by closeEpoch, cumulative PnL) ──
+  // ── Hooks BEFORE any early return so order stays stable across renders ──
+  const allClosed = (bs?.state?.closed ?? []) as any[];
+  const hfClosedAll = useMemo(() => allClosed.filter((t) => isHf(t.pattern)), [allClosed]);
   const equityPoints = useMemo(() => {
     const sorted = hfClosedAll.slice().sort((a, b) => (a.closeEpoch ?? 0) - (b.closeEpoch ?? 0));
     let cum = 0;
     return sorted.map((t) => { cum += t.pnl ?? 0; return { ts: t.closeEpoch ?? 0, balance: cum }; });
   }, [hfClosedAll]);
+
+  if (!bs || !config) return <div className="empty-state">Loading…</div>;
+  if (!bs.hasCreds) return <div className="banner banner-warn">No Binance credentials. Go to Settings.</div>;
+
+  const testnet = !!bs.testnet;
+  const allOpen = (bs.state?.open ?? []) as any[];
+  const hfOpen = allOpen.filter((t) => isHf(t.pattern));
+  const today = todayUtc();
+  const hfClosedToday = hfClosedAll.filter((t) => t.closeEpoch && new Date(t.closeEpoch * 1000).toISOString().slice(0, 10) === today);
+  const todayPnl = hfClosedToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
 
   async function doCancel(id: string) {
     setCancelErr(null);
