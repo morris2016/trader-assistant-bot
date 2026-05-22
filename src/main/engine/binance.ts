@@ -54,6 +54,8 @@ export type BinanceEngineEvents = {
   error: [Error];
   stateChanged: [];
   capHit: [dailyLoss: number, cap: number];
+  /** Free-form info events for the Logs UI — warmup, signals, skips, trail armed. */
+  info: [message: string, meta?: Record<string, any>];
 };
 
 // Strategy parameters (matches our validated sim)
@@ -358,6 +360,9 @@ export class BinanceEngine extends EventEmitter {
   async start() {
     if (this.running) return;
     this.running = true;
+    this.emit("info", `engine starting: ${this.assets.length} assets, stake $${this.stake}, lev ${this.leverage}x`, {
+      assets: this.assets.length, stake: this.stake, leverage: this.leverage,
+    });
     try { await this.client.syncTime(); } catch (e) { this.emit("error", e as Error); }
 
     // Fetch exchangeInfo once — gives us per-symbol qty/price precision rules.
@@ -393,7 +398,11 @@ export class BinanceEngine extends EventEmitter {
         this.structures.set(sym, struct);
         // Logging warmup outcome helps verify the cache populated properly
         const pending = struct.pendingOBs.length;
-        console.log(`[binance warmup ${sym}] ${k.length} bars, ${pending} pending OBs, swingHigh=${isFinite(struct.lastSwingHigh) ? struct.lastSwingHigh.toFixed(4) : "—"}, swingLow=${isFinite(struct.lastSwingLow) ? struct.lastSwingLow.toFixed(4) : "—"}`);
+        this.emit("info", `warmup ${sym}: ${k.length} bars, ${pending} pending OBs`, {
+          asset: sym, bars: k.length, pendingOBs: pending,
+          swingHigh: isFinite(struct.lastSwingHigh) ? +struct.lastSwingHigh.toFixed(4) : null,
+          swingLow: isFinite(struct.lastSwingLow) ? +struct.lastSwingLow.toFixed(4) : null,
+        });
         await this.client.setMarginType(sym, "ISOLATED").catch(() => undefined);
         await this.client.setLeverage(sym, this.leverage).catch((e) => this.emit("error", e as Error));
       } catch (e) {
@@ -442,25 +451,31 @@ export class BinanceEngine extends EventEmitter {
   private async checkSignalsFor(sym: string) {
     const buf = this.bars.get(sym);
     if (!buf || buf.length < SMA_PERIOD + 10) return;
-    // Per-asset disable
     if (this.perAssetEnabled[sym] === false) return;
     const i = buf.length - 1;
     const structure = this.structures.get(sym) ?? emptyStructure();
-    // Use cache-based detection — checks pending OBs from past (including
-    // pre-startup) instead of just lookback of 20 bars from current.
     const sigs = detectSignalsFromCache(buf, i, structure);
+    if (sigs.length > 0) {
+      this.emit("info", `signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side === 1 ? "LONG" : "SHORT"}`).join(", ")}`, {
+        asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side === 1 ? "LONG" : "SHORT", entryPrice: s.entryPrice })),
+      });
+    }
     for (const s of sigs) {
-      // Per-pattern disable
-      if (this.perPatternEnabled[s.pattern] === false) continue;
-      // Skip if same (asset, pattern, side) already open
-      if (this.open.find((t) => t.asset === sym && t.pattern === s.pattern && t.side === s.side)) continue;
-      // Cap: per-trade stake
+      if (this.perPatternEnabled[s.pattern] === false) {
+        this.emit("info", `skip ${sym} ${s.pattern}: pattern disabled`, { asset: sym, pattern: s.pattern });
+        continue;
+      }
+      if (this.open.find((t) => t.asset === sym && t.pattern === s.pattern && t.side === s.side)) {
+        this.emit("info", `skip ${sym} ${s.pattern}/${s.side === 1 ? "LONG" : "SHORT"}: already open`, { asset: sym, pattern: s.pattern });
+        continue;
+      }
       const stake = Math.min(this.stake, this.perTradeMaxStake);
-      if (stake < 1) continue;
+      if (stake < 1) {
+        this.emit("info", `skip ${sym} ${s.pattern}: stake below $1`, { asset: sym });
+        continue;
+      }
       await this.openTrade(sym, s, stake);
     }
-    // After firing on the latest bar, advance the structure cache so the
-    // next bar's check has fresh state (new OBs, new swings, pruned zones).
     updateStructure(structure, buf, i);
     this.structures.set(sym, structure);
   }
@@ -603,12 +618,18 @@ export class BinanceEngine extends EventEmitter {
     const armDist = TRAIL_ARM_ATR * t.atrEntry;
     const trailDist = TRAIL_RETRACE_ATR * t.atrEntry;
     let stateChanged = false;
+    const wasArmed = t.armed;
     if (t.side === "LONG") {
       if (markPrice > t.peakFav) { t.peakFav = markPrice; stateChanged = true; }
       if (!t.armed && t.peakFav >= t.entryPrice + armDist) { t.armed = true; stateChanged = true; }
     } else {
       if (markPrice < t.peakFav) { t.peakFav = markPrice; stateChanged = true; }
       if (!t.armed && t.peakFav <= t.entryPrice - armDist) { t.armed = true; stateChanged = true; }
+    }
+    if (!wasArmed && t.armed) {
+      this.emit("info", `trail armed ${t.asset} ${t.pattern}/${t.side}: peak=${t.peakFav.toFixed(5)}`, {
+        asset: t.asset, pattern: t.pattern, side: t.side, peakFav: t.peakFav, entryPrice: t.entryPrice,
+      });
     }
     // Trail trigger: once armed, check if mark price has retraced to
     // peak − trailDist. Multi-Assets accounts reject STOP_MARKET via

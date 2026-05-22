@@ -459,8 +459,10 @@ async function main() {
     perPatternEnabled: binanceConfig.perPatternEnabled,
   });
   binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
-  binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`));
-  binanceEngine.on("closed", (t) => log.info(`binance closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`));
+  binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`, { asset: t.asset, pattern: t.pattern, side: t.side, entryPrice: t.entryPrice, stake: t.stake, leverage: t.leverage }));
+  binanceEngine.on("closed", (t) => log.info(`binance closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`, { asset: t.asset, pattern: t.pattern, side: t.side, pnl: t.pnl, exitPrice: t.closePrice }));
+  binanceEngine.on("info", (msg, meta) => log.info(`binance ${msg}`, meta));
+  binanceEngine.on("capHit", (loss, cap) => log.warn(`binance daily cap hit: loss $${loss.toFixed(2)} >= cap $${cap.toFixed(2)}`));
   let binanceRunning = false;
   let binanceTestnet = false;
   async function configureBinanceFromCreds(): Promise<{ ok: boolean; testnet: boolean }> {
