@@ -2,8 +2,8 @@
 // stack. Shows open HF positions with per-row Cancel, config knobs,
 // equity curve, and filtered HF-only logs.
 
-import React, { useEffect, useMemo, useState } from "react";
-import { api, type BinanceConfig } from "../../api";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { api, type BinanceConfig, type LogEntry } from "../../api";
 
 const HF_PATTERNS = ["BB_UP_SHORT", "BB_LOW_LONG"] as const;
 type HfPattern = (typeof HF_PATTERNS)[number];
@@ -40,6 +40,60 @@ export function BinanceHFPanel() {
     } catch {}
   }
   useEffect(() => { refresh(); const id = setInterval(refresh, 3000); return () => clearInterval(id); }, []);
+
+  // ── Logs stream — pre-filtered for HF lines ──
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const fetchLogs = async () => {
+      try {
+        const r = await api.logs({ limit: 500, q: "binance" });
+        if (cancelled) return;
+        // Keep only HF-related events: HF heartbeat/warmup/signals/skips,
+        // and trade-open/close lines whose pattern is a BB_*.
+        const filtered = r.logs.filter((e) => {
+          const m = e.msg ?? "";
+          if (/\bHF\b/.test(m)) return true;
+          if (/BB_UP_SHORT|BB_LOW_LONG/.test(m)) return true;
+          const pat = (e as any).pattern;
+          if (pat === "BB_UP_SHORT" || pat === "BB_LOW_LONG") return true;
+          return false;
+        });
+        setLogs(filtered);
+      } catch {}
+    };
+    fetchLogs();
+    const id = setInterval(fetchLogs, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  // ── Recent HF signals (parsed out of logs) ──
+  const recentSignals = useMemo(() => {
+    return logs.filter((e) => typeof e.msg === "string" && /HF signals on/.test(e.msg)).slice(-20).reverse();
+  }, [logs]);
+
+  // ── Per-open-trade live progress snapshots (ref, ephemeral, ~5min window) ──
+  const progressRef = useRef<Map<string, Array<{ ts: number; pct: number }>>>(new Map());
+  // On every bs refresh, snapshot each open trade's current Δ% and drop dead trades
+  useEffect(() => {
+    if (!bs) return;
+    const open = (bs.state?.open ?? []) as any[];
+    const now = Math.floor(Date.now() / 1000);
+    const aliveIds = new Set<string>();
+    for (const t of open) {
+      if (!isHf(t.pattern)) continue;
+      aliveIds.add(t.id);
+      const arr = progressRef.current.get(t.id) ?? [];
+      const pct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+      arr.push({ ts: now, pct });
+      if (arr.length > 600) arr.splice(0, arr.length - 600); // 600 samples × 3s ≈ 30min window
+      progressRef.current.set(t.id, arr);
+    }
+    // Drop snapshots for trades no longer open
+    for (const id of Array.from(progressRef.current.keys())) {
+      if (!aliveIds.has(id)) progressRef.current.delete(id);
+    }
+  }, [bs]);
 
   // Sync form when config loads (only the first time, to avoid clobbering user edits)
   const [synced, setSynced] = useState(false);
@@ -207,6 +261,25 @@ export function BinanceHFPanel() {
         </div>
       </div>
 
+      {/* ── Live progress of open trades ─────────────────────────── */}
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">Open-trade live progress</div>
+          <div className="section-sub">Δ% from entry over time (snapshot every 3s; ~30min rolling window per trade).</div>
+        </div>
+        <div className="card card-padded">
+          {hfOpen.length === 0 ? (
+            <div className="muted">No open HF positions to chart.</div>
+          ) : (
+            <ProgressSvg series={hfOpen.map((t: any) => ({
+              id: t.id, label: `${t.asset.replace("USDT", "")} ${t.pattern}/${t.side}`,
+              points: progressRef.current.get(t.id) ?? [],
+              armed: !!t.armed,
+            }))} />
+          )}
+        </div>
+      </div>
+
       {/* ── Equity curve ─────────────────────────────────────────── */}
       <div className="section">
         <div className="section-header">
@@ -219,6 +292,74 @@ export function BinanceHFPanel() {
           ) : (
             <EquitySvg points={equityPoints} />
           )}
+        </div>
+      </div>
+
+      {/* ── Recent HF signals ────────────────────────────────────── */}
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">Recent HF signals</div>
+          <div className="section-sub">Last 20 BB signal events. Each row = one bar-close detection (may or may not have opened a trade).</div>
+        </div>
+        <div className="card card-padded">
+          {recentSignals.length === 0 ? (
+            <div className="muted">No HF signals seen yet.</div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr><th>Time</th><th>Asset</th><th>Pattern(s)</th></tr>
+              </thead>
+              <tbody>
+                {recentSignals.map((e, i) => {
+                  const t = (e.ts ?? "").slice(11, 19);
+                  const asset = (e as any).asset ?? "";
+                  const sigs = (e as any).signals as Array<{ pattern: string; side: string; entryPrice: number }> | undefined;
+                  return (
+                    <tr key={i}>
+                      <td className="muted mono">{t}</td>
+                      <td className="mono">{asset}</td>
+                      <td>
+                        {sigs?.map((s, j) => (
+                          <span key={j} style={{ marginRight: 10 }}>
+                            <span className="mono" style={{ color: "#7fb3ff" }}>{s.pattern}</span>
+                            <span className={`pill ${s.side === "LONG" ? "pill-green" : "pill-red"}`} style={{ marginLeft: 4 }}>{s.side}</span>
+                            <span className="muted mono" style={{ marginLeft: 4 }}>@ ${s.entryPrice}</span>
+                          </span>
+                        )) ?? <span className="muted">{e.msg}</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {/* ── HF logs ──────────────────────────────────────────────── */}
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">HF logs</div>
+          <div className="section-sub">Live events from the HF stack only. {logs.length} entries buffered.</div>
+        </div>
+        <div className="card card-padded">
+          <div style={{
+            background: "#06080f", border: "1px solid #1e2842", borderRadius: 6,
+            padding: 10, maxHeight: 400, overflowY: "auto",
+            fontFamily: "monospace", fontSize: 11.5, color: "#a8b3d5", whiteSpace: "pre-wrap",
+          }}>
+            {logs.length === 0 ? (
+              <div className="muted">No HF log entries yet. Enable the HF stack to see activity.</div>
+            ) : (
+              logs.slice().reverse().slice(0, 200).map((e, i) => {
+                const t = (e.ts ?? "").slice(11, 19);
+                const color = e.level === "error" ? "#d4655f" : e.level === "warn" ? "#d4a35f" : e.level === "info" ? "#a8b3d5" : "#6b7896";
+                const { ts, level, msg, ...meta } = e;
+                const metaStr = Object.entries(meta).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
+                return <div key={i} style={{ color }}>{`${t} ${(level ?? "info").toUpperCase().padEnd(5)} ${msg}${metaStr ? "  " + metaStr : ""}`}</div>;
+              })
+            )}
+          </div>
         </div>
       </div>
 
@@ -288,6 +429,48 @@ export function BinanceHFPanel() {
         </div>
       </div>
     </>
+  );
+}
+
+// ── Multi-line live progress SVG (one line per open trade) ───────────────
+const SERIES_COLOURS = ["#7fb3ff", "#5fd4a4", "#d4a35f", "#d4655f", "#b85fd4", "#5fd4d4", "#d4d45f", "#a35fd4"];
+function ProgressSvg({ series }: { series: Array<{ id: string; label: string; points: Array<{ ts: number; pct: number }>; armed: boolean }> }) {
+  const w = 800, h = 220, padL = 50, padR = 130, padT = 12, padB = 22;
+  const allTs = series.flatMap((s) => s.points.map((p) => p.ts));
+  const allPct = series.flatMap((s) => s.points.map((p) => p.pct));
+  if (allTs.length === 0) return <div className="muted">Collecting samples…</div>;
+  const xMin = Math.min(...allTs), xMax = Math.max(...allTs);
+  const yMin = Math.min(-0.1, ...allPct), yMax = Math.max(0.1, ...allPct);
+  const xScale = (x: number) => padL + ((x - xMin) / Math.max(1, xMax - xMin)) * (w - padL - padR);
+  const yScale = (y: number) => padT + (1 - (y - yMin) / Math.max(0.001, yMax - yMin)) * (h - padT - padB);
+  const zeroY = yScale(0);
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ background: "#0e1528", borderRadius: 4 }}>
+      <line x1={padL} y1={zeroY} x2={w - padR} y2={zeroY} stroke="#1e2842" strokeDasharray="2,3" />
+      <text x={padL - 6} y={zeroY + 4} fill="#888" fontSize="10" textAnchor="end">0%</text>
+      <text x={padL - 6} y={yScale(yMax) + 4} fill="#888" fontSize="10" textAnchor="end">{yMax.toFixed(2)}%</text>
+      <text x={padL - 6} y={yScale(yMin) + 4} fill="#888" fontSize="10" textAnchor="end">{yMin.toFixed(2)}%</text>
+      {series.map((s, i) => {
+        const colour = SERIES_COLOURS[i % SERIES_COLOURS.length];
+        const path = s.points.map((p, j) => `${j === 0 ? "M" : "L"}${xScale(p.ts).toFixed(1)},${yScale(p.pct).toFixed(1)}`).join(" ");
+        const last = s.points[s.points.length - 1];
+        return (
+          <g key={s.id}>
+            <path d={path} fill="none" stroke={colour} strokeWidth={1.5} opacity={0.9} />
+            {last && (
+              <circle cx={xScale(last.ts)} cy={yScale(last.pct)} r={3} fill={colour} />
+            )}
+            {/* Legend entry */}
+            <g transform={`translate(${w - padR + 6}, ${padT + 4 + i * 18})`}>
+              <line x1={0} y1={6} x2={14} y2={6} stroke={colour} strokeWidth={2} />
+              <text x={18} y={9} fill="#a8b3d5" fontSize="10.5">
+                {s.label}{s.armed ? " ●" : ""}{last ? ` ${last.pct >= 0 ? "+" : ""}${last.pct.toFixed(2)}%` : ""}
+              </text>
+            </g>
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
