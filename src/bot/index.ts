@@ -457,6 +457,7 @@ async function main() {
     perTradeMaxStake: binanceConfig.perTradeMaxStake,
     perAssetEnabled: binanceConfig.perAssetEnabled,
     perPatternEnabled: binanceConfig.perPatternEnabled,
+    hf: binanceConfig.hf,
   });
   binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
   binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`, { asset: t.asset, pattern: t.pattern, side: t.side, entryPrice: t.entryPrice, stake: t.stake, leverage: t.leverage }));
@@ -1451,6 +1452,12 @@ async function main() {
           ...patch,
           perAssetEnabled: { ...binanceConfig.perAssetEnabled, ...(patch.perAssetEnabled ?? {}) },
           perPatternEnabled: { ...binanceConfig.perPatternEnabled, ...(patch.perPatternEnabled ?? {}) },
+          hf: {
+            ...binanceConfig.hf,
+            ...(patch.hf ?? {}),
+            perAssetEnabled: { ...binanceConfig.hf.perAssetEnabled, ...(patch.hf?.perAssetEnabled ?? {}) },
+            perPatternEnabled: { ...binanceConfig.hf.perPatternEnabled, ...(patch.hf?.perPatternEnabled ?? {}) },
+          },
         };
         await saveBinanceConfig(cfg.stateDir, binanceConfig);
         binanceEngine.configure({
@@ -1460,9 +1467,11 @@ async function main() {
           perTradeMaxStake: binanceConfig.perTradeMaxStake,
           perAssetEnabled: binanceConfig.perAssetEnabled,
           perPatternEnabled: binanceConfig.perPatternEnabled,
+          hf: binanceConfig.hf,
         });
         log.info("binance config updated", { ...binanceConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
       },
+      cancelTrade: async (tradeId: string) => binanceEngine.cancelTrade(tradeId),
       setCreds: async (apiKey: string, apiSecret: string, testnet: boolean) => {
         await saveBinanceCreds(cfg.stateDir, { apiKey, apiSecret, testnet });
         await configureBinanceFromCreds();

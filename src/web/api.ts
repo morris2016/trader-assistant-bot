@@ -452,7 +452,18 @@ export const api = {
   binanceConfig: () => get<{ config: BinanceConfig }>("/api/binance/config"),
   binanceUpdateConfig: (patch: Partial<BinanceConfig>) =>
     postJson<{ ok: boolean; config?: BinanceConfig; error?: string }>("/api/binance/update-config", patch),
+  binanceCancelTrade: (tradeId: string) =>
+    postJson<{ ok: boolean; error?: string }>("/api/binance/cancel-trade", { tradeId }),
   binanceDiag: () => get<{ stateDir: string; stateDirExists: boolean; files: Array<{ file: string; exists: boolean; sizeBytes?: number; mtime?: string }>; note: string }>("/api/binance/diag"),
+};
+
+export type BinanceHfConfig = {
+  enabled: boolean;
+  stake: number;
+  leverage: number;
+  allowMultiplePerKey: boolean;
+  perPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
+  perAssetEnabled: Record<string, boolean>;
 };
 
 export type BinanceConfig = {
@@ -462,6 +473,8 @@ export type BinanceConfig = {
   perTradeMaxStake: number;
   perAssetEnabled: Record<string, boolean>;
   perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean };
+  autoStart?: boolean;
+  hf: BinanceHfConfig;
 };
 
 export function fmtTime(ms: number | null): string {

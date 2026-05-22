@@ -21,10 +21,14 @@ import { BinanceClient, type Kline, type OrderResponse, type SymbolFilters } fro
 
 export type BinanceTradeSide = "LONG" | "SHORT";
 
+export type BinancePattern = "OB_BULL" | "OB_BEAR" | "BOS_UP" | "BB_UP_SHORT" | "BB_LOW_LONG";
+export const HF_PATTERNS: ReadonlySet<BinancePattern> = new Set(["BB_UP_SHORT", "BB_LOW_LONG"]);
+export function isHfPattern(p: BinancePattern): boolean { return HF_PATTERNS.has(p); }
+
 export type BinanceTrade = {
   id: string;
   asset: string;          // e.g., BTCUSDT
-  pattern: "OB_BULL" | "OB_BEAR" | "BOS_UP";
+  pattern: BinancePattern;
   side: BinanceTradeSide;
   stake: number;          // $ committed (margin)
   leverage: number;       // e.g., 30
@@ -69,6 +73,46 @@ const ATR_PERIOD = 14;
 const SMA_PERIOD = 50;
 const KLINE_HISTORY = 500;  // ~21 days of 1h bars — gives swing-detection + SMA50 + pending OBs from past 3 weeks
 const STRUCTURE_OB_MAX_AGE = 50; // bars — pending OB zones older than this get pruned
+
+// ─── HF 15m strategy constants (BB_UP_SHORT + BB_LOW_LONG) ─────────────
+// Validated 2026-05-22 — see project_trader_assistant_hf_cost_calibration memory.
+// Costs and trail params identical to the 1h SMC stack; only the timeframe
+// and detector differ.
+const HF_BB_PERIOD = 20;
+const HF_BB_K = 2.0;
+const HF_KLINE_HISTORY = 200; // 15m bars — ~50h of context, plenty for BB(20) + SMA(50)
+
+/** Compute Bollinger Bands at index i. Returns null until enough history. */
+function computeBB(bars: Kline[], i: number, period: number, k: number): { mid: number; upper: number; lower: number } | null {
+  if (i < period - 1) return null;
+  let sum = 0, sq = 0;
+  for (let j = i - period + 1; j <= i; j++) {
+    sum += bars[j].close;
+    sq += bars[j].close ** 2;
+  }
+  const mid = sum / period;
+  const sd = Math.sqrt(Math.max(0, sq / period - mid * mid));
+  return { mid, upper: mid + k * sd, lower: mid - k * sd };
+}
+
+/** HF detector: scans the latest 15m bar for BB band-touch reversal. */
+function detectHfSignals(bars: Kline[], i: number): Signal[] {
+  const out: Signal[] = [];
+  const a = computeATR(bars, i);
+  if (!isFinite(a) || a <= 0) return out;
+  const bb = computeBB(bars, i, HF_BB_PERIOD, HF_BB_K);
+  if (!bb) return out;
+  const b = bars[i];
+  // BB_UP_SHORT: bar high pierced upper band, but closed back below = mean-reversion short
+  if (b.high >= bb.upper && b.close < bb.upper) {
+    out.push({ pattern: "BB_UP_SHORT", side: "SHORT", entryPrice: b.close, atrEntry: a });
+  }
+  // BB_LOW_LONG: symmetric — bar low pierced lower band, closed back above
+  if (b.low <= bb.lower && b.close > bb.lower) {
+    out.push({ pattern: "BB_LOW_LONG", side: "LONG", entryPrice: b.close, atrEntry: a });
+  }
+  return out;
+}
 
 function utcToday(): string { return new Date().toISOString().slice(0, 10); }
 function emptyDaily(): BinanceState["daily"] { return { date: utcToday(), profit: 0, tradesOpened: 0, capHit: false }; }
@@ -322,6 +366,19 @@ export class BinanceEngine extends EventEmitter {
   private perTradeMaxStake = 30;
   private perAssetEnabled: Record<string, boolean> = {};
   private perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean } = { OB_BULL: true, OB_BEAR: true, BOS_UP: true };
+  // ── HF (15m) state — separate from the 1h SMC stack above ──
+  private hfEnabled = false;
+  private hfStake = 1;
+  private hfLeverage = 30;
+  private hfAllowMultiplePerKey = false;
+  private hfPerPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean } = { BB_UP_SHORT: true, BB_LOW_LONG: true };
+  private hfPerAssetEnabled: Record<string, boolean> = {};
+  /** Separate rolling 15m kline buffer — keyed by asset. Populated lazily on
+   *  first HF tick after enabling, so disabling HF doesn't waste bandwidth. */
+  private bars15m: Map<string, Kline[]> = new Map();
+  private hfSignalLoopTimer: NodeJS.Timeout | null = null;
+  private hfTickCount = 0;
+  // ── End HF state ──
   private running = false;
   private signalLoopTimer: NodeJS.Timeout | null = null;
   private positionLoopTimer: NodeJS.Timeout | null = null;
@@ -345,7 +402,58 @@ export class BinanceEngine extends EventEmitter {
 
   state(): BinanceState { return { open: this.open, closed: this.closed, daily: this.daily }; }
 
-  configure(opts: { assets?: string[]; stake?: number; leverage?: number; dailyMaxLoss?: number; perTradeMaxStake?: number; perAssetEnabled?: Record<string, boolean>; perPatternEnabled?: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean } }) {
+  /** Force-close a single open trade at market. Used by the UI Cancel button.
+   *  Places a MARKET reduce-only order; the closeTradeFromFill path is invoked
+   *  via the user-data stream when Binance acks the fill, so P&L is captured
+   *  at the actual exit price. */
+  async cancelTrade(tradeId: string): Promise<{ ok: boolean; error?: string }> {
+    const t = this.open.find((x) => x.id === tradeId);
+    if (!t) return { ok: false, error: `Trade ${tradeId} not open` };
+    const lockKey = `close:${t.id}`;
+    if (this.busy.has(lockKey)) return { ok: false, error: "Cancel already in progress" };
+    this.busy.add(lockKey);
+    try {
+      const f = this.filters[t.asset];
+      const closeSide = t.side === "LONG" ? "SELL" : "BUY";
+      const positionSide = this.hedgeMode ? t.side : "BOTH";
+      this.emit("info", `cancel ${t.asset} ${t.pattern}/${t.side} qty=${t.qty} — placing market close`, {
+        asset: t.asset, pattern: t.pattern, side: t.side, qty: t.qty, tradeId: t.id,
+      });
+      await this.client.placeMarketOrder({
+        symbol: t.asset, side: closeSide as any,
+        quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
+        positionSide: positionSide as any,
+        clientOrderId: `cancel-${t.id.slice(0, 8)}-${Date.now()}`,
+      });
+      // Best-effort immediate local close at peak/entry — actual fill
+      // price will be refined by user-data ORDER_TRADE_UPDATE if it
+      // arrives, but the local state needs to update fast for the UI.
+      await this.closeTradeFromFill(t, t.peakFav || t.entryPrice);
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    } finally {
+      this.busy.delete(lockKey);
+    }
+  }
+
+  configure(opts: {
+    assets?: string[];
+    stake?: number;
+    leverage?: number;
+    dailyMaxLoss?: number;
+    perTradeMaxStake?: number;
+    perAssetEnabled?: Record<string, boolean>;
+    perPatternEnabled?: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean };
+    hf?: {
+      enabled?: boolean;
+      stake?: number;
+      leverage?: number;
+      allowMultiplePerKey?: boolean;
+      perPatternEnabled?: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
+      perAssetEnabled?: Record<string, boolean>;
+    };
+  }) {
     if (opts.assets) this.assets = opts.assets;
     if (opts.stake !== undefined) this.stake = opts.stake;
     if (opts.leverage !== undefined) this.leverage = opts.leverage;
@@ -353,6 +461,14 @@ export class BinanceEngine extends EventEmitter {
     if (opts.perTradeMaxStake !== undefined) this.perTradeMaxStake = opts.perTradeMaxStake;
     if (opts.perAssetEnabled) this.perAssetEnabled = opts.perAssetEnabled;
     if (opts.perPatternEnabled) this.perPatternEnabled = opts.perPatternEnabled;
+    if (opts.hf) {
+      if (opts.hf.enabled !== undefined) this.hfEnabled = opts.hf.enabled;
+      if (opts.hf.stake !== undefined) this.hfStake = opts.hf.stake;
+      if (opts.hf.leverage !== undefined) this.hfLeverage = opts.hf.leverage;
+      if (opts.hf.allowMultiplePerKey !== undefined) this.hfAllowMultiplePerKey = opts.hf.allowMultiplePerKey;
+      if (opts.hf.perPatternEnabled) this.hfPerPatternEnabled = opts.hf.perPatternEnabled;
+      if (opts.hf.perAssetEnabled) this.hfPerAssetEnabled = opts.hf.perAssetEnabled;
+    }
   }
 
   private rollDayIfNeeded() {
@@ -417,6 +533,11 @@ export class BinanceEngine extends EventEmitter {
     this.signalLoopTimer = setInterval(() => this.signalTick().catch((e) => this.emit("error", e as Error)), 60_000);
     // Position loop: every 5s update peakFav + ratchet trailing TP
     this.positionLoopTimer = setInterval(() => this.positionTick().catch((e) => this.emit("error", e as Error)), 5_000);
+    // HF signal loop: every 30s check if a new 15m bar closed
+    this.hfSignalLoopTimer = setInterval(() => this.hfSignalTick().catch((e) => this.emit("error", e as Error)), 30_000);
+    if (this.hfEnabled) this.emit("info", `HF stack enabled: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
+      stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
+    });
     this.emit("stateChanged");
   }
 
@@ -424,6 +545,7 @@ export class BinanceEngine extends EventEmitter {
     this.running = false;
     if (this.signalLoopTimer) { clearInterval(this.signalLoopTimer); this.signalLoopTimer = null; }
     if (this.positionLoopTimer) { clearInterval(this.positionLoopTimer); this.positionLoopTimer = null; }
+    if (this.hfSignalLoopTimer) { clearInterval(this.hfSignalLoopTimer); this.hfSignalLoopTimer = null; }
   }
 
   private async signalTick() {
@@ -431,6 +553,7 @@ export class BinanceEngine extends EventEmitter {
     if (this.daily.capHit) return;
     this.tickCount++;
     this.signalsThisTick = 0;
+    void this.hfTickCount; // referenced by HF loop
     const barsClosed: string[] = [];
     for (const sym of this.assets) {
       const buf = this.bars.get(sym);
@@ -477,7 +600,9 @@ export class BinanceEngine extends EventEmitter {
       });
     }
     for (const s of sigs) {
-      if (this.perPatternEnabled[s.pattern] === false) {
+      // detectSignalsFromCache only returns SMC patterns; safe cast.
+      const smcKey = s.pattern as "OB_BULL" | "OB_BEAR" | "BOS_UP";
+      if (this.perPatternEnabled[smcKey] === false) {
         this.emit("info", `skip ${sym} ${s.pattern}: pattern disabled`, { asset: sym, pattern: s.pattern });
         continue;
       }
@@ -496,12 +621,92 @@ export class BinanceEngine extends EventEmitter {
     this.structures.set(sym, structure);
   }
 
-  private async openTrade(sym: string, s: Signal, stake: number) {
+  // ─── HF (15m) loop ────────────────────────────────────────────────────
+  /** Per-30s poll: per asset, fetch the last 2 × 15m bars; if a new one
+   *  closed since last poll, append it and check for HF signals. Lazy-
+   *  seeds the 15m buffer on first call after enable. */
+  private async hfSignalTick() {
+    if (!this.hfEnabled) return;
+    this.rollDayIfNeeded();
+    if (this.daily.capHit) return;
+    this.hfTickCount++;
+    let signalsFired = 0;
+    const barsClosed: string[] = [];
+    for (const sym of this.assets) {
+      if (this.hfPerAssetEnabled[sym] === false) continue;
+      try {
+        let buf = this.bars15m.get(sym);
+        if (!buf) {
+          // First touch — seed the buffer with HF_KLINE_HISTORY bars of 15m history
+          buf = await this.client.getKlines(sym, "15m", HF_KLINE_HISTORY);
+          this.bars15m.set(sym, buf);
+          this.emit("info", `HF warmup ${sym}: ${buf.length} 15m bars`, { asset: sym, bars: buf.length });
+          continue; // skip detection on warmup tick — next bar close fires it
+        }
+        const latest = await this.client.getKlines(sym, "15m", 2);
+        if (latest.length === 0) continue;
+        const closed = latest[latest.length - 2] ?? latest[latest.length - 1];
+        const tail = buf[buf.length - 1];
+        if (!tail || closed.epoch > tail.epoch) {
+          buf.push(closed);
+          if (buf.length > HF_KLINE_HISTORY) buf.splice(0, buf.length - HF_KLINE_HISTORY);
+          barsClosed.push(sym);
+          signalsFired += await this.checkHfSignalsFor(sym);
+        }
+      } catch (e) {
+        this.emit("error", e as Error);
+      }
+    }
+    // Heartbeat — same idea as SMC tick: only log when bars closed OR every 30 idle ticks (~15min)
+    if (barsClosed.length > 0 || this.hfTickCount % 30 === 0) {
+      this.emit("info", `HF tick: bars=${barsClosed.length}${barsClosed.length ? ` (${barsClosed.join(",")})` : ""}, signals=${signalsFired}, hfOpen=${this.open.filter(t => isHfPattern(t.pattern)).length}`, {
+        tickCount: this.hfTickCount, barsClosed, signals: signalsFired,
+      });
+    }
+  }
+
+  private async checkHfSignalsFor(sym: string): Promise<number> {
+    const buf = this.bars15m.get(sym);
+    if (!buf || buf.length < Math.max(HF_BB_PERIOD, ATR_PERIOD) + 5) return 0;
+    const i = buf.length - 1;
+    const sigs = detectHfSignals(buf, i);
+    if (sigs.length === 0) return 0;
+    this.emit("info", `HF signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side}`).join(", ")}`, {
+      asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side, entryPrice: s.entryPrice })),
+    });
+    let opened = 0;
+    for (const s of sigs) {
+      if (this.hfPerPatternEnabled[s.pattern as "BB_UP_SHORT" | "BB_LOW_LONG"] === false) {
+        this.emit("info", `HF skip ${sym} ${s.pattern}: pattern disabled`, { asset: sym, pattern: s.pattern });
+        continue;
+      }
+      if (!this.hfAllowMultiplePerKey) {
+        const dup = this.open.find((t) => t.asset === sym && t.pattern === s.pattern && t.side === s.side);
+        if (dup) {
+          this.emit("info", `HF skip ${sym} ${s.pattern}/${s.side}: already open (allowMultiplePerKey=false)`, { asset: sym, pattern: s.pattern });
+          continue;
+        }
+      }
+      // HF stake/leverage are independent of the 1h SMC sizing.
+      const stake = Math.min(this.hfStake, this.perTradeMaxStake);
+      if (stake < 0.5) { // Binance min-notional floor is $5 — at lev 30× that's ~$0.17 stake; use 0.50 as practical min
+        this.emit("info", `HF skip ${sym} ${s.pattern}: stake $${stake} below $0.50 floor`, { asset: sym });
+        continue;
+      }
+      await this.openTrade(sym, s, stake, this.hfLeverage);
+      opened++;
+    }
+    return opened;
+  }
+  // ─── End HF loop ──────────────────────────────────────────────────────
+
+  private async openTrade(sym: string, s: Signal, stake: number, leverageOverride?: number) {
     const lockKey = `open:${sym}:${s.pattern}:${s.side}`;
     if (this.busy.has(lockKey)) return;
     this.busy.add(lockKey);
     try {
-      const notional = stake * this.leverage;
+      const effectiveLeverage = leverageOverride ?? this.leverage;
+      const notional = stake * effectiveLeverage;
       const refPrice = s.entryPrice;
       const f = this.filters[sym];
       if (!f) { this.emit("error", new Error(`No filters for ${sym} — cannot place order`)); return; }
@@ -511,9 +716,11 @@ export class BinanceEngine extends EventEmitter {
       if (qty * refPrice < f.minNotional) { this.emit("error", new Error(`${sym} notional ${(qty * refPrice).toFixed(2)} below minNotional ${f.minNotional}`)); return; }
 
       // Logical-trade UUID is embedded in clientOrderId so user-data stream
-      // updates can be matched back to this trade.
+      // updates can be matched back to this trade. Prefix differs by group
+      // so log readers can see at a glance whether a fill is HF or SMC.
       const tradeId = randomUUID();
-      const cid = `smc-${tradeId.slice(0, 8)}`;
+      const prefix = isHfPattern(s.pattern) ? "hf" : "smc";
+      const cid = `${prefix}-${tradeId.slice(0, 8)}`;
       const orderSide = s.side === "LONG" ? "BUY" : "SELL";
       const positionSide = this.hedgeMode ? (s.side === "LONG" ? "LONG" : "SHORT") : "BOTH";
 
@@ -527,7 +734,7 @@ export class BinanceEngine extends EventEmitter {
         pattern: s.pattern,
         side: s.side,
         stake,
-        leverage: this.leverage,
+        leverage: effectiveLeverage,
         notional,
         qty,
         entryEpoch: Math.floor(resp.updateTime / 1000),

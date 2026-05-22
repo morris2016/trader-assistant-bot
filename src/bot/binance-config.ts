@@ -25,6 +25,23 @@ export type BinanceConfig = {
   /** Operator intent: when true, engine resumes automatically on bot boot
    *  (e.g. after Railway redeploy). Toggled by Start/Stop in the UI. */
   autoStart: boolean;
+  /** HF (15m) strategy stack — BB_UP_SHORT + BB_LOW_LONG. Runs alongside
+   *  the 1h SMC patterns but on its own timeframe with its own sizing. */
+  hf: {
+    /** Master enable for the HF 15m loop. */
+    enabled: boolean;
+    /** $ stake per HF trade — typically much smaller than 1h stake. */
+    stake: number;
+    /** Leverage for HF trades (separate from main `leverage`). */
+    leverage: number;
+    /** Allow multiple concurrent trades on the same (asset × pattern × side)?
+     *  False = the engine skips a new signal if one is already open. */
+    allowMultiplePerKey: boolean;
+    /** Per-pattern enable map. */
+    perPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
+    /** Per-asset enable map (defaults to all 15 USDT-perps on). */
+    perAssetEnabled: Record<string, boolean>;
+  };
 };
 
 export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
@@ -35,6 +52,14 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
   perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
   perPatternEnabled: { OB_BULL: true, OB_BEAR: true, BOS_UP: true },
   autoStart: false,
+  hf: {
+    enabled: false,
+    stake: 1,
+    leverage: 30,
+    allowMultiplePerKey: false,
+    perPatternEnabled: { BB_UP_SHORT: true, BB_LOW_LONG: true },
+    perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
+  },
 };
 
 export function loadBinanceConfig(stateDir: string): BinanceConfig {
@@ -48,6 +73,12 @@ export function loadBinanceConfig(stateDir: string): BinanceConfig {
       ...parsed,
       perAssetEnabled: { ...DEFAULT_BINANCE_CONFIG.perAssetEnabled, ...(parsed.perAssetEnabled ?? {}) },
       perPatternEnabled: { ...DEFAULT_BINANCE_CONFIG.perPatternEnabled, ...(parsed.perPatternEnabled ?? {}) },
+      hf: {
+        ...DEFAULT_BINANCE_CONFIG.hf,
+        ...(parsed.hf ?? {}),
+        perAssetEnabled: { ...DEFAULT_BINANCE_CONFIG.hf.perAssetEnabled, ...(parsed.hf?.perAssetEnabled ?? {}) },
+        perPatternEnabled: { ...DEFAULT_BINANCE_CONFIG.hf.perPatternEnabled, ...(parsed.hf?.perPatternEnabled ?? {}) },
+      },
     };
   } catch {
     return { ...DEFAULT_BINANCE_CONFIG };

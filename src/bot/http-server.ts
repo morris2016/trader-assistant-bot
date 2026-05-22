@@ -208,6 +208,7 @@ export function startHttpServer(opts: {
     stop: () => Promise<{ ok: boolean }>;
     getConfig: () => any;
     updateConfig: (patch: any) => Promise<void>;
+    cancelTrade: (tradeId: string) => Promise<{ ok: boolean; error?: string }>;
   };
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
@@ -608,6 +609,18 @@ export function startHttpServer(opts: {
               const patch = JSON.parse(body);
               await b.updateConfig(patch);
               json(res, 200, { ok: true, config: b.getConfig() });
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+            }
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/cancel-trade") {
+            const body = await readBody(req);
+            try {
+              const parsed = JSON.parse(body) as { tradeId?: string };
+              if (!parsed.tradeId) { json(res, 400, { ok: false, error: "Missing tradeId" }); return; }
+              const result = await b.cancelTrade(parsed.tradeId);
+              json(res, result.ok ? 200 : 400, result);
             } catch (e: any) {
               json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
             }
