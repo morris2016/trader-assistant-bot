@@ -40,13 +40,18 @@ export function BinancePositionsPanel() {
               <tr>
                 <th>Asset</th><th>Pattern</th><th>Side</th>
                 <th>Stake</th><th>Lev</th>
-                <th>Entry</th><th>Peak</th><th>Δ%</th>
+                <th>Entry</th><th>Mark</th><th>Peak</th>
+                <th title="Live % from entry to current mark, signed by side">Δ%</th>
+                <th title="Unrealized $ P&L on this position">uPnL</th>
                 <th>Armed</th><th>Opened (EAT)</th>
               </tr>
             </thead>
             <tbody>
               {open.map((t: any) => {
-                const pct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+                const mark = +(t.markPrice ?? t.peakFav ?? t.entryPrice);
+                const livePct = ((mark - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+                const peakPct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+                const uPnl = (+t.stake) * (+t.leverage) * (livePct / 100);
                 return (
                   <tr key={t.id}>
                     <td className="mono">
@@ -65,8 +70,10 @@ export function BinancePositionsPanel() {
                     <td className="mono">${(+t.stake).toFixed(2)}</td>
                     <td className="mono">{t.leverage}×</td>
                     <td className="mono">${(+t.entryPrice).toFixed(5)}</td>
-                    <td className="mono">${(+t.peakFav).toFixed(5)}</td>
-                    <td className="mono" style={{ color: pct >= 0 ? "#5fd4a4" : "#d4655f" }}>{pct >= 0 ? "+" : ""}{pct.toFixed(2)}%</td>
+                    <td className="mono" title="Live mark price">${mark.toFixed(5)}</td>
+                    <td className="mono muted" title={`Peak favorable: ${peakPct >= 0 ? "+" : ""}${peakPct.toFixed(2)}%`}>${(+t.peakFav).toFixed(5)}</td>
+                    <td className="mono" style={{ color: livePct >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>{livePct >= 0 ? "+" : ""}{livePct.toFixed(2)}%</td>
+                    <td className="mono" style={{ color: uPnl >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>{uPnl >= 0 ? "+" : ""}${uPnl.toFixed(2)}</td>
                     <td>{t.armed ? <span className="pill pill-green">●</span> : <span className="muted">·</span>}</td>
                     <td className="muted">{fmtEatTime(t.entryEpoch)}</td>
                   </tr>

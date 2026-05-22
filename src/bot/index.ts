@@ -36,6 +36,7 @@ import { BotStorage, DEFAULT_FAST1_CONFIG, DEFAULT_FAST2_CONFIG, DEFAULT_FAST3_C
 import { startHttpServer } from "./http-server";
 import { PaperEngine, emptyPaperState } from "./paper-engine";
 import path from "node:path";
+import { existsSync, readFileSync, promises as fsp } from "node:fs";
 
 async function main() {
   // Start a minimal logger BEFORE config so any config error gets logged.
@@ -464,6 +465,54 @@ async function main() {
   binanceEngine.on("closed", (t) => log.info(`binance closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`, { asset: t.asset, pattern: t.pattern, side: t.side, pnl: t.pnl, exitPrice: t.closePrice }));
   binanceEngine.on("info", (msg, meta) => log.info(`binance ${msg}`, meta));
   binanceEngine.on("capHit", (loss, cap) => log.warn(`binance daily cap hit: loss $${loss.toFixed(2)} >= cap $${cap.toFixed(2)}`));
+
+  // ── Binance state persistence (open + closed trades, daily counters) ──
+  // File lives at <stateDir>/binance-state.json. On every "opened"/"closed"
+  // event we mark dirty and flush within 1s; on graceful shutdown we flush
+  // immediately. On bot boot we read this file BEFORE start() so the engine
+  // resumes with the prior open[] / closed[] arrays — survives Railway
+  // redeploys, container restarts, etc.
+  const binanceStateFile = path.join(cfg.stateDir, "binance-state.json");
+  let binanceStateDirty = false;
+  let binanceStateFlushTimer: NodeJS.Timeout | null = null;
+  async function flushBinanceState() {
+    if (!binanceStateDirty) return;
+    binanceStateDirty = false;
+    try {
+      const tmp = binanceStateFile + ".tmp";
+      await fsp.writeFile(tmp, JSON.stringify(binanceEngine.state(), null, 2), "utf8");
+      await fsp.rename(tmp, binanceStateFile);
+    } catch (e) {
+      log.warn("binance state flush failed", { err: (e as Error).message });
+    }
+  }
+  function scheduleBinanceStateFlush() {
+    binanceStateDirty = true;
+    if (binanceStateFlushTimer) return;
+    binanceStateFlushTimer = setTimeout(() => {
+      binanceStateFlushTimer = null;
+      flushBinanceState().catch(() => {});
+    }, 1000);
+  }
+  binanceEngine.on("stateChanged", scheduleBinanceStateFlush);
+  binanceEngine.on("opened", () => { scheduleBinanceStateFlush(); });
+  binanceEngine.on("closed", () => { scheduleBinanceStateFlush(); });
+  // Boot-time reload — load BEFORE we configure assets or start the engine.
+  try {
+    if (existsSync(binanceStateFile)) {
+      const raw = readFileSync(binanceStateFile, "utf8");
+      const parsed = JSON.parse(raw);
+      binanceEngine.load(parsed);
+      log.info(`binance state reloaded: ${parsed.open?.length ?? 0} open, ${parsed.closed?.length ?? 0} closed`, {
+        open: parsed.open?.length ?? 0, closed: parsed.closed?.length ?? 0,
+      });
+    } else {
+      log.info("binance state: no prior file, fresh start");
+    }
+  } catch (e) {
+    log.warn("binance state reload failed — starting fresh", { err: (e as Error).message });
+  }
+
   let binanceRunning = false;
   let binanceTestnet = false;
   async function configureBinanceFromCreds(): Promise<{ ok: boolean; testnet: boolean }> {
@@ -3325,6 +3374,10 @@ async function main() {
       await deriv.forgetAll("ticks").catch(() => undefined);
     } catch {}
     try { deriv.close(); } catch {}
+    // Flush Binance state synchronously so we don't lose open trades on redeploy
+    if (binanceStateFlushTimer) { clearTimeout(binanceStateFlushTimer); binanceStateFlushTimer = null; }
+    binanceStateDirty = true;
+    await flushBinanceState().catch(() => {});
     await httpServer.close().catch(() => undefined);
     log.info("shutdown complete");
     process.exit(0);

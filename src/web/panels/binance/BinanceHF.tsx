@@ -83,7 +83,10 @@ export function BinanceHFPanel() {
       if (!isHf(t.pattern)) continue;
       aliveIds.add(t.id);
       const arr = progressRef.current.get(t.id) ?? [];
-      const pct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+      // Use live mark price so the chart shows real adverse moves, not just
+      // the peak-favorable envelope.
+      const ref = +(t.markPrice ?? t.peakFav ?? t.entryPrice);
+      const pct = ((ref - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
       arr.push({ ts: now, pct });
       if (arr.length > 600) arr.splice(0, arr.length - 600); // 600 samples × 3s ≈ 30min window
       progressRef.current.set(t.id, arr);
@@ -216,13 +219,18 @@ export function BinanceHFPanel() {
                 <tr>
                   <th>Asset</th><th>Pattern</th><th>Side</th>
                   <th>Stake</th><th>Lev</th>
-                  <th>Entry</th><th>Peak</th><th>Δ%</th>
+                  <th>Entry</th><th>Mark</th><th>Peak</th>
+                  <th title="Live Δ% from entry to current mark (signed by side)">Δ%</th>
+                  <th title="Unrealized $ P&L">uPnL</th>
                   <th>Armed</th><th>Opened (EAT)</th><th></th>
                 </tr>
               </thead>
               <tbody>
                 {hfOpen.map((t: any) => {
-                  const pct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+                  const mark = +(t.markPrice ?? t.peakFav ?? t.entryPrice);
+                  const livePct = ((mark - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+                  const peakPct = ((+t.peakFav - +t.entryPrice) / +t.entryPrice) * 100 * (t.side === "LONG" ? 1 : -1);
+                  const uPnl = (+t.stake) * (+t.leverage) * (livePct / 100);
                   const busy = !!cancelBusy[t.id];
                   return (
                     <tr key={t.id}>
@@ -238,9 +246,13 @@ export function BinanceHFPanel() {
                       <td className="mono">${(+t.stake).toFixed(2)}</td>
                       <td className="mono">{t.leverage}×</td>
                       <td className="mono">${(+t.entryPrice).toFixed(5)}</td>
-                      <td className="mono">${(+t.peakFav).toFixed(5)}</td>
-                      <td className="mono" style={{ color: pct >= 0 ? "#5fd4a4" : "#d4655f" }}>
-                        {pct >= 0 ? "+" : ""}{pct.toFixed(2)}%
+                      <td className="mono" title="Live mark price">${mark.toFixed(5)}</td>
+                      <td className="mono muted" title={`Peak favorable: ${peakPct >= 0 ? "+" : ""}${peakPct.toFixed(2)}%`}>${(+t.peakFav).toFixed(5)}</td>
+                      <td className="mono" style={{ color: livePct >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>
+                        {livePct >= 0 ? "+" : ""}{livePct.toFixed(2)}%
+                      </td>
+                      <td className="mono" style={{ color: uPnl >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>
+                        {uPnl >= 0 ? "+" : ""}${uPnl.toFixed(2)}
                       </td>
                       <td>{t.armed ? <span className="pill pill-green">●</span> : <span className="muted">·</span>}</td>
                       <td className="muted">{fmtEatTime(t.entryEpoch)}</td>

@@ -56,6 +56,13 @@ export type BinanceTrade = {
   commissionEntry?: number;
   /** Sum of commissions on the close-side fills (USDT, positive). */
   commissionExit?: number;
+  /** Current mark price (updated every positionTick poll). UI reads this
+   *  to display REAL current Δ% from entry, not peak-from-entry which
+   *  only moves favorably. */
+  markPrice?: number;
+  /** Last time markPrice was refreshed (epoch seconds) — UI uses this
+   *  to fade stale values if the polling loop stalls. */
+  markUpdatedAt?: number;
 };
 
 export type BinanceState = {
@@ -917,6 +924,11 @@ export class BinanceEngine extends EventEmitter {
     const trailDist = TRAIL_RETRACE_ATR * t.atrEntry;
     let stateChanged = false;
     const wasArmed = t.armed;
+    // Always update markPrice so the UI sees real current price and Δ%
+    // including adverse moves (peakFav by design only advances favorably).
+    t.markPrice = markPrice;
+    t.markUpdatedAt = Math.floor(Date.now() / 1000);
+    stateChanged = true;
     if (t.side === "LONG") {
       if (markPrice > t.peakFav) { t.peakFav = markPrice; stateChanged = true; }
       if (!t.armed && t.peakFav >= t.entryPrice + armDist) { t.armed = true; stateChanged = true; }
