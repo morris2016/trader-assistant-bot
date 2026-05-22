@@ -22,18 +22,20 @@ import { BinancePositionsPanel } from "./panels/binance/BinancePositions";
 import { BinanceTradesPanel } from "./panels/binance/BinanceTrades";
 import { BinanceStrategiesPanel } from "./panels/binance/BinanceStrategies";
 import { BinanceHFPanel } from "./panels/binance/BinanceHF";
+import { BinanceExternalPanel } from "./panels/binance/BinanceExternal";
 import { BinanceLogsPanel } from "./panels/binance/BinanceLogs";
 import { BinanceSettingsPanel } from "./panels/binance/BinanceSettings";
 
 const REFRESH_MS = 3000;
 
 type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "fast4" | "adaptive" | "logs" | "settings";
-type BinanceTabId = "overview" | "positions" | "trades" | "strategies" | "hf" | "logs" | "settings";
+type BinanceTabId = "overview" | "positions" | "external" | "trades" | "strategies" | "hf" | "logs" | "settings";
 type Mode = "deriv" | "binance";
 
 const BINANCE_TABS: { id: BinanceTabId; label: string; icon: string }[] = [
   { id: "overview",   label: "Overview",   icon: "◆" },
   { id: "positions",  label: "Positions",  icon: "▣" },
+  { id: "external",   label: "External",   icon: "↪" },
   { id: "trades",     label: "Trades",     icon: "≡" },
   { id: "strategies", label: "Strategies", icon: "⚛" },
   { id: "hf",         label: "HF",         icon: "⚡" },
@@ -61,6 +63,12 @@ export function App() {
   const [tab, setTab] = useState<TabId>("overview");
   const [bTab, setBTab] = useState<BinanceTabId>("overview");
   const [mode, setMode] = useState<Mode>("deriv");
+  // Toggle a body-level class so the Binance-mode palette applies to the
+  // full viewport background, not just the .shell grid.
+  useEffect(() => {
+    if (mode === "binance") document.body.classList.add("binance-mode");
+    else document.body.classList.remove("binance-mode");
+  }, [mode]);
   const [state, setState] = useState<StateResp | null>(null);
   const [strategies, setStrategies] = useState<StrategyStats[]>([]);
   const [subs, setSubs] = useState<Subscription[]>([]);
@@ -103,7 +111,7 @@ export function App() {
   const stale = Date.now() - lastFetch > REFRESH_MS * 2;
 
   return (
-    <div className="shell">
+    <div className={`shell ${mode === "binance" ? "binance-mode" : ""}`}>
       {mode === "binance"
         ? <BinanceSidebar tab={bTab} setTab={setBTab} />
         : <Sidebar tab={tab} setTab={setTab} state={state} subs={subs} strategies={strategies} />}
@@ -114,6 +122,7 @@ export function App() {
           <>
             {bTab === "overview"   && <BinanceOverviewPanel />}
             {bTab === "positions"  && <BinancePositionsPanel />}
+            {bTab === "external"   && <BinanceExternalPanel />}
             {bTab === "trades"     && <BinanceTradesPanel />}
             {bTab === "strategies" && <BinanceStrategiesPanel />}
             {bTab === "hf"         && <BinanceHFPanel />}
@@ -307,15 +316,19 @@ function ModeSwitcher({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => voi
     background: "#0f1626", color: "#8a95b8", cursor: "pointer",
     fontSize: 14, fontWeight: 600,
   };
-  const activeStyle: React.CSSProperties = {
+  // Binance active = Binance-gold pill with black text; Deriv active = blue
+  const derivActiveStyle: React.CSSProperties = {
     ...baseStyle, background: "#4a89e0", color: "#fff", border: "1px solid #4a89e0",
+  };
+  const binanceActiveStyle: React.CSSProperties = {
+    ...baseStyle, background: "#fcd535", color: "#0c0c0c", border: "1px solid #fcd535",
   };
   return (
     <div style={{ display: "flex", gap: 10, marginBottom: 16, paddingBottom: 12, borderBottom: "1px solid #1e2842" }}>
-      <button style={mode === "deriv" ? activeStyle : baseStyle} onClick={() => setMode("deriv")}>
+      <button style={mode === "deriv" ? derivActiveStyle : baseStyle} onClick={() => setMode("deriv")}>
         Deriv
       </button>
-      <button style={mode === "binance" ? activeStyle : baseStyle} onClick={() => setMode("binance")}>
+      <button style={mode === "binance" ? binanceActiveStyle : baseStyle} onClick={() => setMode("binance")}>
         Binance
       </button>
     </div>

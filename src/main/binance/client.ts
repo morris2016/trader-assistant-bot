@@ -39,7 +39,18 @@ export type SymbolFilters = {
 };
 
 export type AccountBalance = { asset: string; balance: number; availableBalance: number };
-export type Position = { symbol: string; positionAmt: number; entryPrice: number; unRealizedProfit: number; leverage: number; positionSide: PositionSide };
+export type Position = {
+  symbol: string;
+  positionAmt: number;
+  entryPrice: number;
+  unRealizedProfit: number;
+  leverage: number;
+  positionSide: PositionSide;
+  markPrice: number;
+  liquidationPrice: number;
+  /** Server-side updateTime in epoch ms (when the position was last modified). */
+  updateTime: number;
+};
 
 export type OrderResponse = {
   orderId: number;
@@ -147,6 +158,8 @@ export class BinanceClient extends EventEmitter {
     return (data as any[]).map(p => ({
       symbol: p.symbol, positionAmt: +p.positionAmt, entryPrice: +p.entryPrice,
       unRealizedProfit: +p.unRealizedProfit, leverage: +p.leverage, positionSide: p.positionSide,
+      markPrice: +p.markPrice, liquidationPrice: +p.liquidationPrice,
+      updateTime: +p.updateTime,
     }));
   }
 

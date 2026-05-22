@@ -247,3 +247,68 @@ tbody tr:hover td { background: var(--bg-elev2); }
 }
 .banner-warn { background: var(--amber-soft); border: 1px solid var(--amber); color: var(--amber); }
 .banner-danger { background: var(--red-soft); border: 1px solid var(--red); color: var(--red); }
+.banner-info { background: var(--blue-soft); border: 1px solid var(--blue); color: var(--blue); }
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Binance mode — applied at the App root when user is in Binance mode.
+ * Overrides the palette to Binance's iconic black + yellow ("BNB gold").
+ * Keeps red/green for up/down (universal trading colors) but tunes them
+ * to Binance's exact shades. The aim: make it visually obvious the
+ * user is on a different surface than the Deriv side.
+ * ═══════════════════════════════════════════════════════════════════ */
+.binance-mode {
+  --bg: #0c0c0c;
+  --bg-elev1: #181a20;
+  --bg-elev2: #1e2026;
+  --bg-elev3: #2b3139;
+  --border: #2b3139;
+  --border-soft: #3a3f4a;
+  --border-strong: #545862;
+  --text: #eaecef;
+  --text-dim: #b7bdc6;
+  --text-faint: #848e9c;
+  --green: #0ecb81;
+  --green-soft: rgba(14, 203, 129, 0.15);
+  --green-dim: rgba(14, 203, 129, 0.5);
+  --red: #f6465d;
+  --red-soft: rgba(246, 70, 93, 0.15);
+  --red-dim: rgba(246, 70, 93, 0.5);
+  --amber: #fcd535;            /* Binance gold — used for warning + primary */
+  --amber-soft: rgba(252, 213, 53, 0.15);
+  --blue: #fcd535;             /* In Binance mode, "primary" IS the gold */
+  --blue-soft: rgba(252, 213, 53, 0.12);
+}
+.binance-mode body, .binance-mode {
+  background: var(--bg);
+}
+/* Active nav uses Binance gold for the bar accent */
+.binance-mode .nav-item.active {
+  background: var(--blue-soft);
+  color: var(--amber);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+/* Primary buttons turn Binance gold with black text (classic Binance CTA) */
+.binance-mode .btn-primary {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #0c0c0c;
+  font-weight: 600;
+}
+.binance-mode .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+/* Links pick up gold instead of blue */
+.binance-mode a { color: var(--amber); }
+/* Subtle ribbon at the top so you always know it's Binance mode */
+.binance-mode .header {
+  border-bottom-color: var(--amber);
+  border-bottom-width: 2px;
+}
+.binance-mode .sidebar {
+  border-right-color: #2b3139;
+  background: #0c0c0c;
+}
+.binance-mode .sidebar-brand {
+  color: var(--amber);
+}

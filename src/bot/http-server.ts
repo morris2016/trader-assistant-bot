@@ -209,6 +209,8 @@ export function startHttpServer(opts: {
     getConfig: () => any;
     updateConfig: (patch: any) => Promise<void>;
     cancelTrade: (tradeId: string) => Promise<{ ok: boolean; error?: string }>;
+    externalPositions: () => Promise<Array<any>>;
+    closeExternal: (symbol: string, side: "LONG" | "SHORT", qty: number) => Promise<{ ok: boolean; error?: string }>;
   };
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
@@ -620,6 +622,30 @@ export function startHttpServer(opts: {
               const parsed = JSON.parse(body) as { tradeId?: string };
               if (!parsed.tradeId) { json(res, 400, { ok: false, error: "Missing tradeId" }); return; }
               const result = await b.cancelTrade(parsed.tradeId);
+              json(res, result.ok ? 200 : 400, result);
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+            }
+            return;
+          }
+          if (req.method === "GET" && path0 === "/api/binance/external-positions") {
+            try {
+              const positions = await b.externalPositions();
+              json(res, 200, { positions });
+            } catch (e: any) {
+              json(res, 500, { error: e?.message ?? String(e) });
+            }
+            return;
+          }
+          if (req.method === "POST" && path0 === "/api/binance/close-external") {
+            const body = await readBody(req);
+            try {
+              const parsed = JSON.parse(body) as { symbol?: string; side?: "LONG" | "SHORT"; qty?: number };
+              if (!parsed.symbol || !parsed.side || !parsed.qty) {
+                json(res, 400, { ok: false, error: "Missing symbol, side, or qty" });
+                return;
+              }
+              const result = await b.closeExternal(parsed.symbol, parsed.side, parsed.qty);
               json(res, result.ok ? 200 : 400, result);
             } catch (e: any) {
               json(res, 400, { ok: false, error: e?.message ?? "Bad body" });

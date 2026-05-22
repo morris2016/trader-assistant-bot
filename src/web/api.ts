@@ -454,6 +454,16 @@ export const api = {
     postJson<{ ok: boolean; config?: BinanceConfig; error?: string }>("/api/binance/update-config", patch),
   binanceCancelTrade: (tradeId: string) =>
     postJson<{ ok: boolean; error?: string }>("/api/binance/cancel-trade", { tradeId }),
+  binanceExternalPositions: () =>
+    get<{ positions: Array<{
+      symbol: string; positionSide: "LONG" | "SHORT";
+      qty: number; entryPrice: number; markPrice: number;
+      unRealizedProfit: number; leverage: number;
+      liquidationPrice: number; updateTime: number;
+      botQty: number; externalQty: number;
+    }> }>("/api/binance/external-positions"),
+  binanceCloseExternal: (symbol: string, side: "LONG" | "SHORT", qty: number) =>
+    postJson<{ ok: boolean; error?: string }>("/api/binance/close-external", { symbol, side, qty }),
   binanceDiag: () => get<{ stateDir: string; stateDirExists: boolean; files: Array<{ file: string; exists: boolean; sizeBytes?: number; mtime?: string }>; note: string }>("/api/binance/diag"),
 };
 

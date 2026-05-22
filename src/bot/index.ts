@@ -1521,6 +1521,9 @@ async function main() {
         log.info("binance config updated", { ...binanceConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
       },
       cancelTrade: async (tradeId: string) => binanceEngine.cancelTrade(tradeId),
+      externalPositions: async () => binanceEngine.externalPositions(),
+      closeExternal: async (symbol: string, side: "LONG" | "SHORT", qty: number) =>
+        binanceEngine.closeExternal(symbol, side, qty),
       setCreds: async (apiKey: string, apiSecret: string, testnet: boolean) => {
         await saveBinanceCreds(cfg.stateDir, { apiKey, apiSecret, testnet });
         await configureBinanceFromCreds();

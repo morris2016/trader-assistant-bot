@@ -421,6 +421,76 @@ export class BinanceEngine extends EventEmitter {
 
   state(): BinanceState { return { open: this.open, closed: this.closed, daily: this.daily }; }
 
+  /** Returns the list of Binance positions that the bot does NOT track in
+   *  its local open[] — i.e., positions opened directly on Binance (manual
+   *  trades) or zombies left behind by older bot versions. Used by the
+   *  External tab in the UI. */
+  async externalPositions(): Promise<Array<{
+    symbol: string; positionSide: BinanceTradeSide;
+    qty: number; entryPrice: number; markPrice: number;
+    unRealizedProfit: number; leverage: number;
+    liquidationPrice: number; updateTime: number;
+    botQty: number; externalQty: number;
+  }>> {
+    const positions = await this.client.getPositions();
+    const out: Array<any> = [];
+    for (const p of positions) {
+      const qty = Math.abs(+p.positionAmt);
+      if (qty < 1e-9) continue;
+      const side: BinanceTradeSide = p.positionSide === "SHORT" ? "SHORT" :
+                                      p.positionSide === "LONG"  ? "LONG"  :
+                                      (+p.positionAmt >= 0 ? "LONG" : "SHORT");
+      // How much of this Binance position does the bot account for?
+      const botQty = this.open
+        .filter((t) => t.asset === p.symbol && t.side === side)
+        .reduce((s, t) => s + t.qty, 0);
+      const externalQty = Math.max(0, qty - botQty);
+      // Only surface positions with material un-tracked qty (>1% of total).
+      if (externalQty / Math.max(qty, 1e-9) < 0.01) continue;
+      out.push({
+        symbol: p.symbol, positionSide: side,
+        qty, entryPrice: p.entryPrice, markPrice: p.markPrice,
+        unRealizedProfit: p.unRealizedProfit, leverage: p.leverage,
+        liquidationPrice: p.liquidationPrice, updateTime: p.updateTime,
+        botQty, externalQty,
+      });
+    }
+    return out;
+  }
+
+  /** Close a Binance position directly by symbol + side, regardless of
+   *  whether the bot tracks it. Used by the External tab's Cancel button —
+   *  reduce-only MARKET that drains the un-tracked quantity. */
+  async closeExternal(symbol: string, side: BinanceTradeSide, qty: number): Promise<{ ok: boolean; error?: string }> {
+    const lockKey = `external-close:${symbol}:${side}`;
+    if (this.busy.has(lockKey)) return { ok: false, error: "Close already in progress" };
+    this.busy.add(lockKey);
+    try {
+      const f = this.filters[symbol];
+      const stepSize = f?.stepSize ?? 0.001;
+      const qP = f?.quantityPrecision ?? 3;
+      // Round qty DOWN to nearest stepSize, then format to required precision
+      const safeQty = Math.floor(qty / stepSize) * stepSize;
+      if (safeQty <= 0) return { ok: false, error: `qty ${qty} rounds to 0 at stepSize ${stepSize}` };
+      const closeSide = side === "LONG" ? "SELL" : "BUY";
+      const positionSide = this.hedgeMode ? side : "BOTH";
+      this.emit("info", `external cancel ${symbol} ${side} qty=${safeQty} (user-requested via External tab)`, {
+        asset: symbol, side, qty: safeQty,
+      });
+      await this.client.placeMarketOrder({
+        symbol, side: closeSide as any,
+        quantity: Number(fmtQty(safeQty, qP)),
+        positionSide: positionSide as any,
+        clientOrderId: `ext-${Date.now()}`,
+      });
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    } finally {
+      this.busy.delete(lockKey);
+    }
+  }
+
   /** Force-close a single open trade at market. Used by the UI Cancel button.
    *  Places a MARKET reduce-only order; the closeTradeFromFill path is invoked
    *  via the user-data stream when Binance acks the fill, so P&L is captured
