@@ -43,7 +43,19 @@ export type BinanceTrade = {
   status: "OPEN" | "CLOSED";
   closeEpoch?: number;
   closePrice?: number;
+  /** Net realized P&L in USDT. Initially set from the local estimate
+   *  (stake×leverage×pctMove) at close time; overwritten with the exchange's
+   *  real net (`realizedPnlExchange − commissionEntry − commissionExit`)
+   *  once both fill events arrive via the user-data stream. */
   pnl?: number;
+  /** Exchange-reported realized profit from ORDER_TRADE_UPDATE.rp. Sums
+   *  every fill on the close order. Zero on entry-only fills. */
+  realizedPnlExchange?: number;
+  /** Sum of commissions paid on the entry-side fills (USDT, always
+   *  positive). Populated from ORDER_TRADE_UPDATE.n on each entry fill. */
+  commissionEntry?: number;
+  /** Sum of commissions on the close-side fills (USDT, positive). */
+  commissionExit?: number;
 };
 
 export type BinanceState = {
@@ -792,7 +804,9 @@ export class BinanceEngine extends EventEmitter {
   }
 
   /** Handle user-data stream events. Match orders to local trades via
-   *  clientOrderId. Captures real fill prices (overrides our peakFav estimate). */
+   *  clientOrderId. Captures real fill prices, exchange-reported realized
+   *  profit (`rp`), and commission (`n`) so the displayed PnL matches what
+   *  actually hits the wallet, not the gross local estimate. */
   private onUserEvent(ev: any) {
     if (ev?.e !== "ORDER_TRADE_UPDATE") return;
     const o = ev.o;
@@ -800,32 +814,59 @@ export class BinanceEngine extends EventEmitter {
     const cid: string = o.c ?? "";
     const execType: string = o.x ?? "";        // "NEW" | "TRADE" | "CANCELED" | "EXPIRED"
     const status: string = o.X ?? "";          // "FILLED" | "PARTIALLY_FILLED" | "NEW" | "CANCELED"
-    const avgPrice = +o.ap || 0;               // average fill price
+    if (execType !== "TRADE") return;          // only care about actual fills
+    const avgPrice = +o.ap || 0;
     const lastFillPrice = +o.L || 0;
-    const cumQty = +o.z || 0;
-    const orderId = +o.i || 0;
+    const fillPrice = avgPrice || lastFillPrice;
+    const realizedPnl = +o.rp || 0;            // exchange realized profit for this fill
+    const commission = Math.abs(+o.n || 0);    // fee paid for this fill (positive)
 
-    // Match by clientOrderId prefix to a logical trade
-    const matchedEntry = this.open.find((t) => (t as any).clientOrderId === cid);
-    if (matchedEntry && execType === "TRADE" && status === "FILLED") {
-      // Entry order fully filled — update real entry price
-      const fillPrice = avgPrice || lastFillPrice;
+    // ── Entry fill: cid matches a logical trade in open[] exactly ──
+    const entryMatch = this.open.find((t) => (t as any).clientOrderId === cid);
+    if (entryMatch) {
       if (fillPrice > 0) {
-        matchedEntry.entryPrice = fillPrice;
-        matchedEntry.peakFav = fillPrice;
-        this.emit("stateChanged");
+        entryMatch.entryPrice = fillPrice;
+        entryMatch.peakFav = fillPrice;
       }
+      entryMatch.commissionEntry = (entryMatch.commissionEntry ?? 0) + commission;
+      this.emit("stateChanged");
       return;
     }
 
-    // TP-stop order fill: clientOrderId starts with "tp-<8charTradeId>-..."
-    if (cid.startsWith("tp-") && execType === "TRADE" && status === "FILLED") {
-      const idPrefix = cid.split("-")[1];
-      const tp = this.open.find((t) => t.id.startsWith(idPrefix));
-      if (tp) {
-        const fillPrice = avgPrice || lastFillPrice;
-        this.closeTradeFromFill(tp, fillPrice).catch((e) => this.emit("error", e as Error));
+    // ── Exit fill: clientOrderId carries the trade-id prefix ──
+    // Prefixes: "tp-" (legacy STOP), "close-" (trail trigger), "cancel-" (manual)
+    if (cid.startsWith("tp-") || cid.startsWith("close-") || cid.startsWith("cancel-")) {
+      const parts = cid.split("-");
+      const idPrefix = parts[1] ?? "";
+      if (!idPrefix) return;
+      // The trade may be in open[] (race: stream fired before closeTradeFromFill)
+      // or already in closed[] (normal case).
+      const inOpen = this.open.find((t) => t.id.startsWith(idPrefix));
+      if (inOpen) {
+        // Stream beat the local close path. Let closeTradeFromFill drive the
+        // close (it'll move the trade to closed[]), then we'll reconcile fees
+        // + rp via the next user-stream event if any further fill arrives.
+        inOpen.commissionExit = (inOpen.commissionExit ?? 0) + commission;
+        inOpen.realizedPnlExchange = (inOpen.realizedPnlExchange ?? 0) + realizedPnl;
+        if (status === "FILLED") {
+          this.closeTradeFromFill(inOpen, fillPrice).catch((e) => this.emit("error", e as Error));
+        }
+        return;
       }
+      const inClosed = this.closed.find((t) => t.id.startsWith(idPrefix));
+      if (!inClosed) return;
+      // Reconcile real values onto the already-closed trade.
+      inClosed.commissionExit = (inClosed.commissionExit ?? 0) + commission;
+      inClosed.realizedPnlExchange = (inClosed.realizedPnlExchange ?? 0) + realizedPnl;
+      const prevPnl = inClosed.pnl ?? 0;
+      const entryComm = inClosed.commissionEntry ?? 0;
+      const exitComm = inClosed.commissionExit ?? 0;
+      const newPnl = (inClosed.realizedPnlExchange ?? 0) - entryComm - exitComm;
+      inClosed.pnl = newPnl;
+      // Daily profit was incremented with the gross estimate in
+      // closeTradeFromFill — adjust by the delta.
+      this.daily.profit += (newPnl - prevPnl);
+      this.emit("stateChanged");
     }
   }
 
