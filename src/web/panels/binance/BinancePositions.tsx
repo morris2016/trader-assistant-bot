@@ -1,11 +1,14 @@
-// Open positions table + per-trade Cancel + live progress chart.
-// Shows all open positions across all stacks (1h SMC + 15m HF), with live
-// mark price, real Δ% (from mark, not peak), uPnL, and per-row Cancel button.
-// Includes a multi-line SVG of Δ% over time so the operator can watch the
-// trades breathe.
+// Open positions table — 1h SMC stack only (OB_BULL, OB_BEAR, BOS_UP).
+// HF (15m BB) trades are shown on the HF tab so the two stacks stay
+// visually separated. Includes live mark price, real Δ% (from mark, not
+// peak), uPnL, per-row Cancel button, and a multi-line progress chart.
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api, fmtEatTime } from "../../api";
+
+// 1h SMC patterns. HF patterns are filtered out of this view.
+const SMC_PATTERNS = new Set(["OB_BULL", "OB_BEAR", "BOS_UP"]);
+function isSmc(pattern: string): boolean { return SMC_PATTERNS.has(pattern); }
 
 function binanceUrl(symbol: string, testnet: boolean): string {
   return testnet
@@ -21,11 +24,12 @@ export function BinancePositionsPanel() {
   async function refresh() { try { setBs(await api.binanceState()); } catch {} }
   useEffect(() => { refresh(); const id = setInterval(refresh, 3000); return () => clearInterval(id); }, []);
 
-  // Per-open-trade live progress snapshots (ref, ephemeral, ~30min window)
+  // Per-open-trade live progress snapshots (ref, ephemeral, ~30min window).
+  // Filters to SMC patterns only so the chart matches the table.
   const progressRef = useRef<Map<string, Array<{ ts: number; pct: number }>>>(new Map());
   useEffect(() => {
     if (!bs) return;
-    const open = (bs.state?.open ?? []) as any[];
+    const open = ((bs.state?.open ?? []) as any[]).filter((t) => isSmc(t.pattern));
     const now = Math.floor(Date.now() / 1000);
     const aliveIds = new Set<string>();
     for (const t of open) {
@@ -57,7 +61,8 @@ export function BinancePositionsPanel() {
   if (!bs) return <div className="empty-state">Loading…</div>;
   if (!bs.hasCreds) return <div className="banner banner-warn">No Binance credentials. Go to Settings.</div>;
 
-  const open = (bs.state?.open ?? []) as any[];
+  // Filter to 1h SMC patterns only — HF (BB_UP_SHORT / BB_LOW_LONG) goes on the HF tab
+  const open = ((bs.state?.open ?? []) as any[]).filter((t) => isSmc(t.pattern));
   const testnet = !!bs.testnet;
   const totalUpnl = open.reduce((s, t) => {
     const mark = +(t.markPrice ?? t.peakFav ?? t.entryPrice);
@@ -69,16 +74,17 @@ export function BinancePositionsPanel() {
     <>
       <div className="section">
         <div className="section-header">
-          <div className="section-title">Open positions ({open.length}) — total uPnL <span style={{ color: totalUpnl >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>{totalUpnl >= 0 ? "+" : ""}${totalUpnl.toFixed(2)}</span></div>
+          <div className="section-title">Open 1h SMC positions ({open.length}) — total uPnL <span style={{ color: totalUpnl >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>{totalUpnl >= 0 ? "+" : ""}${totalUpnl.toFixed(2)}</span></div>
           <div className="section-sub">
-            Live mark price + uPnL. Trail-arm fires after +1×ATR; exits at peak − 0.3×ATR via MARKET reduce-only.
+            OB_BULL · OB_BEAR · BOS_UP at 1h. HF (BB) trades on the HF tab.
+            Trail-arm fires after +1×ATR; exits at peak − 0.3×ATR via MARKET reduce-only.
             Click Cancel to force-close any row at market.
           </div>
         </div>
         {cancelErr && <div className="banner banner-warn" style={{ marginBottom: 8 }}>{cancelErr}</div>}
         <div className="card card-padded">
           {open.length === 0 ? (
-            <div className="muted">No open positions.</div>
+            <div className="muted">No open 1h SMC positions. (HF trades shown on the HF tab.)</div>
           ) : (
             <table className="table">
               <thead>
@@ -145,7 +151,7 @@ export function BinancePositionsPanel() {
         </div>
         <div className="card card-padded">
           {open.length === 0 ? (
-            <div className="muted">No open positions to chart.</div>
+            <div className="muted">No open 1h SMC positions to chart.</div>
           ) : (
             <ProgressSvg series={open.map((t: any) => ({
               id: t.id,
