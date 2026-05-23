@@ -163,6 +163,23 @@ export class BinanceClient extends EventEmitter {
     }));
   }
 
+  /** Sum of REALIZED_PNL and COMMISSION income since `sinceMs`. Returns net
+   *  realized P&L (income minus commissions). Used by the UI to show
+   *  wallet-truth daily P&L instead of the bot's local `closed[]` view which
+   *  misses external cancellations. */
+  async getRealizedIncomeSince(sinceMs: number): Promise<{ realizedPnl: number; commission: number; events: number }> {
+    let realizedPnl = 0, commission = 0, events = 0;
+    for (const incomeType of ["REALIZED_PNL", "COMMISSION"]) {
+      const data = await this.signedRequest("GET", "/fapi/v1/income", { incomeType, startTime: sinceMs, limit: 1000 });
+      for (const ev of (data as any[])) {
+        events++;
+        if (incomeType === "REALIZED_PNL") realizedPnl += +ev.income;
+        else commission += +ev.income; // commission is negative
+      }
+    }
+    return { realizedPnl, commission, events };
+  }
+
   // ─── Market data ─────────────────────────────────────────────────────────
 
   /** Per-symbol filters: rounding rules for quantity, price, and minimum

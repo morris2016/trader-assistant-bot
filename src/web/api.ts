@@ -454,6 +454,8 @@ export const api = {
     postJson<{ ok: boolean; config?: BinanceConfig; error?: string }>("/api/binance/update-config", patch),
   binanceCancelTrade: (tradeId: string) =>
     postJson<{ ok: boolean; error?: string }>("/api/binance/cancel-trade", { tradeId }),
+  binanceWalletPnl: () =>
+    get<{ realized: number; commission: number; unrealized: number; wallet: number; events: number; sinceMs: number }>("/api/binance/wallet-pnl"),
   binanceExternalPositions: () =>
     get<{ positions: Array<{
       symbol: string; positionSide: "LONG" | "SHORT";
@@ -476,6 +478,12 @@ export type BinanceHfConfig = {
   perAssetEnabled: Record<string, boolean>;
 };
 
+export type BinanceMartingaleConfig = {
+  mode: "off" | "anti";
+  multiplier: number;
+  maxLevels: number;
+};
+
 export type BinanceConfig = {
   stake: number;
   leverage: number;
@@ -484,6 +492,7 @@ export type BinanceConfig = {
   perAssetEnabled: Record<string, boolean>;
   perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean };
   autoStart?: boolean;
+  martingale: BinanceMartingaleConfig;
   hf: BinanceHfConfig;
 };
 

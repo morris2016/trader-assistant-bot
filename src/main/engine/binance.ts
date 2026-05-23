@@ -69,6 +69,9 @@ export type BinanceState = {
   open: BinanceTrade[];
   closed: BinanceTrade[];
   daily: { date: string; profit: number; tradesOpened: number; capHit: boolean };
+  /** Anti-martingale win-streak counters per (asset:pattern:side). Persists
+   *  across restarts so we don't lose Paroli ladder progress on Railway redeploy. */
+  winStreaks?: Record<string, number>;
 };
 
 export type BinanceEngineEvents = {
@@ -385,6 +388,14 @@ export class BinanceEngine extends EventEmitter {
   private perTradeMaxStake = 30;
   private perAssetEnabled: Record<string, boolean> = {};
   private perPatternEnabled: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean } = { OB_BULL: true, OB_BEAR: true, BOS_UP: true };
+  // ── Anti-martingale (Paroli) state ──
+  // Tracks consecutive wins per key (asset:pattern:side). Used by openTrade
+  // to scale stake = baseStake × multiplier^streak. Resets on loss.
+  // Persisted via state() so streaks survive bot restarts.
+  private martMode: "off" | "anti" = "off";
+  private martMultiplier = 2.0;
+  private martMaxLevels = 3;
+  private winStreaks: Record<string, number> = {};  // key=asset:pattern:side
   // ── HF (15m) state — separate from the 1h SMC stack above ──
   private hfEnabled = false;
   private hfStake = 1;
@@ -416,10 +427,38 @@ export class BinanceEngine extends EventEmitter {
     this.open = state.open ?? [];
     this.closed = state.closed ?? [];
     this.daily = state.daily ?? emptyDaily();
+    this.winStreaks = state.winStreaks ?? {};
     this.rollDayIfNeeded();
   }
 
-  state(): BinanceState { return { open: this.open, closed: this.closed, daily: this.daily }; }
+  state(): BinanceState { return { open: this.open, closed: this.closed, daily: this.daily, winStreaks: this.winStreaks }; }
+
+  /** Returns wallet-truth daily P&L: REALIZED from Binance income (since
+   *  midnight, in EAT) MINUS commissions, plus UNREALIZED from currently-
+   *  open positions. This is the true number to display in the UI, vs the
+   *  bot's local `daily.profit` which misses external cancellations and
+   *  doesn't include unrealized. */
+  async getWalletTruthPnl(): Promise<{ realized: number; commission: number; unrealized: number; wallet: number; events: number; sinceMs: number }> {
+    // EAT midnight = UTC midnight - 3h
+    const now = new Date();
+    const eatMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), -3, 0, 0));
+    // If we're in the EAT day after UTC midnight, the EAT-day-start is in UTC time
+    // "yesterday 21:00 UTC". Use it directly.
+    const sinceMs = eatMidnight.getTime();
+    const income = await this.client.getRealizedIncomeSince(sinceMs);
+    const positions = await this.client.getPositions();
+    const unrealized = positions.reduce((s, p) => s + (Math.abs(+p.positionAmt) > 0 ? +p.unRealizedProfit : 0), 0);
+    const balances = await this.client.getBalances();
+    const usdt = balances.find((b) => b.asset === "USDT");
+    return {
+      realized: income.realizedPnl,
+      commission: income.commission,
+      unrealized,
+      wallet: usdt ? usdt.balance : 0,
+      events: income.events,
+      sinceMs,
+    };
+  }
 
   /** Returns the list of Binance positions that the bot does NOT track in
    *  its local open[] — i.e., positions opened directly on Binance (manual
@@ -534,6 +573,7 @@ export class BinanceEngine extends EventEmitter {
     perTradeMaxStake?: number;
     perAssetEnabled?: Record<string, boolean>;
     perPatternEnabled?: { OB_BULL: boolean; OB_BEAR: boolean; BOS_UP: boolean };
+    martingale?: { mode: "off" | "anti"; multiplier: number; maxLevels: number };
     hf?: {
       enabled?: boolean;
       stake?: number;
@@ -550,6 +590,11 @@ export class BinanceEngine extends EventEmitter {
     if (opts.perTradeMaxStake !== undefined) this.perTradeMaxStake = opts.perTradeMaxStake;
     if (opts.perAssetEnabled) this.perAssetEnabled = opts.perAssetEnabled;
     if (opts.perPatternEnabled) this.perPatternEnabled = opts.perPatternEnabled;
+    if (opts.martingale) {
+      this.martMode = opts.martingale.mode;
+      this.martMultiplier = opts.martingale.multiplier;
+      this.martMaxLevels = opts.martingale.maxLevels;
+    }
     if (opts.hf) {
       const wasEnabled = this.hfEnabled;
       if (opts.hf.enabled !== undefined) this.hfEnabled = opts.hf.enabled;
@@ -713,15 +758,45 @@ export class BinanceEngine extends EventEmitter {
         this.emit("info", `skip ${sym} ${s.pattern}/${s.side}: already open`, { asset: sym, pattern: s.pattern });
         continue;
       }
-      const stake = Math.min(this.stake, this.perTradeMaxStake);
+      // Anti-martingale (Paroli) stake scaling per (asset × pattern × side):
+      // baseStake × multiplier^streak, capped at maxLevels. Reset on any loss
+      // is handled in closeTradeFromFill (see updateMartingale below).
+      const martKey = `${sym}:${s.pattern}:${s.side}`;
+      let stake = this.stake;
+      if (this.martMode === "anti") {
+        const streak = Math.min(this.winStreaks[martKey] ?? 0, this.martMaxLevels);
+        stake = this.stake * Math.pow(this.martMultiplier, streak);
+      }
+      stake = Math.min(stake, this.perTradeMaxStake);
       if (stake < 1) {
         this.emit("info", `skip ${sym} ${s.pattern}: stake below $1`, { asset: sym });
         continue;
+      }
+      if (this.martMode === "anti" && (this.winStreaks[martKey] ?? 0) > 0) {
+        this.emit("info", `martingale: ${sym} ${s.pattern}/${s.side} streak=${this.winStreaks[martKey]} → stake $${stake.toFixed(2)}`, {
+          asset: sym, pattern: s.pattern, side: s.side, streak: this.winStreaks[martKey], stake,
+        });
       }
       await this.openTrade(sym, s, stake);
     }
     updateStructure(structure, buf, i);
     this.structures.set(sym, structure);
+  }
+
+  /** Update the win-streak counter after a trade closes. Called from
+   *  closeTradeFromFill so it captures every close path (trail, cancel,
+   *  reconcile, user-stream fill). */
+  private updateMartingale(t: BinanceTrade): void {
+    if (this.martMode !== "anti") return;
+    const key = `${t.asset}:${t.pattern}:${t.side}`;
+    const isWin = (t.pnl ?? 0) > 0;
+    if (isWin) {
+      const next = Math.min((this.winStreaks[key] ?? 0) + 1, this.martMaxLevels);
+      // At cap: reset (Paroli "bank the run" rule)
+      this.winStreaks[key] = next >= this.martMaxLevels ? 0 : next;
+    } else {
+      this.winStreaks[key] = 0;
+    }
   }
 
   // ─── HF (15m) loop ────────────────────────────────────────────────────
@@ -962,6 +1037,7 @@ export class BinanceEngine extends EventEmitter {
       this.daily.capHit = true;
       this.emit("capHit", -this.daily.profit, this.dailyMaxLoss);
     }
+    this.updateMartingale(t);
     this.emit("closed", t);
     this.emit("stateChanged");
   }
@@ -1097,6 +1173,7 @@ export class BinanceEngine extends EventEmitter {
       this.daily.capHit = true;
       this.emit("capHit", -this.daily.profit, this.dailyMaxLoss);
     }
+    this.updateMartingale(t);
     this.emit("closed", t);
     this.emit("stateChanged");
   }

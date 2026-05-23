@@ -211,6 +211,7 @@ export function startHttpServer(opts: {
     cancelTrade: (tradeId: string) => Promise<{ ok: boolean; error?: string }>;
     externalPositions: () => Promise<Array<any>>;
     closeExternal: (symbol: string, side: "LONG" | "SHORT", qty: number) => Promise<{ ok: boolean; error?: string }>;
+    walletTruthPnl: () => Promise<{ realized: number; commission: number; unrealized: number; wallet: number; events: number; sinceMs: number }>;
   };
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
@@ -625,6 +626,15 @@ export function startHttpServer(opts: {
               json(res, result.ok ? 200 : 400, result);
             } catch (e: any) {
               json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+            }
+            return;
+          }
+          if (req.method === "GET" && path0 === "/api/binance/wallet-pnl") {
+            try {
+              const r = await b.walletTruthPnl();
+              json(res, 200, r);
+            } catch (e: any) {
+              json(res, 500, { error: e?.message ?? String(e) });
             }
             return;
           }

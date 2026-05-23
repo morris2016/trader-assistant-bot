@@ -269,14 +269,19 @@ function Header({ state, stale, error, mode }: { state: StateResp | null; stale:
 function BinanceHeader() {
   const [bs, setBs] = useState<any>(null);
   const [ext, setExt] = useState<{ positions: any[] } | null>(null);
+  // Wallet-truth P&L (from Binance income endpoint). Tells us the REAL story —
+  // bot's local `closed[]` misses external cancellations and doesn't include
+  // unrealized P&L, which is how the UI used to show +$0.74 while wallet was -$11.
+  const [wallet, setWallet] = useState<{ realized: number; commission: number; unrealized: number; wallet: number; events: number; sinceMs: number } | null>(null);
   const [lastFetch, setLastFetch] = useState(Date.now());
   useEffect(() => {
     const refresh = async () => {
       try { setBs(await api.binanceState()); setLastFetch(Date.now()); } catch {}
       try { setExt(await api.binanceExternalPositions()); } catch {}
+      try { setWallet(await api.binanceWalletPnl()); } catch {}
     };
     refresh();
-    const id = setInterval(refresh, 3000);
+    const id = setInterval(refresh, 5000);  // wallet-truth poll is slightly slower to ease API weight
     return () => clearInterval(id);
   }, []);
   const stale = Date.now() - lastFetch > 8000;
@@ -285,17 +290,27 @@ function BinanceHeader() {
   const testnet = !!bs?.testnet;
   const botOpen = bs?.state?.open?.length ?? 0;
   const extOpen = ext?.positions?.length ?? 0;
-  const closedToday = bs?.state?.closed?.filter((c: any) => c.closeEpoch && eatDateOf(c.closeEpoch) === eatToday()) ?? [];
-  const todayPnl = closedToday.reduce((s: number, c: any) => s + (c.pnl ?? 0), 0);
   const dailyCapHit = !!bs?.state?.daily?.capHit;
+  const realized = wallet ? wallet.realized + wallet.commission : 0;  // net realized after fees
+  const unreal = wallet?.unrealized ?? 0;
+  const total = realized + unreal;
+  const fmt = (n: number) => `${n >= 0 ? "+" : ""}$${n.toFixed(2)}`;
   return (
     <div className="header">
       <div className="header-left">
         <h1>Binance Futures</h1>
         <div className="subtitle">
           {!hasCreds ? "no credentials" :
-           running ? `${botOpen} bot trades · ${extOpen} external · today ${todayPnl >= 0 ? "+" : ""}$${todayPnl.toFixed(2)}` :
-           "engine stopped"}
+           !wallet ? `${botOpen} bot trades · ${extOpen} external · engine ${running ? "on" : "off"}` :
+           <>
+             wallet <strong>${wallet.wallet.toFixed(2)}</strong>
+             {" · "}
+             <span style={{ color: realized >= 0 ? "#0ecb81" : "#f6465d" }}>realized {fmt(realized)}</span>
+             {" · "}
+             <span style={{ color: unreal >= 0 ? "#0ecb81" : "#f6465d" }}>unrealized {fmt(unreal)}</span>
+             {" · "}
+             <span style={{ color: total >= 0 ? "#0ecb81" : "#f6465d", fontWeight: 600 }}>total {fmt(total)}</span>
+           </>}
           {testnet ? " · TESTNET" : ""}
         </div>
       </div>

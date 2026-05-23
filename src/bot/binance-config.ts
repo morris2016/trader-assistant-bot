@@ -25,6 +25,20 @@ export type BinanceConfig = {
   /** Operator intent: when true, engine resumes automatically on bot boot
    *  (e.g. after Railway redeploy). Toggled by Start/Stop in the UI. */
   autoStart: boolean;
+  /** Anti-martingale (Paroli) sizing for the 1h SMC stack. Compounds stake
+   *  after consecutive wins on the same key (asset × pattern × side). Resets
+   *  on any loss. Sim-validated 2026-05-23 on 17-month dataset: anti ×2 cap3
+   *  turned +$388 baseline into +$6,313 on $100 account, zero busts. */
+  martingale: {
+    /** "off" disables sizing; baseline $stake per trade.
+     *  "anti" compounds after wins; resets on loss. */
+    mode: "off" | "anti";
+    /** Stake multiplier per consecutive win. 2.0 = each win doubles. */
+    multiplier: number;
+    /** Hard cap on ladder depth. After N consecutive wins, reset to base.
+     *  cap=3 means max stake = base × multiplier^3. */
+    maxLevels: number;
+  };
   /** HF (15m) strategy stack — BB_UP_SHORT + BB_LOW_LONG. Runs alongside
    *  the 1h SMC patterns but on its own timeframe with its own sizing. */
   hf: {
@@ -52,6 +66,7 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
   perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
   perPatternEnabled: { OB_BULL: true, OB_BEAR: true, BOS_UP: true },
   autoStart: false,
+  martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
   hf: {
     enabled: false,
     stake: 1,
@@ -73,6 +88,7 @@ export function loadBinanceConfig(stateDir: string): BinanceConfig {
       ...parsed,
       perAssetEnabled: { ...DEFAULT_BINANCE_CONFIG.perAssetEnabled, ...(parsed.perAssetEnabled ?? {}) },
       perPatternEnabled: { ...DEFAULT_BINANCE_CONFIG.perPatternEnabled, ...(parsed.perPatternEnabled ?? {}) },
+      martingale: { ...DEFAULT_BINANCE_CONFIG.martingale, ...(parsed.martingale ?? {}) },
       hf: {
         ...DEFAULT_BINANCE_CONFIG.hf,
         ...(parsed.hf ?? {}),

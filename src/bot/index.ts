@@ -458,6 +458,7 @@ async function main() {
     perTradeMaxStake: binanceConfig.perTradeMaxStake,
     perAssetEnabled: binanceConfig.perAssetEnabled,
     perPatternEnabled: binanceConfig.perPatternEnabled,
+    martingale: binanceConfig.martingale,
     hf: binanceConfig.hf,
   });
   binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
@@ -1501,6 +1502,7 @@ async function main() {
           ...patch,
           perAssetEnabled: { ...binanceConfig.perAssetEnabled, ...(patch.perAssetEnabled ?? {}) },
           perPatternEnabled: { ...binanceConfig.perPatternEnabled, ...(patch.perPatternEnabled ?? {}) },
+          martingale: { ...binanceConfig.martingale, ...(patch.martingale ?? {}) },
           hf: {
             ...binanceConfig.hf,
             ...(patch.hf ?? {}),
@@ -1516,6 +1518,7 @@ async function main() {
           perTradeMaxStake: binanceConfig.perTradeMaxStake,
           perAssetEnabled: binanceConfig.perAssetEnabled,
           perPatternEnabled: binanceConfig.perPatternEnabled,
+          martingale: binanceConfig.martingale,
           hf: binanceConfig.hf,
         });
         log.info("binance config updated", { ...binanceConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
@@ -1524,6 +1527,7 @@ async function main() {
       externalPositions: async () => binanceEngine.externalPositions(),
       closeExternal: async (symbol: string, side: "LONG" | "SHORT", qty: number) =>
         binanceEngine.closeExternal(symbol, side, qty),
+      walletTruthPnl: async () => binanceEngine.getWalletTruthPnl(),
       setCreds: async (apiKey: string, apiSecret: string, testnet: boolean) => {
         await saveBinanceCreds(cfg.stateDir, { apiKey, apiSecret, testnet });
         await configureBinanceFromCreds();
