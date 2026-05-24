@@ -64,6 +64,11 @@ export type BinanceTrade = {
   /** Last time markPrice was refreshed (epoch seconds) — UI uses this
    *  to fade stale values if the polling loop stalls. */
   markUpdatedAt?: number;
+  /** Hard stop-loss price computed at openTrade from `slPct` config.
+   *  When defined, positionTick closes at market once mark crosses it.
+   *  Runs alongside (not instead of) the trail-arm exit — whichever
+   *  triggers first wins. Undefined = no hard SL (trail-arm only). */
+  slPrice?: number;
 };
 
 export type BinanceState = {
@@ -400,6 +405,15 @@ export class BinanceEngine extends EventEmitter {
   private martMultiplier = 2.0;
   private martMaxLevels = 3;
   private winStreaks: Record<string, number> = {};  // key=asset:pattern:side
+  // Independent Paroli ladder for HF (15m BB) — HF win-streaks share the same
+  // winStreaks map but key prefixes (BB_*) keep them naturally separate;
+  // these knobs control sizing math distinctly from SMC mart above.
+  private hfMartMode: "off" | "anti" = "off";
+  private hfMartMultiplier = 2.0;
+  private hfMartMaxLevels = 3;
+  /** Hard SL as % of entry — separate config per stack (0 = disabled). */
+  private smcSlPct = 0;
+  private hfSlPct = 0;
   // ── HF (15m) state — separate from the 1h SMC stack above ──
   private hfEnabled = false;
   private hfStake = 1;
@@ -677,8 +691,11 @@ export class BinanceEngine extends EventEmitter {
       allowMultiplePerKey?: boolean;
       perPatternEnabled?: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
       perAssetEnabled?: Record<string, boolean>;
+      martingale?: { mode: "off" | "anti"; multiplier: number; maxLevels: number };
+      slPct?: number;
     };
     riskRules?: RiskRulesConfig;
+    slPctSmc?: number;
   }) {
     if (opts.assets) this.assets = opts.assets;
     if (opts.stake !== undefined) this.stake = opts.stake;
@@ -700,6 +717,12 @@ export class BinanceEngine extends EventEmitter {
       if (opts.hf.allowMultiplePerKey !== undefined) this.hfAllowMultiplePerKey = opts.hf.allowMultiplePerKey;
       if (opts.hf.perPatternEnabled) this.hfPerPatternEnabled = opts.hf.perPatternEnabled;
       if (opts.hf.perAssetEnabled) this.hfPerAssetEnabled = opts.hf.perAssetEnabled;
+      if (opts.hf.martingale) {
+        this.hfMartMode = opts.hf.martingale.mode;
+        this.hfMartMultiplier = opts.hf.martingale.multiplier;
+        this.hfMartMaxLevels = opts.hf.martingale.maxLevels;
+      }
+      if (opts.hf.slPct !== undefined) this.hfSlPct = opts.hf.slPct;
       // Immediate proof-of-life log when operator flips HF on/off at runtime.
       if (!wasEnabled && this.hfEnabled) {
         this.emit("info", `HF stack ENABLED at runtime: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
@@ -715,6 +738,7 @@ export class BinanceEngine extends EventEmitter {
       }
     }
     if (opts.riskRules) this.riskRules = opts.riskRules;
+    if (opts.slPctSmc !== undefined) this.smcSlPct = opts.slPctSmc;
   }
 
   private rollDayIfNeeded() {
@@ -909,22 +933,28 @@ export class BinanceEngine extends EventEmitter {
         continue;
       }
       // Anti-martingale (Paroli) stake scaling per (asset × pattern × side):
-      // baseStake × multiplier^streak, capped at maxLevels. Reset on any loss
-      // is handled in closeTradeFromFill (see updateMartingale below).
+      // baseStake × multiplier^streak, capped at maxLevels. HF and SMC patterns
+      // each have their own mart config so they can ladder independently.
+      // Reset on any loss is handled in closeTradeFromFill → updateMartingale.
       const martKey = `${sym}:${s.pattern}:${s.side}`;
-      let stake = this.stake;
-      if (this.martMode === "anti") {
-        const streak = Math.min(this.winStreaks[martKey] ?? 0, this.martMaxLevels);
-        stake = this.stake * Math.pow(this.martMultiplier, streak);
+      const isHf = isHfPattern(s.pattern);
+      const martMode = isHf ? this.hfMartMode : this.martMode;
+      const martMultiplier = isHf ? this.hfMartMultiplier : this.martMultiplier;
+      const martMaxLevels = isHf ? this.hfMartMaxLevels : this.martMaxLevels;
+      const baseStake = isHf ? this.hfStake : this.stake;
+      let stake = baseStake;
+      if (martMode === "anti") {
+        const streak = Math.min(this.winStreaks[martKey] ?? 0, martMaxLevels);
+        stake = baseStake * Math.pow(martMultiplier, streak);
       }
       stake = Math.min(stake, this.perTradeMaxStake);
       if (stake < 1) {
         this.emit("info", `skip ${sym} ${s.pattern}: stake below $1`, { asset: sym });
         continue;
       }
-      if (this.martMode === "anti" && (this.winStreaks[martKey] ?? 0) > 0) {
-        this.emit("info", `martingale: ${sym} ${s.pattern}/${s.side} streak=${this.winStreaks[martKey]} → stake $${stake.toFixed(2)}`, {
-          asset: sym, pattern: s.pattern, side: s.side, streak: this.winStreaks[martKey], stake,
+      if (martMode === "anti" && (this.winStreaks[martKey] ?? 0) > 0) {
+        this.emit("info", `martingale: ${sym} ${s.pattern}/${s.side} streak=${this.winStreaks[martKey]} → stake $${stake.toFixed(2)}${isHf ? " (HF)" : ""}`, {
+          asset: sym, pattern: s.pattern, side: s.side, streak: this.winStreaks[martKey], stake, stack: isHf ? "hf" : "smc",
         });
       }
       await this.openTrade(sym, s, stake);
@@ -937,13 +967,16 @@ export class BinanceEngine extends EventEmitter {
    *  closeTradeFromFill so it captures every close path (trail, cancel,
    *  reconcile, user-stream fill). */
   private updateMartingale(t: BinanceTrade): void {
-    if (this.martMode !== "anti") return;
+    const isHf = isHfPattern(t.pattern);
+    const martMode = isHf ? this.hfMartMode : this.martMode;
+    const martMaxLevels = isHf ? this.hfMartMaxLevels : this.martMaxLevels;
+    if (martMode !== "anti") return;
     const key = `${t.asset}:${t.pattern}:${t.side}`;
     const isWin = (t.pnl ?? 0) > 0;
     if (isWin) {
-      const next = Math.min((this.winStreaks[key] ?? 0) + 1, this.martMaxLevels);
+      const next = Math.min((this.winStreaks[key] ?? 0) + 1, martMaxLevels);
       // At cap: reset (Paroli "bank the run" rule)
-      this.winStreaks[key] = next >= this.martMaxLevels ? 0 : next;
+      this.winStreaks[key] = next >= martMaxLevels ? 0 : next;
     } else {
       this.winStreaks[key] = 0;
     }
@@ -1140,6 +1173,19 @@ export class BinanceEngine extends EventEmitter {
           positionSide: positionSide as any, clientOrderId: cid,
         });
       }
+      // Per-stack hard SL — slPct is % of STAKE the operator is willing to
+      // lose at SL (so $50 stake × 50% = $25 max loss). The price-move
+      // distance is slPct / leverage. Example: stake $50, lev 30×, slPct 50
+      // → price moves 50/30 = 1.67% before SL. UI displays max-$-loss as
+      // stake × slPct/100 so the user knows exactly what they're risking.
+      const fillPrice = Number(resp.avgPrice) || refPrice;
+      const slPctStake = isHfPattern(s.pattern) ? this.hfSlPct : this.smcSlPct;
+      let slPrice: number | undefined;
+      if (slPctStake > 0 && effectiveLeverage > 0) {
+        const priceMovePct = slPctStake / effectiveLeverage;
+        const slDist = fillPrice * (priceMovePct / 100);
+        slPrice = s.side === "LONG" ? fillPrice - slDist : fillPrice + slDist;
+      }
       const trade: BinanceTrade = {
         id: tradeId,
         asset: sym,
@@ -1150,12 +1196,13 @@ export class BinanceEngine extends EventEmitter {
         notional,
         qty,
         entryEpoch: Math.floor(resp.updateTime / 1000),
-        entryPrice: Number(resp.avgPrice) || refPrice,
+        entryPrice: fillPrice,
         atrEntry: s.atrEntry,
-        peakFav: Number(resp.avgPrice) || refPrice,
+        peakFav: fillPrice,
         armed: false,
         tpOrderId: null,
         status: "OPEN",
+        slPrice,
       };
       (trade as any).clientOrderId = cid;
       this.open.push(trade);
@@ -1343,6 +1390,41 @@ export class BinanceEngine extends EventEmitter {
       this.emit("info", `trail armed ${t.asset} ${t.pattern}/${t.side}: peak=${t.peakFav.toFixed(5)}`, {
         asset: t.asset, pattern: t.pattern, side: t.side, peakFav: t.peakFav, entryPrice: t.entryPrice,
       });
+    }
+
+    // Hard SL trigger (runs BEFORE trail-arm check so a fast adverse move
+    // exits cleanly even if peak never reached the arm distance). If
+    // slPrice is undefined (slPct=0), this is a no-op.
+    if (t.slPrice !== undefined) {
+      const slHit = t.side === "LONG" ? markPrice <= t.slPrice : markPrice >= t.slPrice;
+      if (slHit) {
+        const lockKey = `close:${t.id}`;
+        if (this.busy.has(lockKey)) return;
+        this.busy.add(lockKey);
+        try {
+          const f = this.filters[t.asset];
+          const closeSide = t.side === "LONG" ? "SELL" : "BUY";
+          const positionSide = this.hedgeMode ? t.side : "BOTH";
+          this.emit("info", `SL hit ${t.asset} ${t.pattern}/${t.side}: mark=${markPrice.toFixed(5)} sl=${t.slPrice.toFixed(5)}`, {
+            asset: t.asset, pattern: t.pattern, side: t.side, markPrice, slPrice: t.slPrice, entryPrice: t.entryPrice,
+          });
+          if (!this.paperMode) {
+            await this.client.placeMarketOrder({
+              symbol: t.asset, side: closeSide as any,
+              quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
+              positionSide: positionSide as any,
+              clientOrderId: `sl-${t.id.slice(0, 8)}-${Date.now()}`,
+            });
+          }
+          await this.closeTradeFromFill(t, markPrice);
+          if (stateChanged) this.emit("stateChanged");
+        } catch (e) {
+          this.emit("error", e as Error);
+        } finally {
+          this.busy.delete(lockKey);
+        }
+        return;  // don't fall through to trail logic — trade is closed
+      }
     }
     // Trail trigger: once armed, check if mark price has retraced to
     // peak − trailDist. Multi-Assets accounts reject STOP_MARKET via

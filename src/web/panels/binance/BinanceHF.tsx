@@ -42,6 +42,12 @@ export function BinanceHFPanel() {
   const [allowMultiple, setAllowMultiple] = useState(false);
   const [perPattern, setPerPattern] = useState<{ BB_UP_SHORT: boolean; BB_LOW_LONG: boolean }>({ BB_UP_SHORT: true, BB_LOW_LONG: true });
   const [perAssetEnabled, setPerAssetEnabled] = useState<Record<string, boolean>>({});
+  // HF Paroli (anti-mart) — independent ladder from SMC
+  const [hfMartMode, setHfMartMode] = useState<"off" | "anti">("off");
+  const [hfMartMult, setHfMartMult] = useState("2");
+  const [hfMartCap, setHfMartCap] = useState("3");
+  // Hard SL as % of stake (max-$-loss = stake × this/100)
+  const [hfSlPct, setHfSlPct] = useState("0");
 
   async function refresh() {
     try { setBs(await api.binanceState()); } catch {}
@@ -119,6 +125,11 @@ export function BinanceHFPanel() {
       setAllowMultiple(!!config.hf.allowMultiplePerKey);
       setPerPattern(config.hf.perPatternEnabled);
       setPerAssetEnabled(config.hf.perAssetEnabled);
+      const hm = (config.hf as any).martingale ?? { mode: "off", multiplier: 2, maxLevels: 3 };
+      setHfMartMode(hm.mode);
+      setHfMartMult(String(hm.multiplier));
+      setHfMartCap(String(hm.maxLevels));
+      setHfSlPct(String((config.hf as any).slPct ?? 0));
       setSynced(true);
     }
   }, [config, synced]);
@@ -172,7 +183,9 @@ export function BinanceHFPanel() {
           allowMultiplePerKey: allowMultiple,
           perPatternEnabled: perPattern,
           perAssetEnabled,
-        },
+          martingale: { mode: hfMartMode, multiplier: Number(hfMartMult) || 2, maxLevels: Number(hfMartCap) || 3 },
+          slPct: Number(hfSlPct) || 0,
+        } as any,
       });
       setSaveMsg(r.ok ? { ok: true, text: "Saved" } : { ok: false, text: r.error ?? "Save failed" });
       if (r.ok) refresh();
@@ -499,6 +512,29 @@ export function BinanceHFPanel() {
                 </label>
               ))}
             </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <div className="muted" style={{ marginBottom: 6 }}>HF anti-martingale (Paroli) — independent ladder from SMC</div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <label><input type="radio" checked={hfMartMode === "off"} onChange={() => setHfMartMode("off")} /> off</label>
+              <label><input type="radio" checked={hfMartMode === "anti"} onChange={() => setHfMartMode("anti")} /> anti (compound after wins)</label>
+              <span className="muted" style={{ marginLeft: 12 }}>×</span>
+              <input value={hfMartMult} onChange={(e) => setHfMartMult(e.target.value)} className="input" style={{ width: 60 }} />
+              <span className="muted">cap</span>
+              <input value={hfMartCap} onChange={(e) => setHfMartCap(e.target.value)} className="input" style={{ width: 60 }} />
+            </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Hard SL as % of STAKE. price-move = slPct / leverage. 0 = disabled (trail-arm only).">
+                HF SL % of stake
+              </div>
+              <input value={hfSlPct} onChange={(e) => setHfSlPct(e.target.value)} className="input" style={{ width: 120 }} />
+              <span className="muted" style={{ marginLeft: 12, fontSize: 12 }}>
+                → max loss ≈ ${(Number(stake) * Number(hfSlPct) / 100 || 0).toFixed(2)}{" "}
+                ({Number(hfSlPct) > 0 && Number(leverage) > 0 ? `${(Number(hfSlPct) / Number(leverage)).toFixed(3)}% price move` : "disabled"})
+              </span>
+            </label>
           </div>
           <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
             <button className="btn btn-primary" disabled={saveBusy} onClick={saveConfig}>

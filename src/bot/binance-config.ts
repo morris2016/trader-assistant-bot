@@ -40,6 +40,12 @@ export type BinanceConfig = {
      *  cap=3 means max stake = base × multiplier^3. */
     maxLevels: number;
   };
+  /** Hard stop-loss as % of STAKE for 1h SMC trades. Example: slPctSmc=50
+   *  on a $50 stake = max $25 loss at SL (price moves slPctSmc / leverage
+   *  before triggering — e.g. 50/30 = 1.67% price move on a 30× trade).
+   *  0 = disabled (trail-arm exit only). When > 0, runs alongside the
+   *  trail exit — whichever triggers first wins. Default 0. */
+  slPctSmc?: number;
   /** Risk guardrails distilled from Elder/Williams/Vantage/Kaufman. Default
    *  off so existing live behavior is unchanged; enable per-gate after paper
    *  validation. See src/main/engine/risk-rules.ts for each rule's source. */
@@ -60,6 +66,14 @@ export type BinanceConfig = {
     perPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
     /** Per-asset enable map (defaults to all 15 USDT-perps on). */
     perAssetEnabled: Record<string, boolean>;
+    /** Independent anti-martingale ladder for the HF stack (separate from
+     *  the SMC `martingale` field above). HF win-streaks tracked under
+     *  HF pattern keys won't bleed into SMC sizing and vice versa. */
+    martingale?: { mode: "off" | "anti"; multiplier: number; maxLevels: number };
+    /** Hard stop-loss as % of STAKE for 15m HF trades. Same math as slPctSmc
+     *  but applied independently to HF entries. Price move = slPct / hf.leverage.
+     *  0 = disabled. */
+    slPct?: number;
   };
 };
 
@@ -80,7 +94,10 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
     allowMultiplePerKey: false,
     perPatternEnabled: { BB_UP_SHORT: true, BB_LOW_LONG: true },
     perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
+    martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
+    slPct: 0,
   },
+  slPctSmc: 0,
 };
 
 export function loadBinanceConfig(stateDir: string): BinanceConfig {

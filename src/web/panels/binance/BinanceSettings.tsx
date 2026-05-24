@@ -18,6 +18,8 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
   const [leverage, setLeverage] = useState("30");
   const [dailyMaxLoss, setDailyMaxLoss] = useState("100");
   const [perTradeMaxStake, setPerTradeMaxStake] = useState("30");
+  // SMC hard SL as % of stake (max-$-loss = stake × this/100; price-move = this/leverage)
+  const [smcSlPct, setSmcSlPct] = useState("0");
   const [configMsg, setConfigMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
 
@@ -35,6 +37,7 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
       setLeverage(String(c.config.leverage));
       setDailyMaxLoss(String(c.config.dailyMaxLoss));
       setPerTradeMaxStake(String(c.config.perTradeMaxStake));
+      setSmcSlPct(String((c.config as any).slPctSmc ?? 0));
     } catch {}
     try { setDiag(await api.binanceDiag()); } catch {}
   }
@@ -77,6 +80,7 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
     const patch: Partial<BinanceConfig> = {
       stake: Number(stake), leverage: Number(leverage),
       dailyMaxLoss: Number(dailyMaxLoss), perTradeMaxStake: Number(perTradeMaxStake),
+      slPctSmc: Number(smcSlPct) || 0,
     };
     if (!isFinite(patch.stake!) || patch.stake! <= 0) { setConfigMsg({ ok: false, text: "Stake must be > 0" }); return; }
     if (!isFinite(patch.leverage!) || patch.leverage! < 1 || patch.leverage! > 125) { setConfigMsg({ ok: false, text: "Leverage must be 1–125" }); return; }
@@ -184,6 +188,12 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
             <ConfigField label="Leverage (×)" value={leverage} onChange={setLeverage} hint="Position multiplier. Binance max 125 on some pairs." />
             <ConfigField label="Daily max loss ($)" value={dailyMaxLoss} onChange={setDailyMaxLoss} hint="Engine pauses for the day when realized loss crosses this." />
             <ConfigField label="Per-trade max stake ($)" value={perTradeMaxStake} onChange={setPerTradeMaxStake} hint="Hard ceiling on any single trade's stake." />
+            <ConfigField
+              label="SMC SL — % of stake"
+              value={smcSlPct}
+              onChange={setSmcSlPct}
+              hint={`Hard SL as % of stake. Max $ loss = stake × this/100. Price move = this/leverage. 0 = disabled (trail-arm only). Current: max loss ≈ $${(Number(stake) * Number(smcSlPct) / 100 || 0).toFixed(2)} at ${Number(smcSlPct) > 0 && Number(leverage) > 0 ? `${(Number(smcSlPct) / Number(leverage)).toFixed(3)}%` : "—"} price move.`}
+            />
           </div>
           <div className="row" style={{ marginTop: 12 }}>
             <button className="btn btn-primary" onClick={saveConfig} disabled={configBusy}>{configBusy ? "Saving…" : "Save config"}</button>

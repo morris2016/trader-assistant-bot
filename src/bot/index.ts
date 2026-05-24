@@ -461,6 +461,7 @@ async function main() {
     martingale: binanceConfig.martingale,
     hf: binanceConfig.hf,
     riskRules: binanceConfig.riskRules,
+    slPctSmc: binanceConfig.slPctSmc,
   });
   binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
   binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`, { asset: t.asset, pattern: t.pattern, side: t.side, entryPrice: t.entryPrice, stake: t.stake, leverage: t.leverage }));
@@ -565,6 +566,7 @@ async function main() {
     martingale: paperConfig.martingale,
     hf: paperConfig.hf,
     riskRules: paperConfig.riskRules,
+    slPctSmc: paperConfig.slPctSmc,
   });
   // CRITICAL: wire paper to read kline + mark-price data from live engine.
   // Without this, paper makes its own getKlines + premiumIndex calls in
@@ -1619,6 +1621,7 @@ async function main() {
           martingale: binanceConfig.martingale,
           hf: binanceConfig.hf,
           riskRules: binanceConfig.riskRules,
+          slPctSmc: binanceConfig.slPctSmc,
         });
         log.info("binance config updated", { ...binanceConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
       },
@@ -1730,6 +1733,7 @@ async function main() {
           martingale: paperConfig.martingale,
           hf: paperConfig.hf,
           riskRules: paperConfig.riskRules,
+          slPctSmc: paperConfig.slPctSmc,
         });
         log.info("paper config updated", { ...paperConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
       },

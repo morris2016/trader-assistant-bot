@@ -415,6 +415,16 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [martMult, setMartMult] = useState(String(config.martingale.multiplier));
   const [martCap, setMartCap] = useState(String(config.martingale.maxLevels));
 
+  // HF Paroli (anti-mart) — separate from SMC mart above
+  const hfMart = (config.hf as any).martingale ?? { mode: "off", multiplier: 2, maxLevels: 3 };
+  const [hfMartMode, setHfMartMode] = useState<"off" | "anti">(hfMart.mode);
+  const [hfMartMult, setHfMartMult] = useState(String(hfMart.multiplier));
+  const [hfMartCap, setHfMartCap] = useState(String(hfMart.maxLevels));
+
+  // Percentage SL — % of stake (so max-$-loss = stake × slPct/100)
+  const [smcSlPct, setSmcSlPct] = useState(String((config as any).slPctSmc ?? 0));
+  const [hfSlPct, setHfSlPct] = useState(String((config.hf as any).slPct ?? 0));
+
   // Risk rules (Elder/Williams/Vantage/Kaufman)
   const rr = config.riskRules ?? { enabled: false };
   const [riskEnabled, setRiskEnabled] = useState(!!rr.enabled);
@@ -456,7 +466,10 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           allowMultiplePerKey: config.hf.allowMultiplePerKey,
           perPatternEnabled: hfPatterns,
           perAssetEnabled: hfAssets,
+          martingale: { mode: hfMartMode, multiplier: Number(hfMartMult) || 2, maxLevels: Number(hfMartCap) || 3 },
+          slPct: Number(hfSlPct) || 0,
         },
+        slPctSmc: Number(smcSlPct) || 0,
         riskRules: {
           enabled: riskEnabled,
           maxConcurrentPositions: Number(maxConcurrent) || 3,
@@ -548,6 +561,18 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
               <input value={martCap} onChange={(e) => setMartCap(e.target.value)} className="input" style={{ width: 60 }} />
             </div>
           </div>
+          <div style={{ marginTop: 16 }}>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Hard SL as % of STAKE. Example: stake $50 × 50% = max $25 loss at SL. Price move = slPct / leverage (so 50% on a 30× trade = 1.67% price move). 0 = disabled (trail-arm only).">
+                SMC SL % of stake (max-$-loss = stake × this/100)
+              </div>
+              <input value={smcSlPct} onChange={(e) => setSmcSlPct(e.target.value)} className="input" style={{ width: 120 }} />
+              <span className="muted" style={{ marginLeft: 12, fontSize: 12 }}>
+                → max loss ≈ ${(Number(smcStake) * Number(smcSlPct) / 100 || 0).toFixed(2)}{" "}
+                ({Number(smcSlPct) > 0 && Number(smcLev) > 0 ? `${(Number(smcSlPct) / Number(smcLev)).toFixed(3)}% price move` : "disabled"})
+              </span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -592,6 +617,29 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
                 </label>
               ))}
             </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <div className="muted" style={{ marginBottom: 6 }}>HF anti-martingale (Paroli) — independent ladder from SMC</div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <label><input type="radio" checked={hfMartMode === "off"} onChange={() => setHfMartMode("off")} /> off</label>
+              <label><input type="radio" checked={hfMartMode === "anti"} onChange={() => setHfMartMode("anti")} /> anti (compound after wins)</label>
+              <span className="muted" style={{ marginLeft: 12 }}>×</span>
+              <input value={hfMartMult} onChange={(e) => setHfMartMult(e.target.value)} className="input" style={{ width: 60 }} />
+              <span className="muted">cap</span>
+              <input value={hfMartCap} onChange={(e) => setHfMartCap(e.target.value)} className="input" style={{ width: 60 }} />
+            </div>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Hard SL as % of STAKE for HF trades. Price move = slPct / hf.leverage. 0 = disabled.">
+                HF SL % of stake (max-$-loss = stake × this/100)
+              </div>
+              <input value={hfSlPct} onChange={(e) => setHfSlPct(e.target.value)} className="input" style={{ width: 120 }} />
+              <span className="muted" style={{ marginLeft: 12, fontSize: 12 }}>
+                → max loss ≈ ${(Number(hfStake) * Number(hfSlPct) / 100 || 0).toFixed(2)}{" "}
+                ({Number(hfSlPct) > 0 && Number(hfLev) > 0 ? `${(Number(hfSlPct) / Number(hfLev)).toFixed(3)}% price move` : "disabled"})
+              </span>
+            </label>
           </div>
         </div>
       </div>
