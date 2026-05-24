@@ -542,6 +542,7 @@ async function main() {
         volumeMinMultOfSma: 1.2,
         htfTrendFilter: "hfOnly",
         efficiencyRatioMin: 0.3,
+        perTradeRiskPctOfEquity: 0.02,
       },
     };
   })();

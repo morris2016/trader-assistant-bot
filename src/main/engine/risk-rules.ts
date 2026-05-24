@@ -41,6 +41,11 @@ export type RiskRulesConfig = {
    *  trending market; < threshold means chop. Default 0.3 when enabled.
    *  Applied to SMC entries (which assume trend continuation). */
   efficiencyRatioMin?: number;
+  /** Elder F1: cap the dollar risk per trade as a fraction of current equity.
+   *  Computed as `stake × leverage × (atr / entryPrice)` (the 1-ATR stop
+   *  distance the engine already uses). Default 0.02 = 2% when enabled.
+   *  Refuses any trade whose worst-case loss would exceed equity × this. */
+  perTradeRiskPctOfEquity?: number;
 };
 
 /** Correlation buckets for the 15 USDT-perp universe. Built from observed
@@ -75,6 +80,16 @@ export type RiskGateInput = {
   /** 1h closes (HTF) — last 50 entries minimum to compute EMA(50) for the
    *  Triple Screen HTF trend filter. Gate auto-passes if missing. */
   recent1hCloses?: number[];
+  /** ATR (1×) used as the bot's stop distance — needed for per-trade
+   *  risk-pct computation. Gate auto-passes if missing. */
+  signalAtr?: number;
+  /** Proposed trade sizing — used by the per-trade risk gate to compute
+   *  expected $-risk at the configured stop distance. */
+  proposedStake?: number;
+  proposedLeverage?: number;
+  /** Current account equity in USDT — for paper = paperWallet; for live =
+   *  cached wallet balance. Per-trade risk gate auto-passes if ≤ 0. */
+  currentEquity?: number;
 };
 
 /** Compute exponential moving average of the last N values. Standard
@@ -184,6 +199,24 @@ export function evaluateRiskGate(opts: RiskGateInput): RiskGateResult {
     }
   }
 
+  // Per-trade risk cap (Elder F1)
+  if (
+    config.perTradeRiskPctOfEquity != null &&
+    opts.signalAtr != null && opts.signalAtr > 0 &&
+    opts.proposedStake != null && opts.proposedLeverage != null &&
+    opts.currentEquity != null && opts.currentEquity > 0
+  ) {
+    const stopDistPct = opts.signalAtr / opts.signal.entryPrice;
+    const riskDollars = opts.proposedStake * opts.proposedLeverage * stopDistPct;
+    const riskPct = riskDollars / opts.currentEquity;
+    if (riskPct > config.perTradeRiskPctOfEquity) {
+      return {
+        ok: false,
+        reason: `risk: per-trade risk ${(riskPct * 100).toFixed(2)}% > cap ${(config.perTradeRiskPctOfEquity * 100).toFixed(2)}% (stake $${opts.proposedStake} × ${opts.proposedLeverage}× × ${(stopDistPct * 100).toFixed(2)}% stop = $${riskDollars.toFixed(2)} on $${opts.currentEquity.toFixed(2)} equity)`,
+      };
+    }
+  }
+
   return { ok: true };
 }
 
@@ -200,4 +233,5 @@ export const PAPER_DEFAULT_RISK_RULES: RiskRulesConfig = {
   volumeMinMultOfSma: 1.2,
   htfTrendFilter: "hfOnly",
   efficiencyRatioMin: 0.3,
+  perTradeRiskPctOfEquity: 0.02,
 };

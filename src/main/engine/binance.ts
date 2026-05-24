@@ -462,12 +462,30 @@ export class BinanceEngine extends EventEmitter {
   private rollMonthIfNeeded() {
     const m = new Date().toISOString().slice(0, 7);
     if (this.monthly.month !== m) {
-      this.monthly = { month: m, startEquity: this.paperMode ? this.paperWallet : 0, realizedPnl: 0 };
+      this.monthly = { month: m, startEquity: this.paperMode ? this.paperWallet : this.cachedEquity, realizedPnl: 0 };
       this.emit("info", `monthly roll: new month=${m} startEquity=$${this.monthly.startEquity.toFixed(2)}`, {
         month: m, startEquity: this.monthly.startEquity,
       });
     }
   }
+
+  /** Current account equity in USDT — used by the per-trade risk gate.
+   *  For paper: paperWallet (real-time). For live: cached wallet balance
+   *  updated by refreshLiveEquity() on engine start + on each close (+= pnl).
+   *  Avoids hitting /fapi/v2/balance on every signal. */
+  private cachedEquity = 0;
+  private async refreshLiveEquity() {
+    if (this.paperMode) return;
+    try {
+      const bals = await this.client.getBalances();
+      const usdt = bals.find((b) => b.asset === "USDT");
+      if (usdt) {
+        this.cachedEquity = +usdt.balance;
+        this.emit("info", `equity refreshed: $${this.cachedEquity.toFixed(2)}`, { equity: this.cachedEquity });
+      }
+    } catch (e) { /* silent — fall back to incremental updates */ }
+  }
+  getCurrentEquity(): number { return this.paperMode ? this.paperWallet : this.cachedEquity; }
   attachDataSource(source: BinanceEngine) { this.dataSource = source; }
   attachDataConsumer(consumer: BinanceEngine) { this.dataConsumer = consumer; }
   /** Read accessor: latest cached mark price for a symbol, or null if not
@@ -792,6 +810,9 @@ export class BinanceEngine extends EventEmitter {
       this.incomeReconcileTimer = setInterval(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 300_000);
       // Run once on start (don't wait 5 min for first reconcile after restart).
       setTimeout(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 10_000);
+      // Refresh cached equity on start + every 5 min (used by per-trade risk gate).
+      setTimeout(() => this.refreshLiveEquity(), 5_000);
+      setInterval(() => this.refreshLiveEquity(), 300_000);
     }
     if (this.hfEnabled) this.emit("info", `HF stack enabled: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
       stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
@@ -1072,6 +1093,10 @@ export class BinanceEngine extends EventEmitter {
         recentVolumes,
         recentEntryCloses,
         recent1hCloses,
+        signalAtr: s.atrEntry,
+        proposedStake: stake,
+        proposedLeverage: effectiveLeverage,
+        currentEquity: this.getCurrentEquity(),
       });
       if (!gate.ok) {
         this.emit("info", `skip ${sym} ${s.pattern}/${s.side}: ${gate.reason}`, {
@@ -1220,9 +1245,12 @@ export class BinanceEngine extends EventEmitter {
     this.closed.push(t);
     this.daily.profit += pnl;
     if (this.paperMode) this.paperWallet += pnl;
+    else this.cachedEquity += pnl;  // incremental live equity update — refreshLiveEquity() resyncs every 5 min
     // Track monthly realized P&L for the 6% circuit breaker.
     this.rollMonthIfNeeded();
-    if (this.monthly.startEquity === 0 && this.paperMode) this.monthly.startEquity = this.paperWallet - pnl;
+    if (this.monthly.startEquity === 0) {
+      this.monthly.startEquity = (this.paperMode ? this.paperWallet : this.cachedEquity) - pnl;
+    }
     this.monthly.realizedPnl += pnl;
     if (this.daily.profit <= -this.dailyMaxLoss) {
       this.daily.capHit = true;

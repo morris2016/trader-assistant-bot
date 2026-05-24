@@ -424,6 +424,7 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [volumeMult, setVolumeMult] = useState(String(rr.volumeMinMultOfSma ?? 1.2));
   const [htfTrendMode, setHtfTrendMode] = useState<"off" | "hfOnly" | "all">((rr as any).htfTrendFilter ?? "hfOnly");
   const [erMin, setErMin] = useState(String((rr as any).efficiencyRatioMin ?? 0.3));
+  const [perTradeRiskPct, setPerTradeRiskPct] = useState(String((((rr as any).perTradeRiskPctOfEquity ?? 0.02) * 100).toFixed(1)));
 
   const [walletInput, setWalletInput] = useState(String(paperWallet.toFixed(2)));
 
@@ -464,6 +465,7 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           volumeMinMultOfSma: Number(volumeMult) || 1.2,
           htfTrendFilter: htfTrendMode,
           efficiencyRatioMin: Number(erMin) || 0.3,
+          perTradeRiskPctOfEquity: (Number(perTradeRiskPct) || 2) / 100,
         },
       });
       setSaveMsg(r.ok ? { ok: true, text: "Saved" } : { ok: false, text: r.error ?? "Save failed" });
@@ -650,6 +652,12 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
                 Efficiency Ratio min (for SMC trend entries)
               </div>
               <input value={erMin} onChange={(e) => setErMin(e.target.value)} className="input" disabled={!riskEnabled} />
+            </label>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Elder's 2% rule: refuse any trade whose worst-case loss (1×ATR stop × stake × leverage) would exceed X% of current equity. Default 2%; tighten to 1% for sub-$100 accounts.">
+                Per-trade risk cap (% of equity)
+              </div>
+              <input value={perTradeRiskPct} onChange={(e) => setPerTradeRiskPct(e.target.value)} className="input" disabled={!riskEnabled} />
             </label>
           </div>
         </div>
