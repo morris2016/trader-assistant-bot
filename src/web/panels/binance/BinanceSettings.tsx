@@ -22,6 +22,9 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
   const [smcSlPct, setSmcSlPct] = useState("0");
   const [configMsg, setConfigMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
+  // Sync local form inputs from server config only ONCE on first load —
+  // otherwise the 5s refresh interval clobbers whatever the user is typing.
+  const [configSynced, setConfigSynced] = useState(false);
 
   async function refresh() {
     try {
@@ -33,11 +36,16 @@ export function BinanceSettingsPanel({ pending }: { pending: string | null }) {
     try {
       const c = await api.binanceConfig();
       setConfig(c.config);
-      setStake(String(c.config.stake));
-      setLeverage(String(c.config.leverage));
-      setDailyMaxLoss(String(c.config.dailyMaxLoss));
-      setPerTradeMaxStake(String(c.config.perTradeMaxStake));
-      setSmcSlPct(String((c.config as any).slPctSmc ?? 0));
+      // Form-field sync runs ONCE on first load. After that, user owns
+      // these inputs until they click Save (which fires reset + re-sync).
+      if (!configSynced) {
+        setStake(String(c.config.stake));
+        setLeverage(String(c.config.leverage));
+        setDailyMaxLoss(String(c.config.dailyMaxLoss));
+        setPerTradeMaxStake(String(c.config.perTradeMaxStake));
+        setSmcSlPct(String((c.config as any).slPctSmc ?? 0));
+        setConfigSynced(true);
+      }
     } catch {}
     try { setDiag(await api.binanceDiag()); } catch {}
   }
