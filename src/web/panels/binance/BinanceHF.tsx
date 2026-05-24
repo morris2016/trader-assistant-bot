@@ -15,6 +15,18 @@ function binanceUrl(symbol: string, testnet: boolean): string {
     : `https://www.binance.com/en/futures/${symbol}`;
 }
 
+/** Resolve a closed trade's P&L. Prefers exchange-truth (realizedPnlExchange
+ *  − commissions) when the user-data stream has populated it; otherwise falls
+ *  back to the bot's local estimate. */
+function resolvePnl(t: any): { value: number; source: "broker" | "est" } {
+  if (typeof t.realizedPnlExchange === "number") {
+    const ec = t.commissionEntry ?? 0;
+    const xc = t.commissionExit ?? 0;
+    return { value: t.realizedPnlExchange - ec - xc, source: "broker" };
+  }
+  return { value: t.pnl ?? 0, source: "est" };
+}
+
 export function BinanceHFPanel() {
   const [bs, setBs] = useState<any>(null);
   const [config, setConfig] = useState<BinanceConfig | null>(null);
@@ -114,10 +126,16 @@ export function BinanceHFPanel() {
   // ── Hooks BEFORE any early return so order stays stable across renders ──
   const allClosed = (bs?.state?.closed ?? []) as any[];
   const hfClosedAll = useMemo(() => allClosed.filter((t) => isHf(t.pattern)), [allClosed]);
+  // Sorted newest-first for the closed-trades table.
+  const hfClosedDesc = useMemo(
+    () => hfClosedAll.slice().sort((a, b) => (b.closeEpoch ?? 0) - (a.closeEpoch ?? 0)),
+    [hfClosedAll],
+  );
+  // Equity curve uses broker-truth P&L when available, local estimate otherwise.
   const equityPoints = useMemo(() => {
     const sorted = hfClosedAll.slice().sort((a, b) => (a.closeEpoch ?? 0) - (b.closeEpoch ?? 0));
     let cum = 0;
-    return sorted.map((t) => { cum += t.pnl ?? 0; return { ts: t.closeEpoch ?? 0, balance: cum }; });
+    return sorted.map((t) => { cum += resolvePnl(t).value; return { ts: t.closeEpoch ?? 0, balance: cum }; });
   }, [hfClosedAll]);
 
   if (!bs || !config) return <div className="empty-state">Loading…</div>;
@@ -128,7 +146,8 @@ export function BinanceHFPanel() {
   const hfOpen = allOpen.filter((t) => isHf(t.pattern));
   const today = eatToday();
   const hfClosedToday = hfClosedAll.filter((t) => t.closeEpoch && eatDateOf(t.closeEpoch) === today);
-  const todayPnl = hfClosedToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const todayPnl = hfClosedToday.reduce((s, t) => s + resolvePnl(t).value, 0);
+  const hfBrokerCount = hfClosedAll.filter((t) => typeof t.realizedPnlExchange === "number").length;
 
   async function doCancel(id: string) {
     setCancelErr(null);
@@ -305,6 +324,57 @@ export function BinanceHFPanel() {
             <div className="muted">Need at least 2 closed HF trades to draw a curve.</div>
           ) : (
             <EquitySvg points={equityPoints} />
+          )}
+        </div>
+      </div>
+
+      {/* ── HF closed trades ─────────────────────────────────────── */}
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">HF closed trades ({hfClosedAll.length})</div>
+          <div className="section-sub">
+            BB stack only. P&amp;L source: <b>broker</b> = exchange-truth (realized − commissions);
+            <b>est</b> = local estimate (no fees, pre-stream). {hfBrokerCount}/{hfClosedAll.length} broker-verified.
+          </div>
+        </div>
+        <div className="card card-padded">
+          {hfClosedAll.length === 0 ? (
+            <div className="muted">No closed HF trades yet.</div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Closed (EAT)</th><th>Asset</th><th>Pattern</th><th>Side</th>
+                  <th>Entry</th><th>Exit</th><th>Stake</th><th>P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hfClosedDesc.slice(0, 200).map((t: any) => {
+                  const p = resolvePnl(t);
+                  return (
+                    <tr key={t.id}>
+                      <td className="muted">{t.closeEpoch ? fmtEatTime(t.closeEpoch) : "—"}</td>
+                      <td className="mono">
+                        <a href={binanceUrl(t.asset, testnet)} target="_blank" rel="noopener noreferrer"
+                           title={`Open ${t.asset} on Binance Futures`}
+                           style={{ color: "#7fb3ff", textDecoration: "none" }}>
+                          {t.asset} ↗
+                        </a>
+                      </td>
+                      <td>{t.pattern}</td>
+                      <td><span className={`pill ${t.side === "LONG" ? "pill-green" : "pill-red"}`}>{t.side}</span></td>
+                      <td className="mono">${(+t.entryPrice).toFixed(5)}</td>
+                      <td className="mono">${(+(t.closePrice ?? 0)).toFixed(5)}</td>
+                      <td className="mono">${(+t.stake).toFixed(2)}</td>
+                      <td className="mono" style={{ color: p.value >= 0 ? "#5fd4a4" : "#d4655f", fontWeight: 600 }}>
+                        {p.value >= 0 ? "+" : ""}${p.value.toFixed(2)}
+                        {p.source === "est" && <span title="Local estimate — fees not deducted, no broker confirmation yet" style={{ marginLeft: 6, color: "#d4a35f", fontSize: 10, fontWeight: 500 }}>est</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
         </div>
       </div>

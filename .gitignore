@@ -13,6 +13,9 @@ state/
 .tmp/
 *-state.json
 
+# Binance 1m kline cache (large, regeneratable via fetch-binance-history.ts)
+kline-cache/
+
 # IDE
 .idea/
 .vscode/

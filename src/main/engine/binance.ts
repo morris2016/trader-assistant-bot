@@ -412,6 +412,7 @@ export class BinanceEngine extends EventEmitter {
   private running = false;
   private signalLoopTimer: NodeJS.Timeout | null = null;
   private positionLoopTimer: NodeJS.Timeout | null = null;
+  private incomeReconcileTimer: NodeJS.Timeout | null = null;
   // Pending API actions per trade, to prevent racing duplicate orders
   private busy: Set<string> = new Set();
   // Heartbeat: cycle counter + per-tick signal counter (set inside checkSignalsFor)
@@ -683,6 +684,13 @@ export class BinanceEngine extends EventEmitter {
     this.positionLoopTimer = setInterval(() => this.positionTick().catch((e) => this.emit("error", e as Error)), 5_000);
     // HF signal loop: every 30s check if a new 15m bar closed
     this.hfSignalLoopTimer = setInterval(() => this.hfSignalTick().catch((e) => this.emit("error", e as Error)), 30_000);
+    // Income reconcile loop: every 5 min backfill exchange-truth P&L on
+    // closed trades whose user-data stream events arrived late or never
+    // (bot restart, stream drop). Without this the UI shows local estimate
+    // forever, which is often optimistic (no fees) and diverges from wallet.
+    this.incomeReconcileTimer = setInterval(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 300_000);
+    // Run once on start (don't wait 5 min for first reconcile after restart).
+    setTimeout(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 10_000);
     if (this.hfEnabled) this.emit("info", `HF stack enabled: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
       stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
     });
@@ -694,6 +702,7 @@ export class BinanceEngine extends EventEmitter {
     if (this.signalLoopTimer) { clearInterval(this.signalLoopTimer); this.signalLoopTimer = null; }
     if (this.positionLoopTimer) { clearInterval(this.positionLoopTimer); this.positionLoopTimer = null; }
     if (this.hfSignalLoopTimer) { clearInterval(this.hfSignalLoopTimer); this.hfSignalLoopTimer = null; }
+    if (this.incomeReconcileTimer) { clearInterval(this.incomeReconcileTimer); this.incomeReconcileTimer = null; }
   }
 
   private async signalTick() {
@@ -1176,6 +1185,95 @@ export class BinanceEngine extends EventEmitter {
     this.updateMartingale(t);
     this.emit("closed", t);
     this.emit("stateChanged");
+  }
+
+  /** Pull REALIZED_PNL + COMMISSION income from Binance for the last 7 days
+   *  and attribute each event to a closed trade by symbol + close-time window.
+   *  Trades that already have `realizedPnlExchange` populated (from the
+   *  user-data stream) are skipped. Trades without it get their `pnl` rewritten
+   *  to exchange-truth (`realizedPnl − commissions`) and `daily.profit` is
+   *  adjusted by the delta. Window: closeEpoch ± 90s on the same symbol.
+   *
+   *  Limitation: if multiple trades on the same symbol closed within the
+   *  90s window, attribution is by nearest-time. Cleaner attribution would
+   *  require persisting closeOrderId on each trade and matching by `info`. */
+  private async reconcileIncomeFromExchange() {
+    if (this.closed.length === 0) return;
+    // Only reconcile trades from the last 7 days (Binance income window is finite
+    // anyway, and older trades shouldn't be re-touched).
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const sinceMs = Date.now() - sevenDaysMs;
+    const candidates = this.closed.filter(
+      (t) => typeof t.realizedPnlExchange !== "number"
+        && t.closeEpoch && t.closeEpoch * 1000 >= sinceMs,
+    );
+    if (candidates.length === 0) return;
+
+    type IncomeEvent = { symbol: string; incomeType: string; income: number; timeMs: number; info: string; tradeId: string };
+    let events: IncomeEvent[];
+    try {
+      events = await this.client.getIncomeHistory(sinceMs);
+    } catch (e) {
+      this.emit("error", e as Error);
+      return;
+    }
+    if (events.length === 0) return;
+
+    // Group income events by symbol for efficient lookup.
+    const bySymbol = new Map<string, IncomeEvent[]>();
+    for (const ev of events) {
+      const arr = bySymbol.get(ev.symbol) ?? [];
+      arr.push(ev);
+      bySymbol.set(ev.symbol, arr);
+    }
+    // Within each symbol, sort by time ascending so we can scan once.
+    for (const arr of bySymbol.values()) arr.sort((a, b) => a.timeMs - b.timeMs);
+
+    // Track which events have been claimed by a trade so we don't double-attribute.
+    const claimed = new Set<number>(); // index into the symbol's array
+
+    let updated = 0;
+    for (const t of candidates) {
+      const closeMs = (t.closeEpoch ?? 0) * 1000;
+      const symEvents = bySymbol.get(t.asset) ?? [];
+      // Find unclaimed REALIZED_PNL within ±90s of close on this symbol.
+      let realizedPnl: number | undefined;
+      let commission = 0;
+      let claimedThis: number[] = [];
+      for (let i = 0; i < symEvents.length; i++) {
+        if (claimed.has(i)) continue;
+        const ev = symEvents[i];
+        const dt = Math.abs(ev.timeMs - closeMs);
+        if (dt > 90_000) continue;
+        if (ev.incomeType === "REALIZED_PNL" && realizedPnl === undefined) {
+          realizedPnl = ev.income;
+          claimedThis.push(i);
+        } else if (ev.incomeType === "COMMISSION") {
+          // Commission events come in pairs (entry + exit); both fall in window.
+          commission += Math.abs(ev.income); // ev.income is negative
+          claimedThis.push(i);
+        }
+      }
+      if (realizedPnl === undefined) continue;
+      // Commit: claim the events and update the trade.
+      for (const i of claimedThis) claimed.add(i);
+      const prevPnl = t.pnl ?? 0;
+      t.realizedPnlExchange = realizedPnl;
+      // We can't easily split entry vs exit commission without orderId, so
+      // put it all in commissionExit. Sum is what matters for net P&L display.
+      t.commissionExit = commission;
+      t.commissionEntry = 0;
+      const newPnl = realizedPnl - commission;
+      t.pnl = newPnl;
+      this.daily.profit += (newPnl - prevPnl);
+      updated++;
+    }
+    if (updated > 0) {
+      this.emit("info", `income reconcile: backfilled exchange-truth P&L on ${updated} trade(s)`, {
+        reconciled: updated, candidates: candidates.length,
+      });
+      this.emit("stateChanged");
+    }
   }
 
   on<K extends keyof BinanceEngineEvents>(event: K, listener: (...args: BinanceEngineEvents[K]) => void): this { return super.on(event, listener as any); }

@@ -180,6 +180,28 @@ export class BinanceClient extends EventEmitter {
     return { realizedPnl, commission, events };
   }
 
+  /** Per-event income history since `sinceMs`. Returns the raw events so the
+   *  caller can attribute REALIZED_PNL/COMMISSION to specific trades by
+   *  symbol+time window. Used by the engine's income reconciler to backfill
+   *  exchange-truth P&L on trades the user-data stream missed. */
+  async getIncomeHistory(sinceMs: number): Promise<Array<{ symbol: string; incomeType: string; income: number; timeMs: number; info: string; tradeId: string }>> {
+    const out: Array<{ symbol: string; incomeType: string; income: number; timeMs: number; info: string; tradeId: string }> = [];
+    for (const incomeType of ["REALIZED_PNL", "COMMISSION"]) {
+      const data = await this.signedRequest("GET", "/fapi/v1/income", { incomeType, startTime: sinceMs, limit: 1000 });
+      for (const ev of (data as any[])) {
+        out.push({
+          symbol: ev.symbol ?? "",
+          incomeType: ev.incomeType ?? incomeType,
+          income: +ev.income,
+          timeMs: +ev.time,
+          info: ev.info ?? "",
+          tradeId: ev.tradeId ?? "",
+        });
+      }
+    }
+    return out;
+  }
+
   // ─── Market data ─────────────────────────────────────────────────────────
 
   /** Per-symbol filters: rounding rules for quantity, price, and minimum
