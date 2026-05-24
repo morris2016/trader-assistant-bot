@@ -529,27 +529,30 @@ async function main() {
     try {
       if (existsSync(paperConfigFile)) return JSON.parse(readFileSync(paperConfigFile, "utf8")) as BinanceConfig;
     } catch {}
-    // Seed from live config but turn risk rules ON in paper by default —
-    // paper is exactly where these gates should be validated.
+    // Seed from live config — PDF-derived risk rules default OFF so paper
+    // mirrors live behavior exactly (V5 baseline). The gates exist and can
+    // be toggled manually in the Paper config UI for experimentation, but
+    // the backtest showed they reduce total $ rather than add edge.
     return {
       ...binanceConfig,
       autoStart: false,
-      riskRules: {
-        enabled: true,
-        maxConcurrentPositions: 3,
-        maxPositionsPerBucket: 1,
-        monthlyLossCircuitBreakerPct: 0.06,
-        volumeMinMultOfSma: 1.2,
-        htfTrendFilter: "hfOnly",
-        efficiencyRatioMin: 0.3,
-        perTradeRiskPctOfEquity: 0.02,
-      },
+      riskRules: { enabled: false },
     };
   })();
   async function savePaperConfig() {
     const tmp = paperConfigFile + ".tmp";
     await fsp.writeFile(tmp, JSON.stringify(paperConfig, null, 2), "utf8");
     await fsp.rename(tmp, paperConfigFile);
+  }
+  // One-time migration: legacy paper configs had risk-rules ON by default.
+  // PDF-gate backtest (2026-05-24) showed they reduce edge, not add it.
+  // Reset to disabled so paper matches V5 baseline behavior. User can still
+  // toggle individual gates ON in the Paper config UI if they want to test.
+  if (paperConfig.riskRules?.enabled && !(paperConfig as any).riskRulesUserSet) {
+    log.info("paper config migration: disabling auto-on risk-rules (paper now mirrors live V5 baseline; toggle gates in UI to re-enable)");
+    paperConfig = { ...paperConfig, riskRules: { enabled: false } };
+    (paperConfig as any).riskRulesUserSet = false;
+    await savePaperConfig();
   }
   paperEngine.configure({
     assets: [...BINANCE_ASSETS],
@@ -1713,6 +1716,9 @@ async function main() {
             perPatternEnabled: { ...paperConfig.hf.perPatternEnabled, ...(patch.hf?.perPatternEnabled ?? {}) },
           },
         };
+        // User explicitly touched risk-rules via UI — mark so the one-time
+        // migration won't fire on the next boot.
+        if (patch.riskRules !== undefined) (paperConfig as any).riskRulesUserSet = true;
         await savePaperConfig();
         paperEngine.configure({
           stake: paperConfig.stake,
