@@ -514,6 +514,78 @@ async function main() {
     log.warn("binance state reload failed — starting fresh", { err: (e as Error).message });
   }
 
+  // ─── Paper-mode Binance engine ──────────────────────────────────────────
+  // Mirrors the live engine but skips every authenticated exchange call.
+  // Shares the same `binanceClient` for read-only market data (klines, mark
+  // price), so paper and live see bit-identical signals at the same instant.
+  // Independent state file + config so paper toggles/sizing don't affect live.
+  const PAPER_START_BALANCE_DEFAULT = 30;
+  const paperEngine = new BinanceEngine(binanceClient, { paperMode: true, paperStartBalance: PAPER_START_BALANCE_DEFAULT });
+  // Paper config: reuse the same shape as live but in its own file.
+  // Default: enabled=false; user starts manually from the Paper tab.
+  const paperConfigFile = path.join(cfg.stateDir, "paper-binance-config.json");
+  let paperConfig: BinanceConfig = (() => {
+    try {
+      if (existsSync(paperConfigFile)) return JSON.parse(readFileSync(paperConfigFile, "utf8")) as BinanceConfig;
+    } catch {}
+    // Seed from live config so starting point is sensible.
+    return { ...binanceConfig, autoStart: false };
+  })();
+  async function savePaperConfig() {
+    const tmp = paperConfigFile + ".tmp";
+    await fsp.writeFile(tmp, JSON.stringify(paperConfig, null, 2), "utf8");
+    await fsp.rename(tmp, paperConfigFile);
+  }
+  paperEngine.configure({
+    assets: [...BINANCE_ASSETS],
+    stake: paperConfig.stake,
+    leverage: paperConfig.leverage,
+    dailyMaxLoss: paperConfig.dailyMaxLoss,
+    perTradeMaxStake: paperConfig.perTradeMaxStake,
+    perAssetEnabled: paperConfig.perAssetEnabled,
+    perPatternEnabled: paperConfig.perPatternEnabled,
+    martingale: paperConfig.martingale,
+    hf: paperConfig.hf,
+  });
+  paperEngine.on("error", (e) => log.error(`paper: ${e.message}`));
+  paperEngine.on("opened", (t) => log.info(`paper opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`, { paper: true, asset: t.asset, pattern: t.pattern, side: t.side, entryPrice: t.entryPrice, stake: t.stake, leverage: t.leverage }));
+  paperEngine.on("closed", (t) => log.info(`paper closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`, { paper: true, asset: t.asset, pattern: t.pattern, side: t.side, pnl: t.pnl, exitPrice: t.closePrice }));
+  paperEngine.on("info", (msg, meta) => log.info(`paper ${msg}`, { paper: true, ...meta }));
+  paperEngine.on("capHit", (loss, cap) => log.warn(`paper daily cap hit: loss $${loss.toFixed(2)} >= cap $${cap.toFixed(2)}`));
+
+  // Paper state persistence — separate file from live.
+  const paperStateFile = path.join(cfg.stateDir, "paper-binance-state.json");
+  let paperStateDirty = false;
+  let paperStateFlushTimer: NodeJS.Timeout | null = null;
+  async function flushPaperState() {
+    if (!paperStateDirty) return;
+    paperStateDirty = false;
+    try {
+      const tmp = paperStateFile + ".tmp";
+      await fsp.writeFile(tmp, JSON.stringify(paperEngine.state(), null, 2), "utf8");
+      await fsp.rename(tmp, paperStateFile);
+    } catch (e) { log.warn("paper state flush failed", { err: (e as Error).message }); }
+  }
+  function schedulePaperFlush() {
+    paperStateDirty = true;
+    if (paperStateFlushTimer) return;
+    paperStateFlushTimer = setTimeout(() => { paperStateFlushTimer = null; flushPaperState().catch(() => {}); }, 1000);
+  }
+  paperEngine.on("stateChanged", schedulePaperFlush);
+  paperEngine.on("opened", schedulePaperFlush);
+  paperEngine.on("closed", schedulePaperFlush);
+  try {
+    if (existsSync(paperStateFile)) {
+      const parsed = JSON.parse(readFileSync(paperStateFile, "utf8"));
+      paperEngine.load(parsed);
+      log.info(`paper state reloaded: ${parsed.open?.length ?? 0} open, ${parsed.closed?.length ?? 0} closed, wallet $${(parsed.paperWallet ?? PAPER_START_BALANCE_DEFAULT).toFixed(2)}`);
+    } else {
+      log.info(`paper state: fresh start (wallet $${PAPER_START_BALANCE_DEFAULT})`);
+    }
+  } catch (e) { log.warn("paper state reload failed — starting fresh", { err: (e as Error).message }); }
+
+  let paperRunning = false;
+
   let binanceRunning = false;
   let binanceTestnet = false;
   async function configureBinanceFromCreds(): Promise<{ ok: boolean; testnet: boolean }> {
@@ -1573,7 +1645,76 @@ async function main() {
         return { ok: true };
       },
     },
+    binancePaper: {
+      isRunning: () => paperRunning,
+      getState: () => paperEngine.state(),
+      getConfig: () => paperConfig,
+      getPaperWallet: () => paperEngine.getPaperWallet(),
+      start: async () => {
+        try {
+          if (paperRunning) return { ok: true };
+          // Paper engine needs exchangeInfo + klines, which require the client
+          // to be configured with at least anonymous-capable settings. Use the
+          // same client as live (which may already be configured), or fall back.
+          await paperEngine.start();
+          paperRunning = true;
+          paperConfig = { ...paperConfig, autoStart: true };
+          await savePaperConfig();
+          log.info("paper engine started");
+          return { ok: true };
+        } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+      },
+      stop: async () => {
+        if (paperRunning) { await paperEngine.stop(); paperRunning = false; log.warn("paper engine stopped"); }
+        paperConfig = { ...paperConfig, autoStart: false };
+        await savePaperConfig();
+        return { ok: true };
+      },
+      updateConfig: async (patch: Partial<BinanceConfig>) => {
+        paperConfig = {
+          ...paperConfig,
+          ...patch,
+          perAssetEnabled: { ...paperConfig.perAssetEnabled, ...(patch.perAssetEnabled ?? {}) },
+          perPatternEnabled: { ...paperConfig.perPatternEnabled, ...(patch.perPatternEnabled ?? {}) },
+          martingale: { ...paperConfig.martingale, ...(patch.martingale ?? {}) },
+          hf: {
+            ...paperConfig.hf,
+            ...(patch.hf ?? {}),
+            perAssetEnabled: { ...paperConfig.hf.perAssetEnabled, ...(patch.hf?.perAssetEnabled ?? {}) },
+            perPatternEnabled: { ...paperConfig.hf.perPatternEnabled, ...(patch.hf?.perPatternEnabled ?? {}) },
+          },
+        };
+        await savePaperConfig();
+        paperEngine.configure({
+          stake: paperConfig.stake,
+          leverage: paperConfig.leverage,
+          dailyMaxLoss: paperConfig.dailyMaxLoss,
+          perTradeMaxStake: paperConfig.perTradeMaxStake,
+          perAssetEnabled: paperConfig.perAssetEnabled,
+          perPatternEnabled: paperConfig.perPatternEnabled,
+          martingale: paperConfig.martingale,
+          hf: paperConfig.hf,
+        });
+        log.info("paper config updated", { ...paperConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
+      },
+      cancelTrade: async (tradeId: string) => paperEngine.cancelTrade(tradeId),
+      resetWallet: async (balance: number) => {
+        const fresh = Math.max(0.01, +balance);
+        paperEngine.load({ open: [], closed: [], daily: { date: new Date().toISOString().slice(0, 10), profit: 0, tradesOpened: 0, capHit: false }, winStreaks: {}, paperWallet: fresh });
+        schedulePaperFlush();
+        log.warn(`paper wallet reset to $${fresh.toFixed(2)} — all open/closed trades cleared`);
+        return { ok: true };
+      },
+    },
   });
+
+  // Auto-resume paper engine if user left it enabled before a redeploy.
+  if (paperConfig.autoStart) {
+    log.info("paper autoStart=true — resuming engine");
+    paperEngine.start()
+      .then(() => { paperRunning = true; log.info("paper engine auto-resumed"); })
+      .catch((e) => log.error(`paper auto-resume failed: ${e.message}`));
+  }
 
   // Auto-resume Binance engine if operator left it running before a redeploy.
   // Intent is persisted via `autoStart` in binance-config.json, toggled by

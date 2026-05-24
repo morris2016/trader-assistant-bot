@@ -213,6 +213,20 @@ export function startHttpServer(opts: {
     closeExternal: (symbol: string, side: "LONG" | "SHORT", qty: number) => Promise<{ ok: boolean; error?: string }>;
     walletTruthPnl: () => Promise<{ realized: number; commission: number; unrealized: number; wallet: number; events: number; sinceMs: number }>;
   };
+  /** Paper-mode Binance engine — runs the same signal detector + lifecycle
+   *  as `binance` but with no real exchange calls. Independent state and
+   *  config. Exposes /api/binance/paper/* endpoints. */
+  binancePaper?: {
+    isRunning: () => boolean;
+    getState: () => any;
+    getConfig: () => any;
+    getPaperWallet: () => number;
+    start: () => Promise<{ ok: boolean; error?: string }>;
+    stop: () => Promise<{ ok: boolean }>;
+    updateConfig: (patch: any) => Promise<void>;
+    cancelTrade: (tradeId: string) => Promise<{ ok: boolean; error?: string }>;
+    resetWallet: (balance: number) => Promise<{ ok: boolean }>;
+  };
 }): HttpServerHandle {
   const server = http.createServer(async (req, res) => {
     try {
@@ -647,6 +661,64 @@ export function startHttpServer(opts: {
             }
             return;
           }
+          // ─── Paper-mode endpoints (parallel to live) ───
+          const bp = opts.binancePaper;
+          if (bp) {
+            if (req.method === "GET" && path0 === "/api/binance/paper/state") {
+              json(res, 200, { running: bp.isRunning(), state: bp.getState(), paperWallet: bp.getPaperWallet() });
+              return;
+            }
+            if (req.method === "GET" && path0 === "/api/binance/paper/config") {
+              json(res, 200, { config: bp.getConfig() });
+              return;
+            }
+            if (req.method === "POST" && path0 === "/api/binance/paper/start") {
+              const r = await bp.start();
+              json(res, r.ok ? 200 : 400, r);
+              return;
+            }
+            if (req.method === "POST" && path0 === "/api/binance/paper/stop") {
+              const r = await bp.stop();
+              json(res, 200, r);
+              return;
+            }
+            if (req.method === "POST" && path0 === "/api/binance/paper/update-config") {
+              const body = await readBody(req);
+              try {
+                const patch = JSON.parse(body);
+                await bp.updateConfig(patch);
+                json(res, 200, { ok: true, config: bp.getConfig() });
+              } catch (e: any) {
+                json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+              }
+              return;
+            }
+            if (req.method === "POST" && path0 === "/api/binance/paper/cancel-trade") {
+              const body = await readBody(req);
+              try {
+                const parsed = JSON.parse(body) as { tradeId?: string };
+                if (!parsed.tradeId) { json(res, 400, { ok: false, error: "Missing tradeId" }); return; }
+                const result = await bp.cancelTrade(parsed.tradeId);
+                json(res, result.ok ? 200 : 400, result);
+              } catch (e: any) {
+                json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+              }
+              return;
+            }
+            if (req.method === "POST" && path0 === "/api/binance/paper/reset-wallet") {
+              const body = await readBody(req);
+              try {
+                const parsed = JSON.parse(body) as { balance?: number };
+                const balance = +(parsed.balance ?? 30);
+                const r = await bp.resetWallet(balance);
+                json(res, 200, r);
+              } catch (e: any) {
+                json(res, 400, { ok: false, error: e?.message ?? "Bad body" });
+              }
+              return;
+            }
+          }
+
           if (req.method === "POST" && path0 === "/api/binance/close-external") {
             const body = await readBody(req);
             try {

@@ -72,6 +72,9 @@ export type BinanceState = {
   /** Anti-martingale win-streak counters per (asset:pattern:side). Persists
    *  across restarts so we don't lose Paroli ladder progress on Railway redeploy. */
   winStreaks?: Record<string, number>;
+  /** Paper-mode only: virtual USDT balance. Starts at paperStartBalance,
+   *  moves by realized P&L on each close. Persisted alongside trades. */
+  paperWallet?: number;
 };
 
 export type BinanceEngineEvents = {
@@ -419,20 +422,43 @@ export class BinanceEngine extends EventEmitter {
   private tickCount = 0;
   private signalsThisTick = 0;
 
-  constructor(client: BinanceClient) {
+  /** Paper mode: when true, the engine runs the FULL signal-detection and
+   *  trade-lifecycle pipeline but skips every authenticated exchange call.
+   *  Orders are simulated against the current mark price; positions and
+   *  fees are tracked in-memory; `paperWallet` moves by realized P&L on
+   *  each close. Read-only market data (klines, mark price) still uses the
+   *  shared real client so paper and live see bit-identical signals at the
+   *  same instant. */
+  private paperMode = false;
+  private paperWallet = 0;
+  /** Paper-mode round-trip cost applied to each simulated trade close:
+   *  taker fees + slippage. Defaults to 0.04%×2 + 1.8bps×2 = 0.0836%. */
+  private paperCostRoundTrip = 0.000836;
+
+  constructor(client: BinanceClient, opts?: { paperMode?: boolean; paperStartBalance?: number }) {
     super();
     this.client = client;
+    this.paperMode = !!opts?.paperMode;
+    this.paperWallet = opts?.paperStartBalance ?? 0;
   }
+
+  isPaperMode(): boolean { return this.paperMode; }
+  getPaperWallet(): number { return this.paperWallet; }
 
   load(state: Partial<BinanceState>) {
     this.open = state.open ?? [];
     this.closed = state.closed ?? [];
     this.daily = state.daily ?? emptyDaily();
     this.winStreaks = state.winStreaks ?? {};
+    if (this.paperMode && typeof state.paperWallet === "number") this.paperWallet = state.paperWallet;
     this.rollDayIfNeeded();
   }
 
-  state(): BinanceState { return { open: this.open, closed: this.closed, daily: this.daily, winStreaks: this.winStreaks }; }
+  state(): BinanceState {
+    const out: BinanceState = { open: this.open, closed: this.closed, daily: this.daily, winStreaks: this.winStreaks };
+    if (this.paperMode) out.paperWallet = this.paperWallet;
+    return out;
+  }
 
   /** Returns wallet-truth daily P&L: REALIZED from Binance income (since
    *  midnight, in EAT) MINUS commissions, plus UNREALIZED from currently-
@@ -502,6 +528,7 @@ export class BinanceEngine extends EventEmitter {
    *  whether the bot tracks it. Used by the External tab's Cancel button —
    *  reduce-only MARKET that drains the un-tracked quantity. */
   async closeExternal(symbol: string, side: BinanceTradeSide, qty: number): Promise<{ ok: boolean; error?: string }> {
+    if (this.paperMode) return { ok: false, error: "External-position close is a live-only action" };
     const lockKey = `external-close:${symbol}:${side}`;
     if (this.busy.has(lockKey)) return { ok: false, error: "Close already in progress" };
     this.busy.add(lockKey);
@@ -545,19 +572,21 @@ export class BinanceEngine extends EventEmitter {
       const f = this.filters[t.asset];
       const closeSide = t.side === "LONG" ? "SELL" : "BUY";
       const positionSide = this.hedgeMode ? t.side : "BOTH";
-      this.emit("info", `cancel ${t.asset} ${t.pattern}/${t.side} qty=${t.qty} — placing market close`, {
+      this.emit("info", `cancel ${t.asset} ${t.pattern}/${t.side} qty=${t.qty} — placing market close${this.paperMode ? " (paper)" : ""}`, {
         asset: t.asset, pattern: t.pattern, side: t.side, qty: t.qty, tradeId: t.id,
       });
-      await this.client.placeMarketOrder({
-        symbol: t.asset, side: closeSide as any,
-        quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
-        positionSide: positionSide as any,
-        clientOrderId: `cancel-${t.id.slice(0, 8)}-${Date.now()}`,
-      });
-      // Best-effort immediate local close at peak/entry — actual fill
-      // price will be refined by user-data ORDER_TRADE_UPDATE if it
-      // arrives, but the local state needs to update fast for the UI.
-      await this.closeTradeFromFill(t, t.peakFav || t.entryPrice);
+      if (!this.paperMode) {
+        await this.client.placeMarketOrder({
+          symbol: t.asset, side: closeSide as any,
+          quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
+          positionSide: positionSide as any,
+          clientOrderId: `cancel-${t.id.slice(0, 8)}-${Date.now()}`,
+        });
+      }
+      // Best-effort immediate local close at current mark / peak / entry —
+      // for paper this IS the final settlement. For live, user-data stream
+      // refines the price.
+      await this.closeTradeFromFill(t, t.markPrice || t.peakFav || t.entryPrice);
       return { ok: true };
     } catch (e: any) {
       return { ok: false, error: e?.message ?? String(e) };
@@ -643,18 +672,23 @@ export class BinanceEngine extends EventEmitter {
 
     // Set hedge mode (allows separate LONG + SHORT positions per symbol).
     // -4059 = "No need to change position side" — already in hedge mode, safe to ignore.
-    try {
-      await this.client["signedRequest"]?.("POST", "/fapi/v1/positionSide/dual", { dualSidePosition: "true" });
-    } catch (e: any) {
-      if (!/4059/.test(String(e?.message ?? ""))) this.emit("error", e as Error);
+    if (!this.paperMode) {
+      try {
+        await this.client["signedRequest"]?.("POST", "/fapi/v1/positionSide/dual", { dualSidePosition: "true" });
+      } catch (e: any) {
+        if (!/4059/.test(String(e?.message ?? ""))) this.emit("error", e as Error);
+      }
     }
 
-    // Subscribe to user-data stream for real-time order fills + position updates
-    try {
-      await this.client.startUserDataStream();
-      this.client.on("userEvent", (ev) => this.onUserEvent(ev));
-    } catch (e) {
-      this.emit("error", new Error(`Failed to start user-data stream: ${(e as Error).message}`));
+    // Subscribe to user-data stream for real-time order fills + position updates.
+    // Paper mode skips this — no real fills to listen for; simulation drives state.
+    if (!this.paperMode) {
+      try {
+        await this.client.startUserDataStream();
+        this.client.on("userEvent", (ev) => this.onUserEvent(ev));
+      } catch (e) {
+        this.emit("error", new Error(`Failed to start user-data stream: ${(e as Error).message}`));
+      }
     }
 
     // Seed klines for each asset + replay structure cache so bot recognises
@@ -672,8 +706,10 @@ export class BinanceEngine extends EventEmitter {
           swingHigh: isFinite(struct.lastSwingHigh) ? +struct.lastSwingHigh.toFixed(4) : null,
           swingLow: isFinite(struct.lastSwingLow) ? +struct.lastSwingLow.toFixed(4) : null,
         });
-        await this.client.setMarginType(sym, "ISOLATED").catch(() => undefined);
-        await this.client.setLeverage(sym, this.leverage).catch((e) => this.emit("error", e as Error));
+        if (!this.paperMode) {
+          await this.client.setMarginType(sym, "ISOLATED").catch(() => undefined);
+          await this.client.setLeverage(sym, this.leverage).catch((e) => this.emit("error", e as Error));
+        }
       } catch (e) {
         this.emit("error", e as Error);
       }
@@ -688,9 +724,12 @@ export class BinanceEngine extends EventEmitter {
     // closed trades whose user-data stream events arrived late or never
     // (bot restart, stream drop). Without this the UI shows local estimate
     // forever, which is often optimistic (no fees) and diverges from wallet.
-    this.incomeReconcileTimer = setInterval(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 300_000);
-    // Run once on start (don't wait 5 min for first reconcile after restart).
-    setTimeout(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 10_000);
+    // Paper mode skips this — there's no exchange income to reconcile against.
+    if (!this.paperMode) {
+      this.incomeReconcileTimer = setInterval(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 300_000);
+      // Run once on start (don't wait 5 min for first reconcile after restart).
+      setTimeout(() => this.reconcileIncomeFromExchange().catch((e) => this.emit("error", e as Error)), 10_000);
+    }
     if (this.hfEnabled) this.emit("info", `HF stack enabled: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
       stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
     });
@@ -931,10 +970,17 @@ export class BinanceEngine extends EventEmitter {
       const orderSide = s.side === "LONG" ? "BUY" : "SELL";
       const positionSide = this.hedgeMode ? (s.side === "LONG" ? "LONG" : "SHORT") : "BOTH";
 
-      const resp = await this.client.placeMarketOrder({
-        symbol: sym, side: orderSide as any, quantity: Number(fmtQty(qty, f.quantityPrecision)),
-        positionSide: positionSide as any, clientOrderId: cid,
-      });
+      let resp: any;
+      if (this.paperMode) {
+        // Paper: simulate immediate fill at the signal's reference price (== last close).
+        // No exchange call, no commission yet (charged on close).
+        resp = { orderId: 0, clientOrderId: cid, avgPrice: String(refPrice), executedQty: String(qty), status: "FILLED" };
+      } else {
+        resp = await this.client.placeMarketOrder({
+          symbol: sym, side: orderSide as any, quantity: Number(fmtQty(qty, f.quantityPrecision)),
+          positionSide: positionSide as any, clientOrderId: cid,
+        });
+      }
       const trade: BinanceTrade = {
         id: tradeId,
         asset: sym,
@@ -1033,8 +1079,20 @@ export class BinanceEngine extends EventEmitter {
 
   private async closeTradeFromFill(t: BinanceTrade, fillPrice: number) {
     const pctMove = (fillPrice - t.entryPrice) / t.entryPrice;
-    let pnl = t.stake * t.leverage * (t.side === "LONG" ? 1 : -1) * pctMove;
-    if (pnl < -t.stake) pnl = -t.stake;
+    let gross = t.stake * t.leverage * (t.side === "LONG" ? 1 : -1) * pctMove;
+    if (gross < -t.stake) gross = -t.stake;
+    let pnl = gross;
+    // Paper mode: deduct simulated round-trip cost so the equity curve
+    // mirrors what a real broker would have netted (taker fees + slippage).
+    if (this.paperMode) {
+      const fees = t.stake * t.leverage * this.paperCostRoundTrip;
+      pnl = gross - fees;
+      // Persist exchange-truth fields so the UI's broker-truth resolver
+      // displays the paper number directly (no "est" tag).
+      t.realizedPnlExchange = gross;
+      t.commissionEntry = fees / 2;
+      t.commissionExit = fees / 2;
+    }
     t.status = "CLOSED";
     t.closeEpoch = Math.floor(Date.now() / 1000);
     t.closePrice = fillPrice;
@@ -1042,6 +1100,7 @@ export class BinanceEngine extends EventEmitter {
     this.open = this.open.filter((x) => x.id !== t.id);
     this.closed.push(t);
     this.daily.profit += pnl;
+    if (this.paperMode) this.paperWallet += pnl;
     if (this.daily.profit <= -this.dailyMaxLoss) {
       this.daily.capHit = true;
       this.emit("capHit", -this.daily.profit, this.dailyMaxLoss);
@@ -1111,15 +1170,18 @@ export class BinanceEngine extends EventEmitter {
           const f = this.filters[t.asset];
           const closeSide = t.side === "LONG" ? "SELL" : "BUY";
           const positionSide = this.hedgeMode ? t.side : "BOTH";
-          await this.client.placeMarketOrder({
-            symbol: t.asset, side: closeSide as any,
-            quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
-            positionSide: positionSide as any,
-            clientOrderId: `close-${t.id.slice(0, 8)}-${Date.now()}`,
-          });
+          if (!this.paperMode) {
+            await this.client.placeMarketOrder({
+              symbol: t.asset, side: closeSide as any,
+              quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
+              positionSide: positionSide as any,
+              clientOrderId: `close-${t.id.slice(0, 8)}-${Date.now()}`,
+            });
+          }
           // Close logic: position settles in next reconcile / user-data stream tick.
           // We pre-emptively close locally with current markPrice for fast UI feedback;
           // exact fill price will be refined by user-data stream ORDER_TRADE_UPDATE.
+          // In paper mode, this IS the final settlement.
           await this.closeTradeFromFill(t, markPrice);
           stateChanged = true;
         } catch (e) {
@@ -1140,6 +1202,9 @@ export class BinanceEngine extends EventEmitter {
    *  while we still have local trades open — i.e., a liquidation or manual
    *  close happened outside the bot, and the stream event was missed. */
   private async reconcilePositions() {
+    // Paper mode: no exchange positions to reconcile against. Local open[] is
+    // the truth; trail-trigger closes are the only exit path.
+    if (this.paperMode) return;
     try {
       const positions = await this.client.getPositions();
       // Index by (symbol, positionSide)

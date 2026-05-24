@@ -467,6 +467,19 @@ export const api = {
   binanceCloseExternal: (symbol: string, side: "LONG" | "SHORT", qty: number) =>
     postJson<{ ok: boolean; error?: string }>("/api/binance/close-external", { symbol, side, qty }),
   binanceDiag: () => get<{ stateDir: string; stateDirExists: boolean; files: Array<{ file: string; exists: boolean; sizeBytes?: number; mtime?: string }>; note: string }>("/api/binance/diag"),
+
+  // ── Binance Paper trading (parallel engine, no real exchange calls) ──
+  binancePaperState: () =>
+    get<{ running: boolean; state: any; paperWallet: number }>("/api/binance/paper/state"),
+  binancePaperConfig: () => get<{ config: BinanceConfig }>("/api/binance/paper/config"),
+  binancePaperStart: () => post<{ ok: boolean; error?: string }>("/api/binance/paper/start"),
+  binancePaperStop: () => post<{ ok: boolean }>("/api/binance/paper/stop"),
+  binancePaperUpdateConfig: (patch: Partial<BinanceConfig>) =>
+    postJson<{ ok: boolean; config?: BinanceConfig; error?: string }>("/api/binance/paper/update-config", patch),
+  binancePaperCancelTrade: (tradeId: string) =>
+    postJson<{ ok: boolean; error?: string }>("/api/binance/paper/cancel-trade", { tradeId }),
+  binancePaperResetWallet: (balance: number) =>
+    postJson<{ ok: boolean }>("/api/binance/paper/reset-wallet", { balance }),
 };
 
 export type BinanceHfConfig = {

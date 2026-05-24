@@ -25,11 +25,12 @@ import { BinanceHFPanel } from "./panels/binance/BinanceHF";
 import { BinanceExternalPanel } from "./panels/binance/BinanceExternal";
 import { BinanceLogsPanel } from "./panels/binance/BinanceLogs";
 import { BinanceSettingsPanel } from "./panels/binance/BinanceSettings";
+import { BinancePaperPanel } from "./panels/binance/BinancePaper";
 
 const REFRESH_MS = 3000;
 
 type TabId = "overview" | "charts" | "real" | "synth" | "fade" | "fast3" | "fast4" | "adaptive" | "logs" | "settings";
-type BinanceTabId = "overview" | "positions" | "external" | "trades" | "strategies" | "hf" | "logs" | "settings";
+type BinanceTabId = "overview" | "positions" | "external" | "trades" | "strategies" | "hf" | "paper" | "logs" | "settings";
 type Mode = "deriv" | "binance";
 
 const BINANCE_TABS: { id: BinanceTabId; label: string; icon: string }[] = [
@@ -39,6 +40,7 @@ const BINANCE_TABS: { id: BinanceTabId; label: string; icon: string }[] = [
   { id: "trades",     label: "Trades",     icon: "≡" },
   { id: "strategies", label: "Strategies", icon: "⚛" },
   { id: "hf",         label: "HF",         icon: "⚡" },
+  { id: "paper",      label: "Paper",      icon: "📝" },
   { id: "logs",       label: "Logs",       icon: "📋" },
   { id: "settings",   label: "Settings",   icon: "⚙" },
 ];
@@ -126,6 +128,7 @@ export function App() {
             {bTab === "trades"     && <BinanceTradesPanel />}
             {bTab === "strategies" && <BinanceStrategiesPanel />}
             {bTab === "hf"         && <BinanceHFPanel />}
+            {bTab === "paper"      && <BinancePaperPanel />}
             {bTab === "logs"       && <BinanceLogsPanel />}
             {bTab === "settings"   && <BinanceSettingsPanel pending={actionPending} />}
           </>
