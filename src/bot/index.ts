@@ -540,6 +540,8 @@ async function main() {
         maxPositionsPerBucket: 1,
         monthlyLossCircuitBreakerPct: 0.06,
         volumeMinMultOfSma: 1.2,
+        htfTrendFilter: "hfOnly",
+        efficiencyRatioMin: 0.3,
       },
     };
   })();

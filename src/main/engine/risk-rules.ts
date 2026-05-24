@@ -31,6 +31,16 @@ export type RiskRulesConfig = {
    *  "wide spread up bar on heavy volume" confirms institutional displacement.
    *  Default 1.2 when enabled (modest filter; raise to 1.5 for stricter). */
   volumeMinMultOfSma?: number;
+  /** Elder's Triple Screen veto applied to HF (15m) entries: HF LONG requires
+   *  the corresponding 1h close > EMA(50); HF SHORT requires < EMA(50).
+   *  Directly addresses the HF LONG -$13 bleed observed live (BB-reversal
+   *  longs taken in a 1h downtrend — Elder's exact "premature buy signal").
+   *  Modes: "off" | "hfOnly" | "all" (apply to SMC entries too). */
+  htfTrendFilter?: "off" | "hfOnly" | "all";
+  /** Kaufman's Efficiency Ratio on the entry TF: ER ≥ threshold means
+   *  trending market; < threshold means chop. Default 0.3 when enabled.
+   *  Applied to SMC entries (which assume trend continuation). */
+  efficiencyRatioMin?: number;
 };
 
 /** Correlation buckets for the 15 USDT-perp universe. Built from observed
@@ -59,7 +69,37 @@ export type RiskGateInput = {
    *  contain at least 21 entries to evaluate volume gate; otherwise the
    *  gate auto-passes (insufficient data). */
   recentVolumes?: number[];
+  /** Closes on the signal's entry TF — last 11 entries minimum to compute
+   *  Efficiency Ratio (period=10). Gate auto-passes if missing. */
+  recentEntryCloses?: number[];
+  /** 1h closes (HTF) — last 50 entries minimum to compute EMA(50) for the
+   *  Triple Screen HTF trend filter. Gate auto-passes if missing. */
+  recent1hCloses?: number[];
 };
+
+/** Compute exponential moving average of the last N values. Standard
+ *  smoothing constant k = 2/(N+1). */
+function ema(values: number[], n: number): number | null {
+  if (values.length < n) return null;
+  const k = 2 / (n + 1);
+  let e = values[values.length - n];
+  for (let i = values.length - n + 1; i < values.length; i++) {
+    e = values[i] * k + e * (1 - k);
+  }
+  return e;
+}
+
+/** Kaufman's Efficiency Ratio (period n): |last − first| / sum(|Δ|).
+ *  1.0 = perfect trend; 0.0 = pure chop. Threshold 0.3 separates the two. */
+function efficiencyRatio(closes: number[], n: number): number | null {
+  if (closes.length < n + 1) return null;
+  const slice = closes.slice(-(n + 1));
+  const netMove = Math.abs(slice[slice.length - 1] - slice[0]);
+  let pathLength = 0;
+  for (let i = 1; i < slice.length; i++) pathLength += Math.abs(slice[i] - slice[i - 1]);
+  if (pathLength === 0) return 0;
+  return netMove / pathLength;
+}
 
 export type RiskGateResult = { ok: true } | { ok: false; reason: string };
 
@@ -111,6 +151,39 @@ export function evaluateRiskGate(opts: RiskGateInput): RiskGateResult {
     }
   }
 
+  // Elder Triple Screen — HTF trend filter
+  // hfOnly: applies to HF patterns (BB_*); all: applies to every entry.
+  if (config.htfTrendFilter && config.htfTrendFilter !== "off") {
+    const isHf = opts.signal.pattern.startsWith("BB_");
+    const applies = config.htfTrendFilter === "all" || (config.htfTrendFilter === "hfOnly" && isHf);
+    if (applies && opts.recent1hCloses) {
+      const e = ema(opts.recent1hCloses, 50);
+      const last1h = opts.recent1hCloses[opts.recent1hCloses.length - 1];
+      if (e !== null && last1h !== undefined) {
+        const htfBull = last1h > e;
+        const wantLong = opts.signal.side === "LONG";
+        // LONG entry needs HTF bull; SHORT entry needs HTF bear.
+        if (wantLong !== htfBull) {
+          return {
+            ok: false,
+            reason: `risk: HTF trend filter — ${opts.signal.side} signal but 1h close ${last1h.toFixed(4)} ${htfBull ? ">" : "<"} EMA(50) ${e.toFixed(4)}`,
+          };
+        }
+      }
+    }
+  }
+
+  // Efficiency Ratio — Kaufman's trend-vs-chop separator
+  if (config.efficiencyRatioMin != null && opts.recentEntryCloses) {
+    const er = efficiencyRatio(opts.recentEntryCloses, 10);
+    if (er !== null && er < config.efficiencyRatioMin) {
+      return {
+        ok: false,
+        reason: `risk: ER(10) ${er.toFixed(3)} < min ${config.efficiencyRatioMin} — market too choppy for this setup`,
+      };
+    }
+  }
+
   return { ok: true };
 }
 
@@ -125,4 +198,6 @@ export const PAPER_DEFAULT_RISK_RULES: RiskRulesConfig = {
   maxPositionsPerBucket: 1,
   monthlyLossCircuitBreakerPct: 0.06,
   volumeMinMultOfSma: 1.2,
+  htfTrendFilter: "hfOnly",
+  efficiencyRatioMin: 0.3,
 };

@@ -422,6 +422,8 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [maxPerBucket, setMaxPerBucket] = useState(String(rr.maxPositionsPerBucket ?? 1));
   const [monthlyLossPct, setMonthlyLossPct] = useState(String(((rr.monthlyLossCircuitBreakerPct ?? 0.06) * 100).toFixed(1)));
   const [volumeMult, setVolumeMult] = useState(String(rr.volumeMinMultOfSma ?? 1.2));
+  const [htfTrendMode, setHtfTrendMode] = useState<"off" | "hfOnly" | "all">((rr as any).htfTrendFilter ?? "hfOnly");
+  const [erMin, setErMin] = useState(String((rr as any).efficiencyRatioMin ?? 0.3));
 
   const [walletInput, setWalletInput] = useState(String(paperWallet.toFixed(2)));
 
@@ -460,6 +462,8 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           maxPositionsPerBucket: Number(maxPerBucket) || 1,
           monthlyLossCircuitBreakerPct: (Number(monthlyLossPct) || 6) / 100,
           volumeMinMultOfSma: Number(volumeMult) || 1.2,
+          htfTrendFilter: htfTrendMode,
+          efficiencyRatioMin: Number(erMin) || 0.3,
         },
       });
       setSaveMsg(r.ok ? { ok: true, text: "Saved" } : { ok: false, text: r.error ?? "Save failed" });
@@ -630,6 +634,22 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
                 Volume × SMA(20) min mult
               </div>
               <input value={volumeMult} onChange={(e) => setVolumeMult(e.target.value)} className="input" disabled={!riskEnabled} />
+            </label>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Elder's Triple Screen: HTF trend (1h EMA50) vetoes counter-trend entries. hfOnly = applies only to BB_* (HF) entries; all = applies to SMC too.">
+                HTF trend filter
+              </div>
+              <select value={htfTrendMode} onChange={(e) => setHtfTrendMode(e.target.value as any)} className="input" disabled={!riskEnabled}>
+                <option value="off">off</option>
+                <option value="hfOnly">hfOnly (HF only)</option>
+                <option value="all">all (SMC + HF)</option>
+              </select>
+            </label>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Kaufman's Efficiency Ratio on entry TF, period 10. ER ≥ this means trending market (good for OB/BoS). Default 0.3 separates trend from chop.">
+                Efficiency Ratio min (for SMC trend entries)
+              </div>
+              <input value={erMin} onChange={(e) => setErMin(e.target.value)} className="input" disabled={!riskEnabled} />
             </label>
           </div>
         </div>

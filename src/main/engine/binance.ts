@@ -1059,6 +1059,10 @@ export class BinanceEngine extends EventEmitter {
       const tf = isHfPattern(s.pattern) ? "15m" : "1h";
       const buf = tf === "1h" ? this.bars.get(sym) : this.bars15m.get(sym);
       const recentVolumes = buf ? buf.map((b) => b.volume).slice(-21) : undefined;
+      // Closes on entry TF for Efficiency Ratio; 1h closes for Triple Screen.
+      const recentEntryCloses = buf ? buf.map((b) => b.close).slice(-11) : undefined;
+      const buf1h = this.bars.get(sym);
+      const recent1hCloses = buf1h ? buf1h.map((b) => b.close).slice(-100) : undefined;
       const gate = evaluateRiskGate({
         signal: { asset: sym, pattern: s.pattern, side: s.side, entryPrice: refPrice },
         config: this.riskRules,
@@ -1066,6 +1070,8 @@ export class BinanceEngine extends EventEmitter {
         monthStartEquity: this.monthly.startEquity,
         monthRealizedPnl: this.monthly.realizedPnl,
         recentVolumes,
+        recentEntryCloses,
+        recent1hCloses,
       });
       if (!gate.ok) {
         this.emit("info", `skip ${sym} ${s.pattern}/${s.side}: ${gate.reason}`, {
