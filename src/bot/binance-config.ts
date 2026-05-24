@@ -7,6 +7,7 @@ import { promises as fs } from "node:fs";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { BINANCE_ASSETS } from "@shared/binance-assets";
+import { DEFAULT_RISK_RULES, type RiskRulesConfig } from "../main/engine/risk-rules";
 
 export type BinanceConfig = {
   /** Base $ stake per trade. */
@@ -39,6 +40,10 @@ export type BinanceConfig = {
      *  cap=3 means max stake = base × multiplier^3. */
     maxLevels: number;
   };
+  /** Risk guardrails distilled from Elder/Williams/Vantage/Kaufman. Default
+   *  off so existing live behavior is unchanged; enable per-gate after paper
+   *  validation. See src/main/engine/risk-rules.ts for each rule's source. */
+  riskRules: RiskRulesConfig;
   /** HF (15m) strategy stack — BB_UP_SHORT + BB_LOW_LONG. Runs alongside
    *  the 1h SMC patterns but on its own timeframe with its own sizing. */
   hf: {
@@ -67,6 +72,7 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
   perPatternEnabled: { OB_BULL: true, OB_BEAR: true, BOS_UP: true },
   autoStart: false,
   martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
+  riskRules: { ...DEFAULT_RISK_RULES },
   hf: {
     enabled: false,
     stake: 1,
@@ -89,6 +95,7 @@ export function loadBinanceConfig(stateDir: string): BinanceConfig {
       perAssetEnabled: { ...DEFAULT_BINANCE_CONFIG.perAssetEnabled, ...(parsed.perAssetEnabled ?? {}) },
       perPatternEnabled: { ...DEFAULT_BINANCE_CONFIG.perPatternEnabled, ...(parsed.perPatternEnabled ?? {}) },
       martingale: { ...DEFAULT_BINANCE_CONFIG.martingale, ...(parsed.martingale ?? {}) },
+      riskRules: { ...DEFAULT_BINANCE_CONFIG.riskRules, ...(parsed.riskRules ?? {}) },
       hf: {
         ...DEFAULT_BINANCE_CONFIG.hf,
         ...(parsed.hf ?? {}),

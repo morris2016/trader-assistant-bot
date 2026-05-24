@@ -415,6 +415,14 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [martMult, setMartMult] = useState(String(config.martingale.multiplier));
   const [martCap, setMartCap] = useState(String(config.martingale.maxLevels));
 
+  // Risk rules (Elder/Williams/Vantage/Kaufman)
+  const rr = config.riskRules ?? { enabled: false };
+  const [riskEnabled, setRiskEnabled] = useState(!!rr.enabled);
+  const [maxConcurrent, setMaxConcurrent] = useState(String(rr.maxConcurrentPositions ?? 3));
+  const [maxPerBucket, setMaxPerBucket] = useState(String(rr.maxPositionsPerBucket ?? 1));
+  const [monthlyLossPct, setMonthlyLossPct] = useState(String(((rr.monthlyLossCircuitBreakerPct ?? 0.06) * 100).toFixed(1)));
+  const [volumeMult, setVolumeMult] = useState(String(rr.volumeMinMultOfSma ?? 1.2));
+
   const [walletInput, setWalletInput] = useState(String(paperWallet.toFixed(2)));
 
   const [saveBusy, setSaveBusy] = useState(false);
@@ -445,6 +453,13 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           allowMultiplePerKey: config.hf.allowMultiplePerKey,
           perPatternEnabled: hfPatterns,
           perAssetEnabled: hfAssets,
+        },
+        riskRules: {
+          enabled: riskEnabled,
+          maxConcurrentPositions: Number(maxConcurrent) || 3,
+          maxPositionsPerBucket: Number(maxPerBucket) || 1,
+          monthlyLossCircuitBreakerPct: (Number(monthlyLossPct) || 6) / 100,
+          volumeMinMultOfSma: Number(volumeMult) || 1.2,
         },
       });
       setSaveMsg(r.ok ? { ok: true, text: "Saved" } : { ok: false, text: r.error ?? "Save failed" });
@@ -571,6 +586,51 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
                 </label>
               ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Risk rules (Elder / Williams / Vantage / Kaufman) ── */}
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">Risk rules</div>
+          <div className="section-sub">
+            Distilled from 6 trading-book survey (2026-05-24): Elder's 6% monthly cap,
+            Vantage's correlation cluster cap (max 1 trade per BTC/SOL_L1/DEFI/ALT_L1/MEME bucket),
+            max concurrent positions, Williams' VSA volume confirmation.
+            Default OFF on live; ON in paper to validate impact on the same signal stream.
+          </div>
+        </div>
+        <div className="card card-padded">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <input type="checkbox" checked={riskEnabled} onChange={(e) => setRiskEnabled(e.target.checked)} />
+            <span><strong>Risk-rules enabled</strong> (master switch)</span>
+          </label>
+          <div className="grid grid-3" style={{ gap: 16 }}>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Vantage rule: ≤ 3 concurrent positions across the whole book">
+                Max concurrent positions
+              </div>
+              <input value={maxConcurrent} onChange={(e) => setMaxConcurrent(e.target.value)} className="input" disabled={!riskEnabled} />
+            </label>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Buckets: {BTC,ETH,BCH} · {SOL,AVAX,BNB} · {LDO,AAVE,UNI,LINK} · {XRP,ADA,DOT,POL} · {DOGE}. 1 = at most 1 trade per bucket open at any time.">
+                Max positions per correlation bucket
+              </div>
+              <input value={maxPerBucket} onChange={(e) => setMaxPerBucket(e.target.value)} className="input" disabled={!riskEnabled} />
+            </label>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Elder rule: halt all entries when month-to-date realized P&L < -X% of month-start equity. 6% is Elder's literal threshold.">
+                Monthly loss circuit breaker (%)
+              </div>
+              <input value={monthlyLossPct} onChange={(e) => setMonthlyLossPct(e.target.value)} className="input" disabled={!riskEnabled} />
+            </label>
+            <label>
+              <div className="muted" style={{ marginBottom: 4 }} title="Williams VSA: entry bar's volume must be ≥ this × SMA(volume, 20). 1.2 = modest confirmation; 1.5 = strict.">
+                Volume × SMA(20) min mult
+              </div>
+              <input value={volumeMult} onChange={(e) => setVolumeMult(e.target.value)} className="input" disabled={!riskEnabled} />
+            </label>
           </div>
         </div>
       </div>

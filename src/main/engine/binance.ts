@@ -18,6 +18,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { BinanceClient, type Kline, type OrderResponse, type SymbolFilters } from "../binance/client";
+import { evaluateRiskGate, DEFAULT_RISK_RULES, type RiskRulesConfig } from "./risk-rules";
 
 export type BinanceTradeSide = "LONG" | "SHORT";
 
@@ -447,6 +448,26 @@ export class BinanceEngine extends EventEmitter {
   private dataSource: BinanceEngine | null = null;
   private dataConsumer: BinanceEngine | null = null;
   private markCache = new Map<string, { price: number; ts: number }>();
+
+  // ── Risk rules (Elder / Williams / Vantage / Kaufman) ──
+  // All gates OFF by default in live config; paper opts in via PAPER_DEFAULT_RISK_RULES.
+  private riskRules: RiskRulesConfig = { ...DEFAULT_RISK_RULES };
+  /** Tracks YYYY-MM, equity at start of that month, and realized P&L since.
+   *  Rolls when a new month begins (UTC). Used by the 6% monthly circuit. */
+  private monthly: { month: string; startEquity: number; realizedPnl: number } = {
+    month: new Date().toISOString().slice(0, 7),
+    startEquity: 0,
+    realizedPnl: 0,
+  };
+  private rollMonthIfNeeded() {
+    const m = new Date().toISOString().slice(0, 7);
+    if (this.monthly.month !== m) {
+      this.monthly = { month: m, startEquity: this.paperMode ? this.paperWallet : 0, realizedPnl: 0 };
+      this.emit("info", `monthly roll: new month=${m} startEquity=$${this.monthly.startEquity.toFixed(2)}`, {
+        month: m, startEquity: this.monthly.startEquity,
+      });
+    }
+  }
   attachDataSource(source: BinanceEngine) { this.dataSource = source; }
   attachDataConsumer(consumer: BinanceEngine) { this.dataConsumer = consumer; }
   /** Read accessor: latest cached mark price for a symbol, or null if not
@@ -639,6 +660,7 @@ export class BinanceEngine extends EventEmitter {
       perPatternEnabled?: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
       perAssetEnabled?: Record<string, boolean>;
     };
+    riskRules?: RiskRulesConfig;
   }) {
     if (opts.assets) this.assets = opts.assets;
     if (opts.stake !== undefined) this.stake = opts.stake;
@@ -674,6 +696,7 @@ export class BinanceEngine extends EventEmitter {
         this.emit("info", `HF stack DISABLED at runtime`, {});
       }
     }
+    if (opts.riskRules) this.riskRules = opts.riskRules;
   }
 
   private rollDayIfNeeded() {
@@ -1029,6 +1052,28 @@ export class BinanceEngine extends EventEmitter {
         return;
       }
 
+      // ── Risk-rules gate (Elder / Williams / Vantage / Kaufman) ──
+      // Default OFF on live; ON in paper. Each gate returns a reason on
+      // rejection — surfaced in logs so the operator sees why a signal
+      // was skipped.
+      const tf = isHfPattern(s.pattern) ? "15m" : "1h";
+      const buf = tf === "1h" ? this.bars.get(sym) : this.bars15m.get(sym);
+      const recentVolumes = buf ? buf.map((b) => b.volume).slice(-21) : undefined;
+      const gate = evaluateRiskGate({
+        signal: { asset: sym, pattern: s.pattern, side: s.side, entryPrice: refPrice },
+        config: this.riskRules,
+        openTrades: this.open.map((t) => ({ asset: t.asset, pattern: t.pattern, side: t.side })),
+        monthStartEquity: this.monthly.startEquity,
+        monthRealizedPnl: this.monthly.realizedPnl,
+        recentVolumes,
+      });
+      if (!gate.ok) {
+        this.emit("info", `skip ${sym} ${s.pattern}/${s.side}: ${gate.reason}`, {
+          asset: sym, pattern: s.pattern, side: s.side, gate: gate.reason,
+        });
+        return;
+      }
+
       // Logical-trade UUID is embedded in clientOrderId so user-data stream
       // updates can be matched back to this trade. Prefix differs by group
       // so log readers can see at a glance whether a fill is HF or SMC.
@@ -1169,6 +1214,10 @@ export class BinanceEngine extends EventEmitter {
     this.closed.push(t);
     this.daily.profit += pnl;
     if (this.paperMode) this.paperWallet += pnl;
+    // Track monthly realized P&L for the 6% circuit breaker.
+    this.rollMonthIfNeeded();
+    if (this.monthly.startEquity === 0 && this.paperMode) this.monthly.startEquity = this.paperWallet - pnl;
+    this.monthly.realizedPnl += pnl;
     if (this.daily.profit <= -this.dailyMaxLoss) {
       this.daily.capHit = true;
       this.emit("capHit", -this.daily.profit, this.dailyMaxLoss);

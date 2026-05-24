@@ -460,6 +460,7 @@ async function main() {
     perPatternEnabled: binanceConfig.perPatternEnabled,
     martingale: binanceConfig.martingale,
     hf: binanceConfig.hf,
+    riskRules: binanceConfig.riskRules,
   });
   binanceEngine.on("error", (e) => log.error(`binance: ${e.message}`));
   binanceEngine.on("opened", (t) => log.info(`binance opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`, { asset: t.asset, pattern: t.pattern, side: t.side, entryPrice: t.entryPrice, stake: t.stake, leverage: t.leverage }));
@@ -528,8 +529,19 @@ async function main() {
     try {
       if (existsSync(paperConfigFile)) return JSON.parse(readFileSync(paperConfigFile, "utf8")) as BinanceConfig;
     } catch {}
-    // Seed from live config so starting point is sensible.
-    return { ...binanceConfig, autoStart: false };
+    // Seed from live config but turn risk rules ON in paper by default —
+    // paper is exactly where these gates should be validated.
+    return {
+      ...binanceConfig,
+      autoStart: false,
+      riskRules: {
+        enabled: true,
+        maxConcurrentPositions: 3,
+        maxPositionsPerBucket: 1,
+        monthlyLossCircuitBreakerPct: 0.06,
+        volumeMinMultOfSma: 1.2,
+      },
+    };
   })();
   async function savePaperConfig() {
     const tmp = paperConfigFile + ".tmp";
@@ -546,6 +558,7 @@ async function main() {
     perPatternEnabled: paperConfig.perPatternEnabled,
     martingale: paperConfig.martingale,
     hf: paperConfig.hf,
+    riskRules: paperConfig.riskRules,
   });
   // CRITICAL: wire paper to read kline + mark-price data from live engine.
   // Without this, paper makes its own getKlines + premiumIndex calls in
@@ -1581,6 +1594,7 @@ async function main() {
           perAssetEnabled: { ...binanceConfig.perAssetEnabled, ...(patch.perAssetEnabled ?? {}) },
           perPatternEnabled: { ...binanceConfig.perPatternEnabled, ...(patch.perPatternEnabled ?? {}) },
           martingale: { ...binanceConfig.martingale, ...(patch.martingale ?? {}) },
+          riskRules: { ...binanceConfig.riskRules, ...(patch.riskRules ?? {}) },
           hf: {
             ...binanceConfig.hf,
             ...(patch.hf ?? {}),
@@ -1598,6 +1612,7 @@ async function main() {
           perPatternEnabled: binanceConfig.perPatternEnabled,
           martingale: binanceConfig.martingale,
           hf: binanceConfig.hf,
+          riskRules: binanceConfig.riskRules,
         });
         log.info("binance config updated", { ...binanceConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
       },
@@ -1687,6 +1702,7 @@ async function main() {
           perAssetEnabled: { ...paperConfig.perAssetEnabled, ...(patch.perAssetEnabled ?? {}) },
           perPatternEnabled: { ...paperConfig.perPatternEnabled, ...(patch.perPatternEnabled ?? {}) },
           martingale: { ...paperConfig.martingale, ...(patch.martingale ?? {}) },
+          riskRules: { ...paperConfig.riskRules, ...(patch.riskRules ?? {}) },
           hf: {
             ...paperConfig.hf,
             ...(patch.hf ?? {}),
@@ -1704,6 +1720,7 @@ async function main() {
           perPatternEnabled: paperConfig.perPatternEnabled,
           martingale: paperConfig.martingale,
           hf: paperConfig.hf,
+          riskRules: paperConfig.riskRules,
         });
         log.info("paper config updated", { ...paperConfig, perAssetEnabled: undefined, perPatternEnabled: undefined });
       },
