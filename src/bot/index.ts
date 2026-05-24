@@ -547,6 +547,12 @@ async function main() {
     martingale: paperConfig.martingale,
     hf: paperConfig.hf,
   });
+  // CRITICAL: wire paper to read kline + mark-price data from live engine.
+  // Without this, paper makes its own getKlines + premiumIndex calls in
+  // parallel, DOUBLING the per-IP API rate and getting HTTP 418 banned
+  // by Binance (this exact incident hit production on 2026-05-24).
+  paperEngine.attachDataSource(binanceEngine);
+  binanceEngine.attachDataConsumer(paperEngine);
   paperEngine.on("error", (e) => log.error(`paper: ${e.message}`));
   paperEngine.on("opened", (t) => log.info(`paper opened ${t.asset} ${t.pattern} ${t.side} @ ${t.entryPrice}`, { paper: true, asset: t.asset, pattern: t.pattern, side: t.side, entryPrice: t.entryPrice, stake: t.stake, leverage: t.leverage }));
   paperEngine.on("closed", (t) => log.info(`paper closed ${t.asset} ${t.pattern} ${t.side} pnl=${t.pnl?.toFixed(2)}`, { paper: true, asset: t.asset, pattern: t.pattern, side: t.side, pnl: t.pnl, exitPrice: t.closePrice }));
@@ -1653,9 +1659,13 @@ async function main() {
       start: async () => {
         try {
           if (paperRunning) return { ok: true };
-          // Paper engine needs exchangeInfo + klines, which require the client
-          // to be configured with at least anonymous-capable settings. Use the
-          // same client as live (which may already be configured), or fall back.
+          // Paper consumes klines + mark prices from the live engine's
+          // buffers (via attachDataSource) — it never makes API calls itself.
+          // If live isn't running, paper will sit idle (no data to react to)
+          // and that's safe; we warn loudly so the operator isn't confused.
+          if (!binanceRunning) {
+            log.warn("paper started but LIVE engine is OFF — paper will sit idle until live is started (paper reads live's kline + mark-price buffers)");
+          }
           await paperEngine.start();
           paperRunning = true;
           paperConfig = { ...paperConfig, autoStart: true };

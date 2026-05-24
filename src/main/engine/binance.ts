@@ -426,14 +426,41 @@ export class BinanceEngine extends EventEmitter {
    *  trade-lifecycle pipeline but skips every authenticated exchange call.
    *  Orders are simulated against the current mark price; positions and
    *  fees are tracked in-memory; `paperWallet` moves by realized P&L on
-   *  each close. Read-only market data (klines, mark price) still uses the
-   *  shared real client so paper and live see bit-identical signals at the
-   *  same instant. */
+   *  each close.
+   *
+   *  CRITICAL: paper mode also skips its own kline/mark-price polling — it
+   *  reads from an attached live engine's `bars` buffers and `markCache`
+   *  instead. Without this, running paper alongside live DOUBLES the per-IP
+   *  API request rate and triggers Binance HTTP 418 IP bans. */
   private paperMode = false;
   private paperWallet = 0;
   /** Paper-mode round-trip cost applied to each simulated trade close:
    *  taker fees + slippage. Defaults to 0.04%×2 + 1.8bps×2 = 0.0836%. */
   private paperCostRoundTrip = 0.000836;
+
+  /** Cross-engine data sharing (live ↔ paper).
+   *  - `dataSource` (set on paper): the live engine to read bars/marks from
+   *  - `dataConsumer` (set on live): the paper engine whose open positions
+   *    should also have their mark prices fetched and cached.
+   *  Live caches every fetched mark price in `markCache` so paper can read
+   *  it without making its own API call. */
+  private dataSource: BinanceEngine | null = null;
+  private dataConsumer: BinanceEngine | null = null;
+  private markCache = new Map<string, { price: number; ts: number }>();
+  attachDataSource(source: BinanceEngine) { this.dataSource = source; }
+  attachDataConsumer(consumer: BinanceEngine) { this.dataConsumer = consumer; }
+  /** Read accessor: latest cached mark price for a symbol, or null if not
+   *  cached or stale (>30s old). Used by paper to avoid its own fetch. */
+  getCachedMarkPrice(sym: string): number | null {
+    const c = this.markCache.get(sym);
+    if (!c) return null;
+    if (Date.now() - c.ts > 30_000) return null;
+    return c.price;
+  }
+  /** Read accessor: shared bar buffers — paper reads these instead of
+   *  calling client.getKlines(). Returned by reference; do not mutate. */
+  getBarsRef(sym: string): Kline[] | undefined { return this.bars.get(sym); }
+  getBars15mRef(sym: string): Kline[] | undefined { return this.bars15m.get(sym); }
 
   constructor(client: BinanceClient, opts?: { paperMode?: boolean; paperStartBalance?: number }) {
     super();
@@ -693,9 +720,22 @@ export class BinanceEngine extends EventEmitter {
 
     // Seed klines for each asset + replay structure cache so bot recognises
     // pending OB zones that formed before startup.
+    // Paper mode with dataSource attached: copy from live's already-loaded
+    // buffers — saves 15 × KLINE_HISTORY-pagination kline requests on boot
+    // and is exactly what we'd otherwise fetch from Binance anyway.
     for (const sym of this.assets) {
       try {
-        const k = await this.client.getKlines(sym, "1h", KLINE_HISTORY);
+        let k: Kline[];
+        if (this.dataSource) {
+          const srcBuf = this.dataSource.getBarsRef(sym);
+          if (!srcBuf || srcBuf.length === 0) {
+            this.emit("info", `warmup ${sym}: upstream not ready yet, will catch up via signalTick`, { asset: sym });
+            continue;
+          }
+          k = [...srcBuf];
+        } else {
+          k = await this.client.getKlines(sym, "1h", KLINE_HISTORY);
+        }
         this.bars.set(sym, k);
         const struct = buildStructureFromHistory(k);
         this.structures.set(sym, struct);
@@ -755,8 +795,18 @@ export class BinanceEngine extends EventEmitter {
       const buf = this.bars.get(sym);
       if (!buf || buf.length === 0) continue;
       try {
-        // Fetch the most recent 2 × 1h klines
-        const latest = await this.client.getKlines(sym, "1h", 2);
+        // Fetch the most recent 2 × 1h klines.
+        // Paper mode (dataSource attached): read live's bars instead of
+        // calling the API — prevents doubling the per-IP rate and getting
+        // HTTP 418 banned.
+        let latest: Kline[];
+        if (this.dataSource) {
+          const srcBars = this.dataSource.getBarsRef(sym);
+          if (!srcBars || srcBars.length === 0) continue;
+          latest = srcBars.slice(-2);
+        } else {
+          latest = await this.client.getKlines(sym, "1h", 2);
+        }
         if (latest.length === 0) continue;
         const newest = latest[latest.length - 1];
         // Use the SECOND-MOST-RECENT (last fully-closed) bar
@@ -864,17 +914,35 @@ export class BinanceEngine extends EventEmitter {
         let buf = this.bars15m.get(sym);
         if (!buf) {
           // First touch — seed the buffer with HF_KLINE_HISTORY bars of 15m history.
-          // Binance's klines endpoint includes the CURRENTLY-FORMING bar at the
-          // tail. We pop it so `buf` only contains fully-closed bars, otherwise
-          // the next bar boundary's close would have the same openTime as our
-          // tail and the close-detection branch would never fire.
-          buf = await this.client.getKlines(sym, "15m", HF_KLINE_HISTORY);
-          if (buf.length > 0) buf.pop();
+          // Paper (dataSource attached): copy from live's already-warmed buffer
+          // instead of making our own API call. Live must have HF enabled or
+          // already warmed for this to work; otherwise we wait for live to warm
+          // up first (next tick will retry).
+          if (this.dataSource) {
+            const srcBuf = this.dataSource.getBars15mRef(sym);
+            if (!srcBuf || srcBuf.length === 0) continue;  // wait for live warmup
+            buf = [...srcBuf];
+          } else {
+            // Binance's klines endpoint includes the CURRENTLY-FORMING bar at the
+            // tail. We pop it so `buf` only contains fully-closed bars, otherwise
+            // the next bar boundary's close would have the same openTime as our
+            // tail and the close-detection branch would never fire.
+            buf = await this.client.getKlines(sym, "15m", HF_KLINE_HISTORY);
+            if (buf.length > 0) buf.pop();
+          }
           this.bars15m.set(sym, buf);
-          this.emit("info", `HF warmup ${sym}: ${buf.length} 15m bars (in-progress bar dropped)`, { asset: sym, bars: buf.length });
+          this.emit("info", `HF warmup ${sym}: ${buf.length} 15m bars${this.dataSource ? " (from upstream)" : " (in-progress bar dropped)"}`, { asset: sym, bars: buf.length });
           continue; // skip detection on warmup tick — next bar close fires it
         }
-        const latest = await this.client.getKlines(sym, "15m", 2);
+        // Paper: read latest 2 bars from upstream instead of calling API.
+        let latest: Kline[];
+        if (this.dataSource) {
+          const srcBars = this.dataSource.getBars15mRef(sym);
+          if (!srcBars || srcBars.length === 0) continue;
+          latest = srcBars.slice(-2);
+        } else {
+          latest = await this.client.getKlines(sym, "15m", 2);
+        }
         if (latest.length === 0) continue;
         const closed = latest[latest.length - 2] ?? latest[latest.length - 1];
         const tail = buf[buf.length - 1];
@@ -1111,10 +1179,28 @@ export class BinanceEngine extends EventEmitter {
   }
 
   private async positionTick() {
-    if (this.open.length === 0) return;
-    // Group open trades by asset, fetch each asset's mark price once
-    const assetsWithOpen = Array.from(new Set(this.open.map((t) => t.asset)));
-    for (const sym of assetsWithOpen) {
+    // Paper mode with attached upstream: read marks from live's cache, don't
+    // fetch premiumIndex ourselves. This is essential for avoiding the
+    // doubled-API-rate ban that hit production earlier.
+    if (this.dataSource) {
+      if (this.open.length === 0) return;
+      const assetsWithOpen = Array.from(new Set(this.open.map((t) => t.asset)));
+      for (const sym of assetsWithOpen) {
+        const markPrice = this.dataSource.getCachedMarkPrice(sym);
+        if (markPrice === null) continue;  // live hasn't fetched yet — try next tick
+        for (const t of this.open.filter((x) => x.asset === sym)) {
+          await this.updateTrade(t, markPrice);
+        }
+      }
+      return;
+    }
+    // Live: include consumer (paper)'s open assets so they get cached too.
+    const localAssets = new Set(this.open.map((t) => t.asset));
+    if (this.dataConsumer) {
+      for (const t of this.dataConsumer["open"] as BinanceTrade[]) localAssets.add(t.asset);
+    }
+    if (localAssets.size === 0) return;
+    for (const sym of localAssets) {
       try {
         // Mark price endpoint (public)
         const r = await fetch(`${this.client["hosts"]?.()?.rest ?? "https://fapi.binance.com"}/fapi/v1/premiumIndex?symbol=${sym}`);
@@ -1122,6 +1208,8 @@ export class BinanceEngine extends EventEmitter {
         const data = await r.json() as any;
         const markPrice = +data.markPrice;
         if (!isFinite(markPrice)) continue;
+        // Cache for any attached paper consumer.
+        this.markCache.set(sym, { price: markPrice, ts: Date.now() });
         for (const t of this.open.filter((x) => x.asset === sym)) {
           await this.updateTrade(t, markPrice);
         }
