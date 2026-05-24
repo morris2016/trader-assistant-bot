@@ -831,6 +831,14 @@ export class BinanceEngine extends EventEmitter {
   private async signalTick() {
     this.rollDayIfNeeded();
     if (this.daily.capHit) return;
+    // If the client is in an IP-ban suspension, skip the whole tick.
+    // Logs one heartbeat line per minute instead of N × 15 error spam.
+    if (!this.dataSource && this.client.isBanned()) {
+      const secs = Math.ceil(this.client.bannedFor() / 1000);
+      if (this.tickCount % 10 === 0) this.emit("info", `signalTick suspended: IP banned for ${secs}s more`, { bannedForMs: this.client.bannedFor() });
+      this.tickCount++;
+      return;
+    }
     this.tickCount++;
     this.signalsThisTick = 0;
     void this.hfTickCount; // referenced by HF loop
@@ -949,6 +957,13 @@ export class BinanceEngine extends EventEmitter {
     if (!this.hfEnabled) return;
     this.rollDayIfNeeded();
     if (this.daily.capHit) return;
+    // Skip tick during IP-ban suspension.
+    if (!this.dataSource && this.client.isBanned()) {
+      const secs = Math.ceil(this.client.bannedFor() / 1000);
+      if (this.hfTickCount % 10 === 0) this.emit("info", `hfSignalTick suspended: IP banned for ${secs}s more`, { bannedForMs: this.client.bannedFor() });
+      this.hfTickCount++;
+      return;
+    }
     this.hfTickCount++;
     let signalsFired = 0;
     const barsClosed: string[] = [];
@@ -1277,6 +1292,8 @@ export class BinanceEngine extends EventEmitter {
       }
       return;
     }
+    // Skip position tick entirely during IP-ban suspension.
+    if (this.client.isBanned()) return;
     // Live: include consumer (paper)'s open assets so they get cached too.
     const localAssets = new Set(this.open.map((t) => t.asset));
     if (this.dataConsumer) {
@@ -1285,10 +1302,11 @@ export class BinanceEngine extends EventEmitter {
     if (localAssets.size === 0) return;
     for (const sym of localAssets) {
       try {
-        // Mark price endpoint (public)
-        const r = await fetch(`${this.client["hosts"]?.()?.rest ?? "https://fapi.binance.com"}/fapi/v1/premiumIndex?symbol=${sym}`);
-        if (!r.ok) continue;
-        const data = await r.json() as any;
+        // Mark price endpoint (public). Route through client's publicRequest
+        // so the 418/429 ban-tracking applies — raw fetch() bypassed it and
+        // contributed to the cascading bans on 2026-05-24.
+        if (this.client.isBanned()) break;
+        const data = await (this.client as any).publicRequest("GET", "/fapi/v1/premiumIndex", { symbol: sym });
         const markPrice = +data.markPrice;
         if (!isFinite(markPrice)) continue;
         // Cache for any attached paper consumer.

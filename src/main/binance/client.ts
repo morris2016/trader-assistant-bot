@@ -101,6 +101,25 @@ export class BinanceClient extends EventEmitter {
 
   private hosts() { return this.testnet ? HOSTS.testnet : HOSTS.live; }
 
+  // ─── Rate-limit / IP-ban suspension ──────────────────────────────────────
+  // Production hit cascading HTTP 418 bans on 2026-05-24: bot kept hammering
+  // the API during a ban, which extended it. Now: on 418/429, parse the
+  // "banned until {epoch}" timestamp from the error body, store it, and
+  // short-circuit every subsequent request until ban expires.
+  private bannedUntilMs = 0;
+  isBanned(): boolean { return Date.now() < this.bannedUntilMs; }
+  bannedFor(): number { return Math.max(0, this.bannedUntilMs - Date.now()); }
+  private parseBanUntil(body: string): number | null {
+    // Body format: {"code":-1003,"msg":"Way too many requests; IP(x.x.x.x) banned until 1779621288626. ..."}
+    const m = body.match(/banned until (\d+)/);
+    return m ? +m[1] : null;
+  }
+  private throwIfBanned(method: string, path: string) {
+    if (this.isBanned()) {
+      throw new Error(`Binance ${method} ${path} suspended: IP banned for ${Math.ceil(this.bannedFor() / 1000)}s more`);
+    }
+  }
+
   // ─── Signing helpers ─────────────────────────────────────────────────────
 
   private sign(query: string): string {
@@ -109,6 +128,7 @@ export class BinanceClient extends EventEmitter {
   }
 
   private async signedRequest(method: "GET" | "POST" | "PUT" | "DELETE", path: string, params: Record<string, string | number | boolean> = {}): Promise<any> {
+    this.throwIfBanned(method, path);
     if (!this.creds?.apiKey) throw new Error("No API key configured");
     const timestamp = Date.now() + this.serverTimeOffset;
     const merged: Record<string, string | number | boolean> = { ...params, timestamp, recvWindow: 5000 };
@@ -123,17 +143,35 @@ export class BinanceClient extends EventEmitter {
     });
     if (!r.ok) {
       const text = await r.text();
+      if (r.status === 418 || r.status === 429) {
+        const until = this.parseBanUntil(text);
+        if (until) {
+          this.bannedUntilMs = Math.max(this.bannedUntilMs, until + 5000); // +5s buffer
+        } else {
+          // No timestamp parsed — suspend for 60s as a safe default.
+          this.bannedUntilMs = Math.max(this.bannedUntilMs, Date.now() + 60_000);
+        }
+      }
       throw new Error(`Binance ${method} ${path} HTTP ${r.status}: ${text}`);
     }
     return r.json();
   }
 
   private async publicRequest(method: "GET", path: string, params: Record<string, string | number> = {}): Promise<any> {
+    this.throwIfBanned(method, path);
     const query = Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
     const url = `${this.hosts().rest}${path}${query ? "?" + query : ""}`;
     const r = await fetch(url, { method });
     if (!r.ok) {
       const text = await r.text();
+      if (r.status === 418 || r.status === 429) {
+        const until = this.parseBanUntil(text);
+        if (until) {
+          this.bannedUntilMs = Math.max(this.bannedUntilMs, until + 5000);
+        } else {
+          this.bannedUntilMs = Math.max(this.bannedUntilMs, Date.now() + 60_000);
+        }
+      }
       throw new Error(`Binance ${method} ${path} HTTP ${r.status}: ${text}`);
     }
     return r.json();
