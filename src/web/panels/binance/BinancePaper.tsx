@@ -11,6 +11,14 @@ const HF_PATTERNS = new Set(["BB_UP_SHORT", "BB_LOW_LONG"]);
 function isSmc(p: string): boolean { return SMC_PATTERNS.has(p); }
 function isHf(p: string): boolean { return HF_PATTERNS.has(p); }
 
+/** Binance USDT-M Perpetuals max leverage by symbol ($0-50K notional tier). */
+const BINANCE_MAX_LEV: Record<string, number> = {
+  BTCUSDT: 125, ETHUSDT: 125,
+  SOLUSDT: 75, BNBUSDT: 75, XRPUSDT: 75, DOGEUSDT: 75, AVAXUSDT: 75,
+  LINKUSDT: 75, ADAUSDT: 75, DOTUSDT: 75, BCHUSDT: 75,
+  LDOUSDT: 50, AAVEUSDT: 50, UNIUSDT: 50, POLUSDT: 50,
+};
+
 function binanceUrl(symbol: string): string {
   return `https://www.binance.com/en/futures/${symbol}`;
 }
@@ -691,22 +699,40 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
 
           {/* Per-asset HF leverage table */}
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #1e2842" }}>
-            <div className="muted" style={{ marginBottom: 8 }}>
-              <strong>Per-asset HF leverage</strong> — default to each symbol's Binance max. BTC/ETH = 125×, alts = 75×, LDO/AAVE/UNI/POL = 50×.
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div className="muted">
+                <strong>Per-asset HF leverage</strong> — each input shows Binance max for that symbol. Set ≤ max; exceeding rejects on order placement.
+              </div>
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: "4px 10px", fontSize: 12 }}
+                onClick={() => setPerAssetLev(Object.fromEntries(sortedAssets.map(a => [a, String(BINANCE_MAX_LEV[a] ?? 30)])))}
+              >
+                Reset all to max
+              </button>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
-              {sortedAssets.map((a) => (
-                <label key={a} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-                  <span className="mono" style={{ width: 60 }}>{a.replace("USDT", "")}</span>
-                  <input
-                    value={perAssetLev[a] ?? ""}
-                    onChange={(e) => setPerAssetLev({ ...perAssetLev, [a]: e.target.value })}
-                    className="input"
-                    style={{ width: 60 }}
-                  />
-                  <span className="muted">×</span>
-                </label>
-              ))}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+              {sortedAssets.map((a) => {
+                const max = BINANCE_MAX_LEV[a] ?? 30;
+                const cur = Number(perAssetLev[a]) || 0;
+                const overMax = cur > max;
+                return (
+                  <label key={a} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                    <span className="mono" style={{ width: 50 }}>{a.replace("USDT", "")}</span>
+                    <input
+                      value={perAssetLev[a] ?? ""}
+                      onChange={(e) => setPerAssetLev({ ...perAssetLev, [a]: e.target.value })}
+                      className="input"
+                      style={{ width: 60, borderColor: overMax ? "#d4655f" : undefined }}
+                    />
+                    <span className="muted">×</span>
+                    <span style={{ color: overMax ? "#d4655f" : "#5fd4a4", fontSize: 11 }}>
+                      max {max}{overMax ? " ⚠" : ""}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
           </div>
         </div>
