@@ -7,7 +7,7 @@ import { promises as fs } from "node:fs";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { BINANCE_ASSETS } from "@shared/binance-assets";
-import { DEFAULT_RISK_RULES, type RiskRulesConfig } from "../main/engine/risk-rules";
+import { DEFAULT_RISK_RULES, DEFAULT_HF_QUALITY_FILTER, RECOMMENDED_HF_QUALITY_FILTER, PER_ASSET_MAX_LEV, type RiskRulesConfig, type HfQualityFilterConfig } from "../main/engine/risk-rules";
 
 export type BinanceConfig = {
   /** Base $ stake per trade. */
@@ -74,6 +74,14 @@ export type BinanceConfig = {
      *  but applied independently to HF entries. Price move = slPct / hf.leverage.
      *  0 = disabled. */
     slPct?: number;
+    /** Per-asset HF leverage override (each symbol's exchange-max). Falls
+     *  back to `leverage` field when an asset isn't in the map. Validated
+     *  2026-05-25: per-asset max beats uniform 75× by ~29% per-trade edge. */
+    perAssetLeverage?: Record<string, number>;
+    /** HF quality filter — hour-band + bbWidth-percentile + volume-percentile.
+     *  Validated 2026-05-25 on 199K trades: filtered subset shows
+     *  27/27 months profitable vs 27/29 unfiltered at per-asset max lev. */
+    qualityFilter?: HfQualityFilterConfig;
   };
 };
 
@@ -93,9 +101,14 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
     leverage: 30,
     allowMultiplePerKey: false,
     perPatternEnabled: { BB_UP_SHORT: true, BB_LOW_LONG: true },
-    perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
+    // Default HF asset list — DOT and UNI disabled per 2026-05-25 analysis:
+    // yesterday DOT 44% WR / −$36, UNI 68% WR / −$26 (both worst in window).
+    // Operator can re-enable in the HF config UI if regime changes.
+    perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, a !== "DOTUSDT" && a !== "UNIUSDT"])),
     martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
     slPct: 0,
+    perAssetLeverage: { ...PER_ASSET_MAX_LEV },
+    qualityFilter: { ...DEFAULT_HF_QUALITY_FILTER },
   },
   slPctSmc: 0,
 };
@@ -118,6 +131,8 @@ export function loadBinanceConfig(stateDir: string): BinanceConfig {
         ...(parsed.hf ?? {}),
         perAssetEnabled: { ...DEFAULT_BINANCE_CONFIG.hf.perAssetEnabled, ...(parsed.hf?.perAssetEnabled ?? {}) },
         perPatternEnabled: { ...DEFAULT_BINANCE_CONFIG.hf.perPatternEnabled, ...(parsed.hf?.perPatternEnabled ?? {}) },
+        perAssetLeverage: { ...DEFAULT_BINANCE_CONFIG.hf.perAssetLeverage, ...(parsed.hf?.perAssetLeverage ?? {}) },
+        qualityFilter: { ...DEFAULT_BINANCE_CONFIG.hf.qualityFilter, ...(parsed.hf?.qualityFilter ?? {}) },
       },
     };
   } catch {

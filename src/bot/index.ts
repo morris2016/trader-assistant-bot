@@ -1608,6 +1608,8 @@ async function main() {
             ...(patch.hf ?? {}),
             perAssetEnabled: { ...binanceConfig.hf.perAssetEnabled, ...(patch.hf?.perAssetEnabled ?? {}) },
             perPatternEnabled: { ...binanceConfig.hf.perPatternEnabled, ...(patch.hf?.perPatternEnabled ?? {}) },
+            perAssetLeverage: { ...binanceConfig.hf.perAssetLeverage, ...(patch.hf?.perAssetLeverage ?? {}) },
+            qualityFilter: { ...binanceConfig.hf.qualityFilter, ...(patch.hf?.qualityFilter ?? {}) },
           },
         };
         await saveBinanceConfig(cfg.stateDir, binanceConfig);
@@ -1717,6 +1719,8 @@ async function main() {
             ...(patch.hf ?? {}),
             perAssetEnabled: { ...paperConfig.hf.perAssetEnabled, ...(patch.hf?.perAssetEnabled ?? {}) },
             perPatternEnabled: { ...paperConfig.hf.perPatternEnabled, ...(patch.hf?.perPatternEnabled ?? {}) },
+            perAssetLeverage: { ...paperConfig.hf.perAssetLeverage, ...(patch.hf?.perAssetLeverage ?? {}) },
+            qualityFilter: { ...paperConfig.hf.qualityFilter, ...(patch.hf?.qualityFilter ?? {}) },
           },
         };
         // User explicitly touched risk-rules via UI — mark so the one-time

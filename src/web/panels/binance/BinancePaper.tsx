@@ -425,16 +425,27 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [smcSlPct, setSmcSlPct] = useState(String((config as any).slPctSmc ?? 0));
   const [hfSlPct, setHfSlPct] = useState(String((config.hf as any).slPct ?? 0));
 
-  // Risk rules (Elder/Williams/Vantage/Kaufman)
+  // Risk rules — safety nets only (edge filters htfTrend/ER/volumeMult removed
+  // 2026-05-25 after factor mining showed they hurt P&L).
   const rr = config.riskRules ?? { enabled: false };
   const [riskEnabled, setRiskEnabled] = useState(!!rr.enabled);
   const [maxConcurrent, setMaxConcurrent] = useState(String(rr.maxConcurrentPositions ?? 3));
   const [maxPerBucket, setMaxPerBucket] = useState(String(rr.maxPositionsPerBucket ?? 1));
   const [monthlyLossPct, setMonthlyLossPct] = useState(String(((rr.monthlyLossCircuitBreakerPct ?? 0.06) * 100).toFixed(1)));
-  const [volumeMult, setVolumeMult] = useState(String(rr.volumeMinMultOfSma ?? 1.2));
-  const [htfTrendMode, setHtfTrendMode] = useState<"off" | "hfOnly" | "all">((rr as any).htfTrendFilter ?? "hfOnly");
-  const [erMin, setErMin] = useState(String((rr as any).efficiencyRatioMin ?? 0.3));
   const [perTradeRiskPct, setPerTradeRiskPct] = useState(String((((rr as any).perTradeRiskPctOfEquity ?? 0.02) * 100).toFixed(1)));
+
+  // HF quality filter — validated 2026-05-25 (199K trades, 27/27 months profitable filtered)
+  const qf = (config.hf as any).qualityFilter ?? { enabled: false };
+  const [qfEnabled, setQfEnabled] = useState(!!qf.enabled);
+  const [qfHours, setQfHours] = useState<string>((qf.hoursUtc ?? [12,13,14,15,16,17,18,19,20,21,22]).join(","));
+  const [qfBbPctile, setQfBbPctile] = useState(String(((qf.minBbWidthPercentile ?? 0.5) * 100).toFixed(0)));
+  const [qfVolPctile, setQfVolPctile] = useState(String(((qf.minVolumePercentile ?? 0.5) * 100).toFixed(0)));
+
+  // Per-asset HF leverage — defaults to each symbol's Binance max
+  const initialPerAssetLev: Record<string, number> = (config.hf as any).perAssetLeverage ?? {};
+  const [perAssetLev, setPerAssetLev] = useState<Record<string, string>>(
+    Object.fromEntries(Object.keys(config.hf.perAssetEnabled).map(a => [a, String(initialPerAssetLev[a] ?? config.hf.leverage)]))
+  );
 
   const [walletInput, setWalletInput] = useState(String(paperWallet.toFixed(2)));
 
@@ -468,6 +479,14 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           perAssetEnabled: hfAssets,
           martingale: { mode: hfMartMode, multiplier: Number(hfMartMult) || 2, maxLevels: Number(hfMartCap) || 3 },
           slPct: Number(hfSlPct) || 0,
+          perAssetLeverage: Object.fromEntries(Object.entries(perAssetLev).map(([k, v]) => [k, Number(v) || config.hf.leverage])),
+          qualityFilter: {
+            enabled: qfEnabled,
+            hoursUtc: qfHours.split(",").map(s => +s.trim()).filter(n => Number.isFinite(n) && n >= 0 && n <= 23),
+            minBbWidthPercentile: (Number(qfBbPctile) || 50) / 100,
+            minVolumePercentile: (Number(qfVolPctile) || 50) / 100,
+            rollingWindowBars: 200,
+          },
         },
         slPctSmc: Number(smcSlPct) || 0,
         riskRules: {
@@ -475,9 +494,6 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           maxConcurrentPositions: Number(maxConcurrent) || 3,
           maxPositionsPerBucket: Number(maxPerBucket) || 1,
           monthlyLossCircuitBreakerPct: (Number(monthlyLossPct) || 6) / 100,
-          volumeMinMultOfSma: Number(volumeMult) || 1.2,
-          htfTrendFilter: htfTrendMode,
-          efficiencyRatioMin: Number(erMin) || 0.3,
           perTradeRiskPctOfEquity: (Number(perTradeRiskPct) || 2) / 100,
         },
       });
@@ -641,18 +657,70 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
               </span>
             </label>
           </div>
+
+          {/* HF quality filter (validated 2026-05-25 on 199K trades) */}
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #1e2842" }}>
+            <div style={{ marginBottom: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={qfEnabled} onChange={(e) => setQfEnabled(e.target.checked)} />
+                <strong>HF quality filter</strong>
+                <span className="muted" style={{ fontSize: 12 }}>— validated +$1.43/trade vs +$0.32 baseline (29-month, 199K trades)</span>
+              </label>
+            </div>
+            <div className="grid grid-3" style={{ gap: 16 }}>
+              <label>
+                <div className="muted" style={{ marginBottom: 4 }} title="Comma-separated UTC hours when entries are allowed. Default [12-22] = NY morning + afternoon. Yesterday's worst hour was 6h UTC (Asian midday low-liquidity).">
+                  Allowed hours (UTC)
+                </div>
+                <input value={qfHours} onChange={(e) => setQfHours(e.target.value)} className="input" disabled={!qfEnabled} />
+              </label>
+              <label>
+                <div className="muted" style={{ marginBottom: 4 }} title="Require current bbWidth in top X% of last 200 15m bars. Higher = wider bands = better edge (BB-revert needs vol). Default 50.">
+                  bbWidth top % (rolling 200 bars)
+                </div>
+                <input value={qfBbPctile} onChange={(e) => setQfBbPctile(e.target.value)} className="input" disabled={!qfEnabled} />
+              </label>
+              <label>
+                <div className="muted" style={{ marginBottom: 4 }} title="Require current bar's volume in top X% of last 200 bars. Activity proxy — quiet markets fade harder. Default 50.">
+                  volume top % (rolling 200 bars)
+                </div>
+                <input value={qfVolPctile} onChange={(e) => setQfVolPctile(e.target.value)} className="input" disabled={!qfEnabled} />
+              </label>
+            </div>
+          </div>
+
+          {/* Per-asset HF leverage table */}
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #1e2842" }}>
+            <div className="muted" style={{ marginBottom: 8 }}>
+              <strong>Per-asset HF leverage</strong> — default to each symbol's Binance max. BTC/ETH = 125×, alts = 75×, LDO/AAVE/UNI/POL = 50×.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
+              {sortedAssets.map((a) => (
+                <label key={a} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <span className="mono" style={{ width: 60 }}>{a.replace("USDT", "")}</span>
+                  <input
+                    value={perAssetLev[a] ?? ""}
+                    onChange={(e) => setPerAssetLev({ ...perAssetLev, [a]: e.target.value })}
+                    className="input"
+                    style={{ width: 60 }}
+                  />
+                  <span className="muted">×</span>
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* ── Risk rules (Elder / Williams / Vantage / Kaufman) ── */}
+      {/* ── Risk rules (safety nets only — edge filters removed 2026-05-25) ── */}
       <div className="section">
         <div className="section-header">
-          <div className="section-title">Risk rules</div>
+          <div className="section-title">Risk rules (safety nets)</div>
           <div className="section-sub">
-            Distilled from 6 trading-book survey (2026-05-24): Elder's 6% monthly cap,
-            Vantage's correlation cluster cap (max 1 trade per BTC/SOL_L1/DEFI/ALT_L1/MEME bucket),
-            max concurrent positions, Williams' VSA volume confirmation.
-            Default OFF on live; ON in paper to validate impact on the same signal stream.
+            Caps and circuit-breakers only — edge filters (HTF trend / Efficiency Ratio /
+            volume × SMA) were removed 2026-05-25 after factor mining showed they
+            reduced P&L. The HF quality filter above replaces all three.
+            Default OFF; enable individual caps as protection against tail events.
           </div>
         </div>
         <div className="card card-padded">
@@ -678,28 +746,6 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
                 Monthly loss circuit breaker (%)
               </div>
               <input value={monthlyLossPct} onChange={(e) => setMonthlyLossPct(e.target.value)} className="input" disabled={!riskEnabled} />
-            </label>
-            <label>
-              <div className="muted" style={{ marginBottom: 4 }} title="Williams VSA: entry bar's volume must be ≥ this × SMA(volume, 20). 1.2 = modest confirmation; 1.5 = strict.">
-                Volume × SMA(20) min mult
-              </div>
-              <input value={volumeMult} onChange={(e) => setVolumeMult(e.target.value)} className="input" disabled={!riskEnabled} />
-            </label>
-            <label>
-              <div className="muted" style={{ marginBottom: 4 }} title="Elder's Triple Screen: HTF trend (1h EMA50) vetoes counter-trend entries. hfOnly = applies only to BB_* (HF) entries; all = applies to SMC too.">
-                HTF trend filter
-              </div>
-              <select value={htfTrendMode} onChange={(e) => setHtfTrendMode(e.target.value as any)} className="input" disabled={!riskEnabled}>
-                <option value="off">off</option>
-                <option value="hfOnly">hfOnly (HF only)</option>
-                <option value="all">all (SMC + HF)</option>
-              </select>
-            </label>
-            <label>
-              <div className="muted" style={{ marginBottom: 4 }} title="Kaufman's Efficiency Ratio on entry TF, period 10. ER ≥ this means trending market (good for OB/BoS). Default 0.3 separates trend from chop.">
-                Efficiency Ratio min (for SMC trend entries)
-              </div>
-              <input value={erMin} onChange={(e) => setErMin(e.target.value)} className="input" disabled={!riskEnabled} />
             </label>
             <label>
               <div className="muted" style={{ marginBottom: 4 }} title="Elder's 2% rule: refuse any trade whose worst-case loss (1×ATR stop × stake × leverage) would exceed X% of current equity. Default 2%; tighten to 1% for sub-$100 accounts.">
