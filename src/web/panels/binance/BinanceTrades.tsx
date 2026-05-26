@@ -9,7 +9,9 @@
 import React, { useEffect, useState } from "react";
 import { api, fmtEatTime, fmtEatDateTime } from "../../api";
 
-const HF_PATTERNS = new Set(["BB_UP_SHORT", "BB_LOW_LONG"]);
+// Live + legacy HF pattern names (legacy BB_* kept so old closed trades still
+// classify as HF in the trades log).
+const HF_PATTERNS = new Set(["M1", "M2", "M3", "M4", "M5", "BB_UP_SHORT", "BB_LOW_LONG"]);
 function isHf(p: string): boolean { return HF_PATTERNS.has(p); }
 
 function binanceUrl(symbol: string, testnet: boolean): string {

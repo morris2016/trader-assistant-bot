@@ -50,20 +50,22 @@ export type BinanceConfig = {
    *  off so existing live behavior is unchanged; enable per-gate after paper
    *  validation. See src/main/engine/risk-rules.ts for each rule's source. */
   riskRules: RiskRulesConfig;
-  /** HF (15m) strategy stack — BB_UP_SHORT + BB_LOW_LONG. Runs alongside
-   *  the 1h SMC patterns but on its own timeframe with its own sizing. */
+  /** HF (15m) strategy stack — M1..M5 (mined 2026-05-26). Runs alongside
+   *  the 1h SMC patterns but on its own timeframe with its own sizing.
+   *  Each rule combines a 15m z-score with a 1h trend filter; stake is
+   *  modulated by a per-rule strength quintile (HF_STAKE_MULTS in engine). */
   hf: {
     /** Master enable for the HF 15m loop. */
     enabled: boolean;
-    /** $ stake per HF trade — typically much smaller than 1h stake. */
+    /** Base $ stake per HF trade (before strength multiplier from engine). */
     stake: number;
-    /** Leverage for HF trades (separate from main `leverage`). */
+    /** Default leverage for HF trades (per-asset override via perAssetLeverage). */
     leverage: number;
     /** Allow multiple concurrent trades on the same (asset × pattern × side)?
      *  False = the engine skips a new signal if one is already open. */
     allowMultiplePerKey: boolean;
-    /** Per-pattern enable map. */
-    perPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
+    /** Per-pattern enable map (M5 default OFF — weakest CV survivor). */
+    perPatternEnabled: { M1: boolean; M2: boolean; M3: boolean; M4: boolean; M5: boolean };
     /** Per-asset enable map (defaults to all 15 USDT-perps on). */
     perAssetEnabled: Record<string, boolean>;
     /** Independent anti-martingale ladder for the HF stack (separate from
@@ -100,7 +102,7 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
     stake: 1,
     leverage: 30,
     allowMultiplePerKey: false,
-    perPatternEnabled: { BB_UP_SHORT: true, BB_LOW_LONG: true },
+    perPatternEnabled: { M1: true, M2: true, M3: true, M4: true, M5: false },
     // Default HF asset list — DOT and UNI disabled per 2026-05-25 analysis:
     // yesterday DOT 44% WR / −$36, UNI 68% WR / −$26 (both worst in window).
     // Operator can re-enable in the HF config UI if regime changes.
@@ -118,7 +120,14 @@ export function loadBinanceConfig(stateDir: string): BinanceConfig {
   if (!existsSync(file)) return { ...DEFAULT_BINANCE_CONFIG };
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<BinanceConfig>;
-    // Merge with defaults so newly-added knobs get a value automatically
+    // Migration: legacy configs have hf.perPatternEnabled = { BB_UP_SHORT, BB_LOW_LONG }.
+    // Those keys are no longer valid (engine fires M1..M5 instead). Drop legacy keys
+    // entirely and fall through to DEFAULT_BINANCE_CONFIG.hf.perPatternEnabled.
+    const legacyHfPP = parsed.hf?.perPatternEnabled as any;
+    const hasLegacyBB = legacyHfPP && ("BB_UP_SHORT" in legacyHfPP || "BB_LOW_LONG" in legacyHfPP);
+    const migratedHfPP = hasLegacyBB
+      ? { ...DEFAULT_BINANCE_CONFIG.hf.perPatternEnabled }
+      : { ...DEFAULT_BINANCE_CONFIG.hf.perPatternEnabled, ...(parsed.hf?.perPatternEnabled ?? {}) };
     return {
       ...DEFAULT_BINANCE_CONFIG,
       ...parsed,
@@ -130,7 +139,7 @@ export function loadBinanceConfig(stateDir: string): BinanceConfig {
         ...DEFAULT_BINANCE_CONFIG.hf,
         ...(parsed.hf ?? {}),
         perAssetEnabled: { ...DEFAULT_BINANCE_CONFIG.hf.perAssetEnabled, ...(parsed.hf?.perAssetEnabled ?? {}) },
-        perPatternEnabled: { ...DEFAULT_BINANCE_CONFIG.hf.perPatternEnabled, ...(parsed.hf?.perPatternEnabled ?? {}) },
+        perPatternEnabled: migratedHfPP,
         perAssetLeverage: { ...DEFAULT_BINANCE_CONFIG.hf.perAssetLeverage, ...(parsed.hf?.perAssetLeverage ?? {}) },
         qualityFilter: { ...DEFAULT_BINANCE_CONFIG.hf.qualityFilter, ...(parsed.hf?.qualityFilter ?? {}) },
       },

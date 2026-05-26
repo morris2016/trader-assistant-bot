@@ -61,7 +61,7 @@ export function BinancePositionsPanel() {
   if (!bs) return <div className="empty-state">Loading…</div>;
   if (!bs.hasCreds) return <div className="banner banner-warn">No Binance credentials. Go to Settings.</div>;
 
-  // Filter to 1h SMC patterns only — HF (BB_UP_SHORT / BB_LOW_LONG) goes on the HF tab
+  // Filter to 1h SMC patterns only — HF (M1..M5, plus legacy BB_*) goes on the HF tab
   const open = ((bs.state?.open ?? []) as any[]).filter((t) => isSmc(t.pattern));
   const testnet = !!bs.testnet;
   const totalUpnl = open.reduce((s, t) => {

@@ -1,13 +1,23 @@
 // Paper trading panel — runs the SAME signal detector and trade lifecycle as
 // the live engine, but with no real exchange calls. Two sub-views: SMC (1h
-// OB/BoS) and HF (15m BB). Independent stake / leverage / asset / pattern
-// configuration, separate state, fictional starting wallet.
+// OB/BoS) and HF (15m mined rules M1..M5). Independent stake / leverage /
+// asset / pattern configuration, separate state, fictional starting wallet.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, type BinanceConfig, fmtEatTime, fmtEatDateTime, eatToday, eatDateOf } from "../../api";
 
 const SMC_PATTERNS = new Set(["OB_BULL", "OB_BEAR", "BOS_UP"]);
-const HF_PATTERNS = new Set(["BB_UP_SHORT", "BB_LOW_LONG"]);
+const HF_PATTERNS_LIST = ["M1", "M2", "M3", "M4", "M5"] as const;
+type HfPattern = (typeof HF_PATTERNS_LIST)[number];
+const HF_PATTERN_DESC: Record<HfPattern, string> = {
+  M1: "Buy deep dip in 1h uptrend",
+  M2: "Short reverts in 4h downtrend",
+  M3: "Fade rally in weak 4h downtrend",
+  M4: "Fade rally when 1h trend down",
+  M5: "Fade extended bounce in 4h downtrend",
+};
+// Include both live and legacy patterns so historical paper trades still classify as HF.
+const HF_PATTERNS = new Set<string>([...HF_PATTERNS_LIST, "BB_UP_SHORT", "BB_LOW_LONG"]);
 function isSmc(p: string): boolean { return SMC_PATTERNS.has(p); }
 function isHf(p: string): boolean { return HF_PATTERNS.has(p); }
 
@@ -281,8 +291,8 @@ function PaperHfSection({ paper, config, refresh }: { paper: any; config: Binanc
             </span>
           </div>
           <div className="section-sub">
-            15m BB_UP_SHORT + BB_LOW_LONG. HF stack {config.hf.enabled ? <b style={{ color: "#5fd4a4" }}>ENABLED</b> : <span style={{ color: "#d4655f" }}>DISABLED</span>} in paper config.
-            Stake ${config.hf.stake} × {config.hf.leverage}×.
+            15m mined rules M1..M5 (3-window CV-validated 2026-05-26). HF stack {config.hf.enabled ? <b style={{ color: "#5fd4a4" }}>ENABLED</b> : <span style={{ color: "#d4655f" }}>DISABLED</span>} in paper config.
+            Base stake ${config.hf.stake} × strength-quintile multiplier (0.75–1.5×).
           </div>
         </div>
         {cancelErr && <div className="banner banner-warn" style={{ marginBottom: 8 }}>{cancelErr}</div>}
@@ -621,13 +631,16 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
             <div></div>
           </div>
           <div style={{ marginTop: 16 }}>
-            <div className="muted" style={{ marginBottom: 6 }}>Patterns</div>
-            {(["BB_UP_SHORT", "BB_LOW_LONG"] as const).map((p) => (
-              <label key={p} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 16 }}>
-                <input type="checkbox" checked={hfPatterns[p]} onChange={(e) => setHfPatterns({ ...hfPatterns, [p]: e.target.checked })} />
-                <span className="mono">{p}</span>
-              </label>
-            ))}
+            <div className="muted" style={{ marginBottom: 6 }}>Mined HF rules (M1..M5)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {HF_PATTERNS_LIST.map((p) => (
+                <label key={p} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <input type="checkbox" checked={(hfPatterns as any)[p] ?? false} onChange={(e) => setHfPatterns({ ...hfPatterns, [p]: e.target.checked })} />
+                  <span className="mono" style={{ width: 28 }}>{p}</span>
+                  <span className="muted">— {HF_PATTERN_DESC[p]}</span>
+                </label>
+              ))}
+            </div>
           </div>
           <div style={{ marginTop: 16 }}>
             <div className="muted" style={{ marginBottom: 6 }}>

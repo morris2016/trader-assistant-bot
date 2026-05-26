@@ -1,14 +1,22 @@
-// Binance HF (15m BB) — dedicated panel for the BB_UP_SHORT + BB_LOW_LONG
-// stack. Shows open HF positions with per-row Cancel, config knobs,
+// Binance HF (15m mined rules M1..M5) — dedicated panel for the mined-rule
+// HF stack. Shows open HF positions with per-row Cancel, config knobs,
 // equity curve, and filtered HF-only logs.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, type BinanceConfig, type LogEntry, fmtEatTime, eatToday, eatDateOf, isoToEatHms } from "../../api";
 
-const HF_PATTERNS = ["BB_UP_SHORT", "BB_LOW_LONG"] as const;
+const HF_PATTERNS = ["M1", "M2", "M3", "M4", "M5"] as const;
 type HfPattern = (typeof HF_PATTERNS)[number];
-
-function isHf(p: string): boolean { return p === "BB_UP_SHORT" || p === "BB_LOW_LONG"; }
+const HF_PATTERN_DESC: Record<HfPattern, string> = {
+  M1: "Buy deep dip in 1h uptrend",
+  M2: "Short reverts in 4h downtrend",
+  M3: "Fade rally in weak 4h downtrend",
+  M4: "Fade rally when 1h trend down",
+  M5: "Fade extended bounce in 4h downtrend",
+};
+// Legacy BB names still appear in closed trades and historical logs — treat them as HF too.
+const LEGACY_HF_PATTERNS = new Set(["BB_UP_SHORT", "BB_LOW_LONG"]);
+function isHf(p: string): boolean { return (HF_PATTERNS as readonly string[]).includes(p) || LEGACY_HF_PATTERNS.has(p); }
 
 const BINANCE_MAX_LEV: Record<string, number> = {
   BTCUSDT: 125, ETHUSDT: 125,
@@ -47,7 +55,7 @@ export function BinanceHFPanel() {
   const [leverage, setLeverage] = useState("30");
   const [enabled, setEnabled] = useState(false);
   const [allowMultiple, setAllowMultiple] = useState(false);
-  const [perPattern, setPerPattern] = useState<{ BB_UP_SHORT: boolean; BB_LOW_LONG: boolean }>({ BB_UP_SHORT: true, BB_LOW_LONG: true });
+  const [perPattern, setPerPattern] = useState<Record<HfPattern, boolean>>({ M1: true, M2: true, M3: true, M4: true, M5: false });
   const [perAssetEnabled, setPerAssetEnabled] = useState<Record<string, boolean>>({});
   // HF Paroli (anti-mart) — independent ladder from SMC
   const [hfMartMode, setHfMartMode] = useState<"off" | "anti">("off");
@@ -85,9 +93,9 @@ export function BinanceHFPanel() {
         const filtered = r.logs.filter((e) => {
           const m = e.msg ?? "";
           if (/\bHF\b/.test(m)) return true;
-          if (/BB_UP_SHORT|BB_LOW_LONG/.test(m)) return true;
+          if (/\bM[1-5]\b|BB_UP_SHORT|BB_LOW_LONG/.test(m)) return true;
           const pat = (e as any).pattern;
-          if (pat === "BB_UP_SHORT" || pat === "BB_LOW_LONG") return true;
+          if (pat && (isHf(pat))) return true;
           return false;
         });
         setLogs(filtered);
@@ -519,13 +527,16 @@ export function BinanceHFPanel() {
             <div></div>
           </div>
           <div style={{ marginTop: 16 }}>
-            <div className="muted" style={{ marginBottom: 6 }}>Patterns</div>
-            {HF_PATTERNS.map((p) => (
-              <label key={p} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 16 }}>
-                <input type="checkbox" checked={perPattern[p]} onChange={(e) => setPerPattern({ ...perPattern, [p]: e.target.checked })} />
-                <span className="mono">{p}</span>
-              </label>
-            ))}
+            <div className="muted" style={{ marginBottom: 6 }}>Mined HF rules (M1..M5)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {HF_PATTERNS.map((p) => (
+                <label key={p} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <input type="checkbox" checked={perPattern[p]} onChange={(e) => setPerPattern({ ...perPattern, [p]: e.target.checked })} />
+                  <span className="mono" style={{ width: 28 }}>{p}</span>
+                  <span className="muted">— {HF_PATTERN_DESC[p]}</span>
+                </label>
+              ))}
+            </div>
           </div>
           <div style={{ marginTop: 16 }}>
             <div className="muted" style={{ marginBottom: 6 }}>Assets ({Object.values(perAssetEnabled).filter(Boolean).length} of {Object.keys(perAssetEnabled).length} enabled)</div>

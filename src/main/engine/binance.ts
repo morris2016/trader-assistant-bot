@@ -22,9 +22,15 @@ import { evaluateRiskGate, evaluateHfQualityFilter, DEFAULT_RISK_RULES, DEFAULT_
 
 export type BinanceTradeSide = "LONG" | "SHORT";
 
-export type BinancePattern = "OB_BULL" | "OB_BEAR" | "BOS_UP" | "BB_UP_SHORT" | "BB_LOW_LONG";
-export const HF_PATTERNS: ReadonlySet<BinancePattern> = new Set(["BB_UP_SHORT", "BB_LOW_LONG"]);
+// SMC 1h patterns: OB_BULL, OB_BEAR, BOS_UP.
+// HF 15m patterns: M1..M5 (mined 2026-05-26, 3-window CV-validated). BB_UP_SHORT and
+// BB_LOW_LONG are LEGACY — kept in the type union only so persisted state from
+// older bot versions still loads. They are NEVER fired by the live engine.
+export type BinancePattern = "OB_BULL" | "OB_BEAR" | "BOS_UP" | "BB_UP_SHORT" | "BB_LOW_LONG" | "M1" | "M2" | "M3" | "M4" | "M5";
+export const HF_PATTERNS: ReadonlySet<BinancePattern> = new Set(["M1", "M2", "M3", "M4", "M5"]);
 export function isHfPattern(p: BinancePattern): boolean { return HF_PATTERNS.has(p); }
+export const HF_RULE_IDS = ["M1", "M2", "M3", "M4", "M5"] as const;
+export type HfRuleId = (typeof HF_RULE_IDS)[number];
 
 export type BinanceTrade = {
   id: string;
@@ -105,42 +111,130 @@ const SMA_PERIOD = 50;
 const KLINE_HISTORY = 500;  // ~21 days of 1h bars — gives swing-detection + SMA50 + pending OBs from past 3 weeks
 const STRUCTURE_OB_MAX_AGE = 50; // bars — pending OB zones older than this get pruned
 
-// ─── HF 15m strategy constants (BB_UP_SHORT + BB_LOW_LONG) ─────────────
-// Validated 2026-05-22 — see project_trader_assistant_hf_cost_calibration memory.
-// Costs and trail params identical to the 1h SMC stack; only the timeframe
-// and detector differ.
-const HF_BB_PERIOD = 20;
-const HF_BB_K = 2.0;
-const HF_KLINE_HISTORY = 200; // 15m bars — ~50h of context, plenty for BB(20) + SMA(50)
+// ─── HF 15m strategy constants (M1..M5 mined rules) ────────────────────
+// Validated 2026-05-26: factor-mining over 47,775 signals × 37 months → 5
+// rules survive 3-window CV at TRAIN-locked breakpoints. See scripts/hf-screen
+// for the derivation pipeline. Each rule = (factor-quintile combo on 15m
+// + 1h trend filter) → SHORT or LONG, with strength-bucketed dynamic stake.
+const HF_KLINE_HISTORY = 200;       // 15m bars retained per asset (~50h)
+const HF_KLINE_HISTORY_1H = 200;    // 1h bars retained for HTF factors
 
-/** Compute Bollinger Bands at index i. Returns null until enough history. */
-function computeBB(bars: Kline[], i: number, period: number, k: number): { mid: number; upper: number; lower: number } | null {
-  if (i < period - 1) return null;
-  let sum = 0, sq = 0;
-  for (let j = i - period + 1; j <= i; j++) {
-    sum += bars[j].close;
-    sq += bars[j].close ** 2;
+// TRAIN-derived quintile breakpoints. Computed once on signals fired in the
+// TRAIN window (2025-05-26 → 2025-12-31) and frozen. Apply to ALL bars.
+//   q0 = value < breaks[0],  q4 = value ≥ breaks[3].
+const TRAIN_QUINTILES = {
+  z50:  [-1.28493, -0.44737, 0.48367, 1.27882],
+  z100: [-1.28510, -0.46865, 0.46281, 1.28837],
+  htf1hTrend: [0, 0, 1, 1],          // binary: q2 = below 1h EMA50, q4 = above
+  htf4hRet:   [-0.02351, -0.00589, 0.00614, 0.02206],
+};
+
+// Per-rule strength quintile breakpoints (also TRAIN-derived).
+const STRENGTH_BREAKS: Record<HfRuleId, number[]> = {
+  M1: [0.098081, 0.206674, 0.369093, 0.648186],
+  M2: [0.023435, 0.050112, 0.088686, 0.147909],
+  M3: [0.113817, 0.205593, 0.319585, 0.480758],
+  M4: [0.088573, 0.210573, 0.364843, 0.640640],
+  M5: [0.209156, 0.360243, 0.544899, 0.888320],
+};
+
+// Per-rule stake MULTIPLIERS by strength quintile (q0..q4). undefined = skip.
+// Mean-revert-in-trend rules (M1/M3/M4) reward stronger signals; extreme-fade
+// rules (M2/M5) get worse at extremes so we cap or skip the top end.
+const HF_STAKE_MULTS: Record<HfRuleId, Array<number | undefined>> = {
+  M1: [undefined, undefined, 1.0, 1.25, 1.5],
+  M2: [1.25, 1.25, 1.25, 1.25, undefined],
+  M3: [undefined, undefined, 1.0, 1.25, 1.5],
+  M4: [undefined, undefined, 1.0, 1.25, 1.5],
+  M5: [1.0, 1.0, undefined, undefined, undefined],
+};
+
+function quintile(v: number, breaks: number[]): number {
+  let q = 0; for (const t of breaks) if (v >= t) q++; return q;
+}
+function zscore(closes: number[], n: number, i: number): number | null {
+  if (i < n - 1) return null;
+  let s = 0; for (let j = i - n + 1; j <= i; j++) s += closes[j];
+  const m = s / n;
+  let v = 0; for (let j = i - n + 1; j <= i; j++) v += (closes[j] - m) ** 2;
+  const sd = Math.sqrt(v / n);
+  return sd === 0 ? 0 : (closes[i] - m) / sd;
+}
+function emaAt(closes: number[], n: number, i: number): number {
+  if (i < n - 1) return NaN;
+  const k = 2 / (n + 1);
+  let e = closes[i - n + 1];
+  for (let j = i - n + 2; j <= i; j++) e = closes[j] * k + e * (1 - k);
+  return e;
+}
+function alignTo1hIndex(bars1h: Kline[], epoch15m: number): number {
+  const target = Math.floor(epoch15m / 3600) * 3600;
+  let lo = 0, hi = bars1h.length - 1, found = -1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (bars1h[m].epoch === target) { found = m; break; }
+    if (bars1h[m].epoch < target) { found = m; lo = m + 1; } else hi = m - 1;
   }
-  const mid = sum / period;
-  const sd = Math.sqrt(Math.max(0, sq / period - mid * mid));
-  return { mid, upper: mid + k * sd, lower: mid - k * sd };
+  return found;
 }
 
-/** HF detector: scans the latest 15m bar for BB band-touch reversal. */
-function detectHfSignals(bars: Kline[], i: number): Signal[] {
+/** HF detector v2: evaluates 5 mined rules at the latest 15m bar.
+ *  Each rule needs 15m closes (for z50/z100) and the aligned 1h bar
+ *  (for htf1hTrend / htf4hRet). Returns signals with strength quintile
+ *  and stake multiplier attached. */
+function detectMinedSignals(bars15m: Kline[], bars1h: Kline[], i: number): Signal[] {
   const out: Signal[] = [];
-  const a = computeATR(bars, i);
+  const a = computeATR(bars15m, i);
   if (!isFinite(a) || a <= 0) return out;
-  const bb = computeBB(bars, i, HF_BB_PERIOD, HF_BB_K);
-  if (!bb) return out;
-  const b = bars[i];
-  // BB_UP_SHORT: bar high pierced upper band, but closed back below = mean-reversion short
-  if (b.high >= bb.upper && b.close < bb.upper) {
-    out.push({ pattern: "BB_UP_SHORT", side: "SHORT", entryPrice: b.close, atrEntry: a });
+  const closes15 = bars15m.map(b => b.close);
+  const z50 = zscore(closes15, 50, i);
+  const z100 = zscore(closes15, 100, i);
+  if (z50 === null || z100 === null) return out;
+  const i1h = alignTo1hIndex(bars1h, bars15m[i].epoch);
+  if (i1h < 50) return out;
+  const closes1h = bars1h.slice(0, i1h + 1).map(b => b.close);
+  const ema50_1h = emaAt(closes1h, 50, i1h);
+  if (!isFinite(ema50_1h)) return out;
+  const htf1hTrend = bars1h[i1h].close > ema50_1h ? 1 : 0;
+  const ref1h = bars1h[Math.max(0, i1h - 16)];
+  const htf4hRet = (bars1h[i1h].close - ref1h.close) / ref1h.close;
+
+  const refPrice = bars15m[i].close;
+  const Q = TRAIN_QUINTILES;
+  // M1 — LONG: 1h trend up + z100 deep dip (q0)
+  if (quintile(htf1hTrend, Q.htf1hTrend) === 4 && quintile(z100, Q.z100) === 0) {
+    const strength = Math.max(0, -1.29 - z100) + Math.max(0, htf4hRet) * 10;
+    const qstr = quintile(strength, STRENGTH_BREAKS.M1);
+    const mult = HF_STAKE_MULTS.M1[qstr];
+    if (mult !== undefined) out.push({ pattern: "M1", side: "LONG", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
   }
-  // BB_LOW_LONG: symmetric — bar low pierced lower band, closed back above
-  if (b.low <= bb.lower && b.close > bb.lower) {
-    out.push({ pattern: "BB_LOW_LONG", side: "LONG", entryPrice: b.close, atrEntry: a });
+  // M2 — SHORT: strong 4h downtrend (q0) + z100 mid (q2)
+  if (quintile(htf4hRet, Q.htf4hRet) === 0 && quintile(z100, Q.z100) === 2) {
+    const strength = Math.max(0, -0.0235 - htf4hRet) * 10;
+    const qstr = quintile(strength, STRENGTH_BREAKS.M2);
+    const mult = HF_STAKE_MULTS.M2[qstr];
+    if (mult !== undefined) out.push({ pattern: "M2", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
+  }
+  // M3 — SHORT: weak 4h downtrend (q1) + z100 slight rally (q3)
+  if (quintile(htf4hRet, Q.htf4hRet) === 1 && quintile(z100, Q.z100) === 3) {
+    const strength = Math.max(0, z100 - 0.46) + Math.max(0, -0.0059 - htf4hRet) * 10;
+    const qstr = quintile(strength, STRENGTH_BREAKS.M3);
+    const mult = HF_STAKE_MULTS.M3[qstr];
+    if (mult !== undefined) out.push({ pattern: "M3", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
+  }
+  // M4 — SHORT: 1h trend down (q2) + z100 extreme rally (q4)
+  if (quintile(htf1hTrend, Q.htf1hTrend) === 2 && quintile(z100, Q.z100) === 4) {
+    const strength = Math.max(0, z100 - 1.29);
+    const qstr = quintile(strength, STRENGTH_BREAKS.M4);
+    const mult = HF_STAKE_MULTS.M4[qstr];
+    if (mult !== undefined) out.push({ pattern: "M4", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
+  }
+  // M5 — SHORT: strong 4h downtrend (q0) + z50 extreme rally (q4)
+  if (quintile(htf4hRet, Q.htf4hRet) === 0 && quintile(z50, Q.z50) === 4) {
+    const strength = Math.max(0, z50 - 1.28) + Math.max(0, -0.0235 - htf4hRet) * 10;
+    const qstr = quintile(strength, STRENGTH_BREAKS.M5);
+    const mult = HF_STAKE_MULTS.M5[qstr];
+    if (mult !== undefined) out.push({ pattern: "M5", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
   }
   return out;
 }
@@ -188,7 +282,17 @@ function fmtPrice(price: number, precision: number): string {
   return price.toFixed(Math.max(0, precision));
 }
 
-type Signal = { pattern: BinanceTrade["pattern"]; side: BinanceTradeSide; entryPrice: number; atrEntry: number };
+type Signal = {
+  pattern: BinanceTrade["pattern"];
+  side: BinanceTradeSide;
+  entryPrice: number;
+  atrEntry: number;
+  /** Mined HF signals only: strength score (raw), strength quintile (0..4),
+   *  and stake multiplier per HF_STAKE_MULTS. SMC signals leave these unset. */
+  strength?: number;
+  qstr?: number;
+  stakeMult?: number;
+};
 
 /** Cached "active" structure per asset — built during warmup replay, updated
  *  per bar in live mode. Lets the engine fire on OB zones that formed before
@@ -428,7 +532,8 @@ export class BinanceEngine extends EventEmitter {
   private hfStake = 1;
   private hfLeverage = 30;
   private hfAllowMultiplePerKey = false;
-  private hfPerPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean } = { BB_UP_SHORT: true, BB_LOW_LONG: true };
+  // M5 default OFF (extreme-fade rules invert at strength extremes — weakest contributor in 37-mo CV).
+  private hfPerPatternEnabled: Record<HfRuleId, boolean> = { M1: true, M2: true, M3: true, M4: true, M5: false };
   private hfPerAssetEnabled: Record<string, boolean> = {};
   /** Separate rolling 15m kline buffer — keyed by asset. Populated lazily on
    *  first HF tick after enabling, so disabling HF doesn't waste bandwidth. */
@@ -698,7 +803,7 @@ export class BinanceEngine extends EventEmitter {
       stake?: number;
       leverage?: number;
       allowMultiplePerKey?: boolean;
-      perPatternEnabled?: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
+      perPatternEnabled?: Record<HfRuleId, boolean>;
       perAssetEnabled?: Record<string, boolean>;
       martingale?: { mode: "off" | "anti"; multiplier: number; maxLevels: number };
       slPct?: number;
@@ -1072,58 +1177,35 @@ export class BinanceEngine extends EventEmitter {
 
   private async checkHfSignalsFor(sym: string): Promise<number> {
     const buf = this.bars15m.get(sym);
-    if (!buf || buf.length < Math.max(HF_BB_PERIOD, ATR_PERIOD) + 5) return 0;
+    const bars1h = this.bars.get(sym);
+    if (!buf || buf.length < 105 || !bars1h || bars1h.length < 50) return 0;
     const i = buf.length - 1;
-    const sigs = detectHfSignals(buf, i);
+    const sigs = detectMinedSignals(buf, bars1h, i);
     if (sigs.length === 0) return 0;
-    this.emit("info", `HF signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side}`).join(", ")}`, {
-      asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side, entryPrice: s.entryPrice })),
+    this.emit("info", `HF signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side}(q${s.qstr ?? "?"}×${s.stakeMult?.toFixed(2) ?? "1.0"})`).join(", ")}`, {
+      asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side, entryPrice: s.entryPrice, strength: s.strength, qstr: s.qstr, stakeMult: s.stakeMult })),
     });
-
-    // Compute current-bar context for the quality filter.
-    // bbWidth = (upper - lower) / mid; volume = current bar's volume.
-    // Build percentile series from the last N bars (excluding current).
-    const window = this.hfQualityFilter.rollingWindowBars ?? 200;
-    const startIdx = Math.max(0, i - window);
-    const recentBars = buf.slice(startIdx, i);  // exclude current bar from baseline
-    const bbCur = computeBB(buf, i, HF_BB_PERIOD, HF_BB_K);
-    const currentBbWidth = bbCur ? (bbCur.upper - bbCur.lower) / bbCur.mid : 0;
-    const recentBbWidths: number[] = [];
-    for (let j = startIdx; j < i; j++) {
-      const bb = computeBB(buf, j, HF_BB_PERIOD, HF_BB_K);
-      if (bb && bb.mid > 0) recentBbWidths.push((bb.upper - bb.lower) / bb.mid);
-    }
-    const currentVolume = buf[i].volume;
-    const recentVolumes = recentBars.map(b => b.volume);
-    const hourUtc = new Date(buf[i].epoch * 1000).getUTCHours();
 
     let opened = 0;
     for (const s of sigs) {
-      if (this.hfPerPatternEnabled[s.pattern as "BB_UP_SHORT" | "BB_LOW_LONG"] === false) {
-        this.emit("info", `HF skip ${sym} ${s.pattern}: pattern disabled`, { asset: sym, pattern: s.pattern });
+      const rid = s.pattern as HfRuleId;
+      if (this.hfPerPatternEnabled[rid] === false) {
+        this.emit("info", `HF skip ${sym} ${rid}: pattern disabled`, { asset: sym, pattern: rid });
         continue;
       }
       if (!this.hfAllowMultiplePerKey) {
         const dup = this.open.find((t) => t.asset === sym && t.pattern === s.pattern && t.side === s.side);
         if (dup) {
-          this.emit("info", `HF skip ${sym} ${s.pattern}/${s.side}: already open (allowMultiplePerKey=false)`, { asset: sym, pattern: s.pattern });
+          this.emit("info", `HF skip ${sym} ${rid}/${s.side}: already open (allowMultiplePerKey=false)`, { asset: sym, pattern: rid });
           continue;
         }
       }
-      // Quality filter gate — validated 2026-05-25 on 199K trades.
-      const qf = evaluateHfQualityFilter({
-        config: this.hfQualityFilter,
-        hourUtc, currentBbWidth, currentVolume, recentBbWidths, recentVolumes,
-      });
-      if (!qf.ok) {
-        this.emit("info", `HF skip ${sym} ${s.pattern}/${s.side}: ${qf.reason}`, { asset: sym, pattern: s.pattern, side: s.side, reason: qf.reason });
-        continue;
-      }
-      // HF stake/leverage are independent of the 1h SMC sizing. Per-asset
-      // leverage override picks the right value per symbol's exchange cap.
-      const stake = Math.min(this.hfStake, this.perTradeMaxStake);
-      if (stake < 0.5) { // Binance min-notional floor is $5 — at lev 30× that's ~$0.17 stake; use 0.50 as practical min
-        this.emit("info", `HF skip ${sym} ${s.pattern}: stake $${stake} below $0.50 floor`, { asset: sym });
+      // Dynamic stake = base × strength-quintile multiplier (from HF_STAKE_MULTS).
+      // The detector already filtered out skip-quintiles, so stakeMult is always defined.
+      const mult = s.stakeMult ?? 1.0;
+      const stake = Math.min(this.hfStake * mult, this.perTradeMaxStake);
+      if (stake < 0.5) {
+        this.emit("info", `HF skip ${sym} ${rid}: stake $${stake.toFixed(2)} below $0.50 floor`, { asset: sym });
         continue;
       }
       const effectiveLev = this.hfPerAssetLeverage[sym] ?? this.hfLeverage;

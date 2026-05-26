@@ -16,6 +16,12 @@ state/
 # Binance 1m kline cache (large, regeneratable via fetch-binance-history.ts)
 kline-cache/
 
+# HF-screen Stage-1 bucket result dumps — 20-110 MB each (include full
+# tradesData arrays), regeneratable by re-running scripts/hf-screen/bucket-*.ts.
+# Small summary JSONs in same dir are kept (factor-mine-cv.json drives
+# engine constants; stage2-cv.json + monthly-* are reference reports).
+scripts/hf-screen/results/bucket-*.json
+
 # IDE
 .idea/
 .vscode/

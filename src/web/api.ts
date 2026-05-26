@@ -487,7 +487,7 @@ export type BinanceHfConfig = {
   stake: number;
   leverage: number;
   allowMultiplePerKey: boolean;
-  perPatternEnabled: { BB_UP_SHORT: boolean; BB_LOW_LONG: boolean };
+  perPatternEnabled: { M1: boolean; M2: boolean; M3: boolean; M4: boolean; M5: boolean };
   perAssetEnabled: Record<string, boolean>;
 };
 
