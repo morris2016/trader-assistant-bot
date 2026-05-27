@@ -960,7 +960,16 @@ export class BinanceEngine extends EventEmitter {
         });
         if (!this.paperMode) {
           await this.client.setMarginType(sym, "ISOLATED").catch(() => undefined);
-          await this.client.setLeverage(sym, this.leverage).catch((e) => this.emit("error", e as Error));
+          // Per-asset max leverage. Binance USDT-M Futures rejects values
+          // above each symbol's tier-0 cap (BTC/ETH=125×, alts=75×, low-caps=50×).
+          // Using uniform this.leverage=100 caused boot-time -4028 rejections
+          // for every alt with max<100. Prefer the user's per-asset override
+          // (hf.perAssetLeverage), then clamp to PER_ASSET_MAX_LEV, then fall
+          // back to this.leverage if neither is set.
+          const maxLev = PER_ASSET_MAX_LEV[sym] ?? this.leverage;
+          const userLev = this.hfPerAssetLeverage[sym] ?? this.leverage;
+          const effectiveBootLev = Math.min(userLev, maxLev);
+          await this.client.setLeverage(sym, effectiveBootLev).catch((e) => this.emit("error", e as Error));
         }
       } catch (e) {
         this.emit("error", e as Error);
@@ -1326,6 +1335,23 @@ export class BinanceEngine extends EventEmitter {
         // No exchange call, no commission yet (charged on close).
         resp = { orderId: 0, clientOrderId: cid, avgPrice: String(refPrice), executedQty: String(qty), status: "FILLED" };
       } else {
+        // Sync exchange leverage to the trade's effectiveLeverage BEFORE
+        // placing the order — otherwise we get -2019 "Margin is insufficient"
+        // when engine-side sizing (e.g., $20 stake × 75× = $1500 notional)
+        // exceeds what Binance allows under the symbol's currently-set
+        // leverage. Boot-time setLeverage only runs once per warmup, so
+        // any operator change (or our own change for a different stack)
+        // would otherwise stick until the next boot.
+        // Clamp to the symbol's tier-0 max so we never resend the rejected
+        // value that caused the -4028 boot errors.
+        const maxLev = PER_ASSET_MAX_LEV[sym] ?? effectiveLeverage;
+        const lev = Math.min(effectiveLeverage, maxLev);
+        if (lev !== effectiveLeverage) {
+          this.emit("info", `clamp lev ${sym}: requested ${effectiveLeverage}× → ${lev}× (per-asset max)`, {
+            asset: sym, requested: effectiveLeverage, applied: lev,
+          });
+        }
+        await this.client.setLeverage(sym, lev).catch((e) => this.emit("error", e as Error));
         resp = await this.client.placeMarketOrder({
           symbol: sym, side: orderSide as any, quantity: Number(fmtQty(qty, f.quantityPrecision)),
           positionSide: positionSide as any, clientOrderId: cid,
