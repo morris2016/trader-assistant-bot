@@ -865,8 +865,15 @@ export class BinanceEngine extends EventEmitter {
       if (opts.hf.qualityFilter) this.hfQualityFilter = opts.hf.qualityFilter;
       // Immediate proof-of-life log when operator flips HF on/off at runtime.
       if (!wasEnabled && this.hfEnabled) {
-        this.emit("info", `HF stack ENABLED at runtime: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
-          stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
+        const stakeDesc = this.hfStakeMode === "percent"
+          ? `${(this.hfStakePct * 100).toFixed(1)}% of wallet`
+          : `$${this.hfStake}`;
+        const enabledRules = Object.entries(this.hfPerPatternEnabled).filter(([, on]) => on).map(([r]) => r).join(",");
+        this.emit("info", `HF stack ENABLED at runtime: M1..M5 mined rules (${enabledRules}) · stake ${stakeDesc} × ${this.hfLeverage}× · exitMode=${this.hfExitMode} · tp=${this.hfTpAtr}×ATR sl=${this.hfSlAtr}×ATR · filter=${this.hfUseStrengthFilter ? "ON" : "OFF"}`, {
+          stake: this.hfStake, stakeMode: this.hfStakeMode, stakePct: this.hfStakePct,
+          leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
+          exitMode: this.hfExitMode, tpAtr: this.hfTpAtr, slAtr: this.hfSlAtr,
+          useStrengthFilter: this.hfUseStrengthFilter, enabledRules,
         });
         // Don't wait for the next 30s tick — kick a warmup pass right now so
         // the Logs panel shows activity within a second of the Save click.
@@ -978,9 +985,18 @@ export class BinanceEngine extends EventEmitter {
       setTimeout(() => this.refreshLiveEquity(), 5_000);
       setInterval(() => this.refreshLiveEquity(), 300_000);
     }
-    if (this.hfEnabled) this.emit("info", `HF stack enabled: stake $${this.hfStake} × ${this.hfLeverage}× on 15m BB patterns`, {
-      stake: this.hfStake, leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
-    });
+    if (this.hfEnabled) {
+      const stakeDesc = this.hfStakeMode === "percent"
+        ? `${(this.hfStakePct * 100).toFixed(1)}% of wallet`
+        : `$${this.hfStake}`;
+      const enabledRules = Object.entries(this.hfPerPatternEnabled).filter(([, on]) => on).map(([r]) => r).join(",");
+      this.emit("info", `HF stack enabled: M1..M5 mined rules (${enabledRules}) · stake ${stakeDesc} × ${this.hfLeverage}× · exitMode=${this.hfExitMode} · tp=${this.hfTpAtr}×ATR sl=${this.hfSlAtr}×ATR · filter=${this.hfUseStrengthFilter ? "ON" : "OFF"}`, {
+        stake: this.hfStake, stakeMode: this.hfStakeMode, stakePct: this.hfStakePct,
+        leverage: this.hfLeverage, allowMultiplePerKey: this.hfAllowMultiplePerKey,
+        exitMode: this.hfExitMode, tpAtr: this.hfTpAtr, slAtr: this.hfSlAtr,
+        useStrengthFilter: this.hfUseStrengthFilter, enabledRules,
+      });
+    }
     this.emit("stateChanged");
   }
 
