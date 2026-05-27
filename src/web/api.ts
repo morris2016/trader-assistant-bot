@@ -485,6 +485,8 @@ export const api = {
 export type BinanceHfConfig = {
   enabled: boolean;
   stake: number;
+  stakeMode?: "fixed" | "percent";
+  stakePct?: number;
   leverage: number;
   allowMultiplePerKey: boolean;
   perPatternEnabled: { M1: boolean; M2: boolean; M3: boolean; M4: boolean; M5: boolean };

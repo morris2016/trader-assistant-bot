@@ -425,6 +425,8 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
 
   const [hfEnabled, setHfEnabled] = useState(config.hf.enabled);
   const [hfStake, setHfStake] = useState(String(config.hf.stake));
+  const [hfStakeMode, setHfStakeMode] = useState<"fixed" | "percent">((config.hf as any).stakeMode ?? "fixed");
+  const [hfStakePct, setHfStakePct] = useState((((config.hf as any).stakePct ?? 0.02) * 100).toFixed(1));
   const [hfLev, setHfLev] = useState(String(config.hf.leverage));
   const [hfPatterns, setHfPatterns] = useState(config.hf.perPatternEnabled);
   const [hfAssets, setHfAssets] = useState(config.hf.perAssetEnabled);
@@ -491,6 +493,8 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
         hf: {
           enabled: hfEnabled,
           stake: Number(hfStake) || 1,
+          stakeMode: hfStakeMode,
+          stakePct: (Number(hfStakePct) || 2.0) / 100,
           leverage: Number(hfLev) || 30,
           allowMultiplePerKey: config.hf.allowMultiplePerKey,
           perPatternEnabled: hfPatterns,
@@ -623,9 +627,28 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
               <span><strong>HF stack enabled</strong></span>
             </label>
           </div>
+          <div style={{ marginBottom: 8 }}>
+            <div className="muted" style={{ marginBottom: 4 }}>Stake mode</div>
+            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <input type="radio" name="hfStakeMode" checked={hfStakeMode === "fixed"} onChange={() => setHfStakeMode("fixed")} />
+                <span>Fixed $</span>
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <input type="radio" name="hfStakeMode" checked={hfStakeMode === "percent"} onChange={() => setHfStakeMode("percent")} />
+                <span>% of wallet (auto-scales — recommended)</span>
+              </label>
+            </div>
+          </div>
           <div className="grid grid-3" style={{ gap: 16 }}>
-            <label><div className="muted" style={{ marginBottom: 4 }}>Stake $</div>
-              <input value={hfStake} onChange={(e) => setHfStake(e.target.value)} className="input" /></label>
+            {hfStakeMode === "fixed" ? (
+              <label><div className="muted" style={{ marginBottom: 4 }}>Stake $ (fixed)</div>
+                <input value={hfStake} onChange={(e) => setHfStake(e.target.value)} className="input" /></label>
+            ) : (
+              <label title="Each trade stakes this % of current wallet equity. 2% recommended.">
+                <div className="muted" style={{ marginBottom: 4 }}>Stake % of wallet</div>
+                <input value={hfStakePct} onChange={(e) => setHfStakePct(e.target.value)} className="input" placeholder="2.0" /></label>
+            )}
             <label><div className="muted" style={{ marginBottom: 4 }}>Leverage ×</div>
               <input value={hfLev} onChange={(e) => setHfLev(e.target.value)} className="input" /></label>
             <div></div>

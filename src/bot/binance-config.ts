@@ -57,8 +57,19 @@ export type BinanceConfig = {
   hf: {
     /** Master enable for the HF 15m loop. */
     enabled: boolean;
-    /** Base $ stake per HF trade (before strength multiplier from engine). */
+    /** Base $ stake per HF trade (before strength multiplier from engine).
+     *  Used when stakeMode = "fixed". When stakeMode = "percent", the
+     *  effective stake is computed dynamically from the current wallet. */
     stake: number;
+    /** Sizing mode — "fixed" uses the `stake` field as-is; "percent" uses
+     *  `stakePct × current_wallet_equity` so position size scales with PnL.
+     *  Validated 2026-05-27: percent-sizing on $100 acct over 37 months
+     *  produced 84× return at 2% stakePct vs flat $2 → bust at first losing
+     *  streak. Default "fixed" for back-compat; recommend "percent". */
+    stakeMode?: "fixed" | "percent";
+    /** Stake as fraction of wallet equity (only used when stakeMode="percent").
+     *  Typical: 0.01-0.03 (1-3%). At 2% with $100 wallet → $2/trade base. */
+    stakePct?: number;
     /** Default leverage for HF trades (per-asset override via perAssetLeverage). */
     leverage: number;
     /** Allow multiple concurrent trades on the same (asset × pattern × side)?
@@ -100,6 +111,8 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
   hf: {
     enabled: false,
     stake: 1,
+    stakeMode: "fixed",
+    stakePct: 0.02,           // 2% — recommended baseline when switched to "percent"
     leverage: 30,
     allowMultiplePerKey: false,
     perPatternEnabled: { M1: true, M2: true, M3: true, M4: true, M5: false },

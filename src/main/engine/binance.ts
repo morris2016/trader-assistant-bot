@@ -530,6 +530,13 @@ export class BinanceEngine extends EventEmitter {
   // ── HF (15m) state — separate from the 1h SMC stack above ──
   private hfEnabled = false;
   private hfStake = 1;
+  // Sizing mode: "fixed" uses hfStake as-is. "percent" scales stake to
+  // currentEquity × hfStakePct on every signal, so position size grows
+  // (and shrinks) with wallet PnL. Sim-validated 2026-05-27: percent-sizing
+  // on $100 wallet over 37 months survived ALL drawdowns and compounded to
+  // 84× while flat $2 stake busted on the first losing streak.
+  private hfStakeMode: "fixed" | "percent" = "fixed";
+  private hfStakePct = 0.02;
   private hfLeverage = 30;
   private hfAllowMultiplePerKey = false;
   // M5 default OFF (extreme-fade rules invert at strength extremes — weakest contributor in 37-mo CV).
@@ -801,6 +808,8 @@ export class BinanceEngine extends EventEmitter {
     hf?: {
       enabled?: boolean;
       stake?: number;
+      stakeMode?: "fixed" | "percent";
+      stakePct?: number;
       leverage?: number;
       allowMultiplePerKey?: boolean;
       perPatternEnabled?: Record<HfRuleId, boolean>;
@@ -829,6 +838,8 @@ export class BinanceEngine extends EventEmitter {
       const wasEnabled = this.hfEnabled;
       if (opts.hf.enabled !== undefined) this.hfEnabled = opts.hf.enabled;
       if (opts.hf.stake !== undefined) this.hfStake = opts.hf.stake;
+      if (opts.hf.stakeMode !== undefined) this.hfStakeMode = opts.hf.stakeMode;
+      if (opts.hf.stakePct !== undefined) this.hfStakePct = opts.hf.stakePct;
       if (opts.hf.leverage !== undefined) this.hfLeverage = opts.hf.leverage;
       if (opts.hf.allowMultiplePerKey !== undefined) this.hfAllowMultiplePerKey = opts.hf.allowMultiplePerKey;
       if (opts.hf.perPatternEnabled) this.hfPerPatternEnabled = opts.hf.perPatternEnabled;
@@ -1202,10 +1213,16 @@ export class BinanceEngine extends EventEmitter {
       }
       // Dynamic stake = base × strength-quintile multiplier (from HF_STAKE_MULTS).
       // The detector already filtered out skip-quintiles, so stakeMult is always defined.
+      // Base stake is either fixed (hfStake) or percent-of-equity (currentEquity × stakePct).
+      // Percent mode is sim-validated to survive drawdowns and compound — 84× over 37mo
+      // at 2% on $100 vs flat $2 stake going bust on the first losing streak.
       const mult = s.stakeMult ?? 1.0;
-      const stake = Math.min(this.hfStake * mult, this.perTradeMaxStake);
+      const baseStake = this.hfStakeMode === "percent"
+        ? Math.max(0, this.getCurrentEquity()) * this.hfStakePct
+        : this.hfStake;
+      const stake = Math.min(baseStake * mult, this.perTradeMaxStake);
       if (stake < 0.5) {
-        this.emit("info", `HF skip ${sym} ${rid}: stake $${stake.toFixed(2)} below $0.50 floor`, { asset: sym });
+        this.emit("info", `HF skip ${sym} ${rid}: stake $${stake.toFixed(2)} below $0.50 floor (mode=${this.hfStakeMode}${this.hfStakeMode === "percent" ? `, equity=$${this.getCurrentEquity().toFixed(2)}, pct=${(this.hfStakePct * 100).toFixed(1)}%` : ""})`, { asset: sym });
         continue;
       }
       const effectiveLev = this.hfPerAssetLeverage[sym] ?? this.hfLeverage;

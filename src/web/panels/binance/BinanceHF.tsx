@@ -52,6 +52,8 @@ export function BinanceHFPanel() {
 
   // Editable form fields (mirror config but as strings for type-friendliness)
   const [stake, setStake] = useState("1");
+  const [stakeMode, setStakeMode] = useState<"fixed" | "percent">("fixed");
+  const [stakePct, setStakePct] = useState("2.0");  // entered as % (UI), stored as 0.02 (config)
   const [leverage, setLeverage] = useState("30");
   const [enabled, setEnabled] = useState(false);
   const [allowMultiple, setAllowMultiple] = useState(false);
@@ -142,6 +144,8 @@ export function BinanceHFPanel() {
   useEffect(() => {
     if (config && !synced) {
       setStake(String(config.hf.stake));
+      setStakeMode((config.hf as any).stakeMode ?? "fixed");
+      setStakePct((((config.hf as any).stakePct ?? 0.02) * 100).toFixed(1));
       setLeverage(String(config.hf.leverage));
       setEnabled(!!config.hf.enabled);
       setAllowMultiple(!!config.hf.allowMultiplePerKey);
@@ -208,6 +212,8 @@ export function BinanceHFPanel() {
         hf: {
           enabled,
           stake: Number(stake) || 1,
+          stakeMode,
+          stakePct: (Number(stakePct) || 2.0) / 100,
           leverage: Number(leverage) || 30,
           allowMultiplePerKey: allowMultiple,
           perPatternEnabled: perPattern,
@@ -515,11 +521,31 @@ export function BinanceHFPanel() {
             </label>
             <div></div>
           </div>
-          <div className="grid grid-3" style={{ gap: 16, marginTop: 12 }}>
-            <label>
-              <div className="muted" style={{ marginBottom: 4 }}>Stake $</div>
-              <input value={stake} onChange={(e) => setStake(e.target.value)} className="input" />
-            </label>
+          <div style={{ marginTop: 12, marginBottom: 8 }}>
+            <div className="muted" style={{ marginBottom: 4 }}>Stake mode</div>
+            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <input type="radio" name="stakeMode" checked={stakeMode === "fixed"} onChange={() => setStakeMode("fixed")} />
+                <span>Fixed $</span>
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <input type="radio" name="stakeMode" checked={stakeMode === "percent"} onChange={() => setStakeMode("percent")} />
+                <span>% of wallet (auto-scales with PnL — recommended)</span>
+              </label>
+            </div>
+          </div>
+          <div className="grid grid-3" style={{ gap: 16 }}>
+            {stakeMode === "fixed" ? (
+              <label>
+                <div className="muted" style={{ marginBottom: 4 }}>Stake $ (fixed)</div>
+                <input value={stake} onChange={(e) => setStake(e.target.value)} className="input" />
+              </label>
+            ) : (
+              <label title="Each trade stakes this % of current wallet equity. 2% recommended.">
+                <div className="muted" style={{ marginBottom: 4 }}>Stake % of wallet</div>
+                <input value={stakePct} onChange={(e) => setStakePct(e.target.value)} className="input" placeholder="2.0" />
+              </label>
+            )}
             <label>
               <div className="muted" style={{ marginBottom: 4 }}>Leverage ×</div>
               <input value={leverage} onChange={(e) => setLeverage(e.target.value)} className="input" />
