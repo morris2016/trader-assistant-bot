@@ -59,17 +59,12 @@ export function BinanceHFPanel() {
   const [allowMultiple, setAllowMultiple] = useState(false);
   const [perPattern, setPerPattern] = useState<Record<HfPattern, boolean>>({ M1: true, M2: true, M3: true, M4: true, M5: false });
   const [perAssetEnabled, setPerAssetEnabled] = useState<Record<string, boolean>>({});
-  // HF Paroli (anti-mart) — independent ladder from SMC
-  const [hfMartMode, setHfMartMode] = useState<"off" | "anti">("off");
-  const [hfMartMult, setHfMartMult] = useState("2");
-  const [hfMartCap, setHfMartCap] = useState("3");
-  // Hard SL as % of stake (max-$-loss = stake × this/100)
-  const [hfSlPct, setHfSlPct] = useState("0");
-  // HF quality filter — validated 2026-05-25
-  const [qfEnabled, setQfEnabled] = useState(false);
-  const [qfHours, setQfHours] = useState("12,13,14,15,16,17,18,19,20,21,22");
-  const [qfBbPctile, setQfBbPctile] = useState("50");
-  const [qfVolPctile, setQfVolPctile] = useState("50");
+  // HF rule knobs — replace legacy Paroli/slPct/quality-filter (those were for
+  // BB patterns; mined rules M1..M5 are self-filtering via strength quintiles).
+  const [hfUseStrengthFilter, setHfUseStrengthFilter] = useState<boolean>(true);
+  const [hfExitMode, setHfExitMode] = useState<"trail" | "fixedRR">("trail");
+  const [hfTpAtr, setHfTpAtr] = useState("2.0");
+  const [hfSlAtr, setHfSlAtr] = useState("1.0");
   // Per-asset HF leverage
   const [perAssetLev, setPerAssetLev] = useState<Record<string, string>>({});
 
@@ -151,16 +146,10 @@ export function BinanceHFPanel() {
       setAllowMultiple(!!config.hf.allowMultiplePerKey);
       setPerPattern(config.hf.perPatternEnabled);
       setPerAssetEnabled(config.hf.perAssetEnabled);
-      const hm = (config.hf as any).martingale ?? { mode: "off", multiplier: 2, maxLevels: 3 };
-      setHfMartMode(hm.mode);
-      setHfMartMult(String(hm.multiplier));
-      setHfMartCap(String(hm.maxLevels));
-      setHfSlPct(String((config.hf as any).slPct ?? 0));
-      const qf = (config.hf as any).qualityFilter ?? { enabled: false };
-      setQfEnabled(!!qf.enabled);
-      setQfHours((qf.hoursUtc ?? [12,13,14,15,16,17,18,19,20,21,22]).join(","));
-      setQfBbPctile(String(((qf.minBbWidthPercentile ?? 0.5) * 100).toFixed(0)));
-      setQfVolPctile(String(((qf.minVolumePercentile ?? 0.5) * 100).toFixed(0)));
+      setHfUseStrengthFilter((config.hf as any).useStrengthFilter ?? true);
+      setHfExitMode(((config.hf as any).exitMode ?? "trail") as "trail" | "fixedRR");
+      setHfTpAtr(String((config.hf as any).tpAtr ?? 2.0));
+      setHfSlAtr(String((config.hf as any).slAtr ?? 1.0));
       const palv: Record<string, number> = (config.hf as any).perAssetLeverage ?? {};
       setPerAssetLev(Object.fromEntries(Object.keys(config.hf.perAssetEnabled).map(a => [a, String(palv[a] ?? config.hf.leverage)])));
       setSynced(true);
@@ -218,16 +207,11 @@ export function BinanceHFPanel() {
           allowMultiplePerKey: allowMultiple,
           perPatternEnabled: perPattern,
           perAssetEnabled,
-          martingale: { mode: hfMartMode, multiplier: Number(hfMartMult) || 2, maxLevels: Number(hfMartCap) || 3 },
-          slPct: Number(hfSlPct) || 0,
+          useStrengthFilter: hfUseStrengthFilter,
+          exitMode: hfExitMode,
+          tpAtr: Number(hfTpAtr) || 2.0,
+          slAtr: Number(hfSlAtr) || 1.0,
           perAssetLeverage: Object.fromEntries(Object.entries(perAssetLev).map(([k, v]) => [k, Number(v) || (Number(leverage) || 30)])),
-          qualityFilter: {
-            enabled: qfEnabled,
-            hoursUtc: qfHours.split(",").map(s => +s.trim()).filter(n => Number.isFinite(n) && n >= 0 && n <= 23),
-            minBbWidthPercentile: (Number(qfBbPctile) || 50) / 100,
-            minVolumePercentile: (Number(qfVolPctile) || 50) / 100,
-            rollingWindowBars: 200,
-          },
         } as any,
       });
       setSaveMsg(r.ok ? { ok: true, text: "Saved" } : { ok: false, text: r.error ?? "Save failed" });
@@ -579,57 +563,63 @@ export function BinanceHFPanel() {
               ))}
             </div>
           </div>
-          <div style={{ marginTop: 16 }}>
-            <div className="muted" style={{ marginBottom: 6 }}>HF anti-martingale (Paroli) — independent ladder from SMC</div>
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <label><input type="radio" checked={hfMartMode === "off"} onChange={() => setHfMartMode("off")} /> off</label>
-              <label><input type="radio" checked={hfMartMode === "anti"} onChange={() => setHfMartMode("anti")} /> anti (compound after wins)</label>
-              <span className="muted" style={{ marginLeft: 12 }}>×</span>
-              <input value={hfMartMult} onChange={(e) => setHfMartMult(e.target.value)} className="input" style={{ width: 60 }} />
-              <span className="muted">cap</span>
-              <input value={hfMartCap} onChange={(e) => setHfMartCap(e.target.value)} className="input" style={{ width: 60 }} />
-            </div>
-          </div>
-          <div style={{ marginTop: 16 }}>
-            <label>
-              <div className="muted" style={{ marginBottom: 4 }} title="Hard SL as % of STAKE. price-move = slPct / leverage. 0 = disabled (trail-arm only).">
-                HF SL % of stake
-              </div>
-              <input value={hfSlPct} onChange={(e) => setHfSlPct(e.target.value)} className="input" style={{ width: 120 }} />
-              <span className="muted" style={{ marginLeft: 12, fontSize: 12 }}>
-                → max loss ≈ ${(Number(stake) * Number(hfSlPct) / 100 || 0).toFixed(2)}{" "}
-                ({Number(hfSlPct) > 0 && Number(leverage) > 0 ? `${(Number(hfSlPct) / Number(leverage)).toFixed(3)}% price move` : "disabled"})
-              </span>
-            </label>
-          </div>
-
-          {/* HF quality filter — validated 2026-05-25 (199K trades) */}
+          {/* HF rule knobs — replaces legacy Paroli, slPct, and quality filter.
+              Mined rules M1..M5 are self-filtering via strength quintiles. */}
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #1e2842" }}>
-            <div style={{ marginBottom: 8 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input type="checkbox" checked={qfEnabled} onChange={(e) => setQfEnabled(e.target.checked)} />
-                <strong>HF quality filter</strong>
-                <span className="muted" style={{ fontSize: 12 }}>— validated +$1.43/trade vs +$0.32 baseline (29-month, 199K trades, 27/27 months profitable)</span>
-              </label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <strong>HF rule knobs (M1..M5)</strong>
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: "4px 10px", fontSize: 12 }}
+                title="Reset to: filter ON, exit=trail, tpAtr=2.0, slAtr=1.0"
+                onClick={() => {
+                  setHfUseStrengthFilter(true);
+                  setHfExitMode("trail");
+                  setHfTpAtr("2.0");
+                  setHfSlAtr("1.0");
+                }}
+              >
+                Reset to defaults
+              </button>
             </div>
-            <div className="grid grid-3" style={{ gap: 16 }}>
-              <label>
-                <div className="muted" style={{ marginBottom: 4 }} title="Comma-separated UTC hours when HF entries are allowed. Default [12-22] = NY morning + afternoon.">
-                  Allowed hours (UTC)
+            <div className="grid grid-2" style={{ gap: 16 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={hfUseStrengthFilter}
+                  onChange={(e) => setHfUseStrengthFilter(e.target.checked)}
+                />
+                <div>
+                  <div><strong>Use strength filter</strong></div>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    ON = only SCHEDULE-quintile signals, sized 0.75-1.5×.<br/>
+                    OFF = fire every M1..M5 hit at uniform stake.
+                  </div>
                 </div>
-                <input value={qfHours} onChange={(e) => setQfHours(e.target.value)} className="input" disabled={!qfEnabled} />
               </label>
-              <label>
-                <div className="muted" style={{ marginBottom: 4 }} title="Require current bbWidth in top X% of last 200 15m bars.">
-                  bbWidth top % (rolling 200 bars)
+              <div>
+                <div className="muted" style={{ marginBottom: 4 }}>Exit mode</div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <label>
+                    <input type="radio" name="hfExitMode" checked={hfExitMode === "trail"} onChange={() => setHfExitMode("trail")} />
+                    {" "}Trail-arm (current)
+                  </label>
+                  <label>
+                    <input type="radio" name="hfExitMode" checked={hfExitMode === "fixedRR"} onChange={() => setHfExitMode("fixedRR")} />
+                    {" "}Fixed TP/SL
+                  </label>
                 </div>
-                <input value={qfBbPctile} onChange={(e) => setQfBbPctile(e.target.value)} className="input" disabled={!qfEnabled} />
+              </div>
+            </div>
+            <div className="grid grid-2" style={{ gap: 16, marginTop: 12 }}>
+              <label title="Take-profit distance in ATRs (fixedRR mode only). 2.0 = +2×ATR favorable target.">
+                <div className="muted" style={{ marginBottom: 4 }}>TP × ATR (fixedRR only)</div>
+                <input value={hfTpAtr} onChange={(e) => setHfTpAtr(e.target.value)} className="input" placeholder="2.0" />
               </label>
-              <label>
-                <div className="muted" style={{ marginBottom: 4 }} title="Require current bar's volume in top X% of last 200 bars.">
-                  volume top % (rolling 200 bars)
-                </div>
-                <input value={qfVolPctile} onChange={(e) => setQfVolPctile(e.target.value)} className="input" disabled={!qfEnabled} />
+              <label title="Stop-loss distance in ATRs. 1.0 = 1×ATR adverse from entry.">
+                <div className="muted" style={{ marginBottom: 4 }}>SL × ATR</div>
+                <input value={hfSlAtr} onChange={(e) => setHfSlAtr(e.target.value)} className="input" placeholder="1.0" />
               </label>
             </div>
           </div>

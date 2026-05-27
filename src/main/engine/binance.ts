@@ -70,11 +70,16 @@ export type BinanceTrade = {
   /** Last time markPrice was refreshed (epoch seconds) — UI uses this
    *  to fade stale values if the polling loop stalls. */
   markUpdatedAt?: number;
-  /** Hard stop-loss price computed at openTrade from `slPct` config.
-   *  When defined, positionTick closes at market once mark crosses it.
-   *  Runs alongside (not instead of) the trail-arm exit — whichever
-   *  triggers first wins. Undefined = no hard SL (trail-arm only). */
+  /** Hard stop-loss price computed at openTrade. When defined, positionTick
+   *  closes at market once mark crosses it. For HF: derived from slAtr×ATR
+   *  when exitMode="fixedRR", or from slPct/leverage when exitMode="trail".
+   *  Runs alongside trail-arm — whichever triggers first wins. */
   slPrice?: number;
+  /** Hard take-profit price (HF fixedRR mode only). When defined, positionTick
+   *  closes at market once mark crosses it. Derived from tpAtr×ATR. */
+  tpPrice?: number;
+  /** Exit mode at trade open (frozen — doesn't change mid-trade). */
+  exitMode?: "trail" | "fixedRR";
 };
 
 export type BinanceState = {
@@ -180,9 +185,10 @@ function alignTo1hIndex(bars1h: Kline[], epoch15m: number): number {
 
 /** HF detector v2: evaluates 5 mined rules at the latest 15m bar.
  *  Each rule needs 15m closes (for z50/z100) and the aligned 1h bar
- *  (for htf1hTrend / htf4hRet). Returns signals with strength quintile
- *  and stake multiplier attached. */
-function detectMinedSignals(bars15m: Kline[], bars1h: Kline[], i: number): Signal[] {
+ *  (for htf1hTrend / htf4hRet). When useFilter=true (default), only signals
+ *  in the SCHEDULE-defined quintiles fire (with the matching stake mult).
+ *  When false, every M1..M5 hit fires at stakeMult=1.0. */
+function detectMinedSignals(bars15m: Kline[], bars1h: Kline[], i: number, useFilter = true): Signal[] {
   const out: Signal[] = [];
   const a = computeATR(bars15m, i);
   if (!isFinite(a) || a <= 0) return out;
@@ -201,41 +207,29 @@ function detectMinedSignals(bars15m: Kline[], bars1h: Kline[], i: number): Signa
 
   const refPrice = bars15m[i].close;
   const Q = TRAIN_QUINTILES;
-  // M1 — LONG: 1h trend up + z100 deep dip (q0)
-  if (quintile(htf1hTrend, Q.htf1hTrend) === 4 && quintile(z100, Q.z100) === 0) {
-    const strength = Math.max(0, -1.29 - z100) + Math.max(0, htf4hRet) * 10;
-    const qstr = quintile(strength, STRENGTH_BREAKS.M1);
-    const mult = HF_STAKE_MULTS.M1[qstr];
-    if (mult !== undefined) out.push({ pattern: "M1", side: "LONG", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
+
+  function emit(rule: HfRuleId, side: BinanceTradeSide, strength: number) {
+    if (useFilter) {
+      const qstr = quintile(strength, STRENGTH_BREAKS[rule]);
+      const mult = HF_STAKE_MULTS[rule][qstr];
+      if (mult === undefined) return;
+      out.push({ pattern: rule, side, entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
+    } else {
+      out.push({ pattern: rule, side, entryPrice: refPrice, atrEntry: a, strength, qstr: -1, stakeMult: 1.0 });
+    }
   }
-  // M2 — SHORT: strong 4h downtrend (q0) + z100 mid (q2)
-  if (quintile(htf4hRet, Q.htf4hRet) === 0 && quintile(z100, Q.z100) === 2) {
-    const strength = Math.max(0, -0.0235 - htf4hRet) * 10;
-    const qstr = quintile(strength, STRENGTH_BREAKS.M2);
-    const mult = HF_STAKE_MULTS.M2[qstr];
-    if (mult !== undefined) out.push({ pattern: "M2", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
-  }
-  // M3 — SHORT: weak 4h downtrend (q1) + z100 slight rally (q3)
-  if (quintile(htf4hRet, Q.htf4hRet) === 1 && quintile(z100, Q.z100) === 3) {
-    const strength = Math.max(0, z100 - 0.46) + Math.max(0, -0.0059 - htf4hRet) * 10;
-    const qstr = quintile(strength, STRENGTH_BREAKS.M3);
-    const mult = HF_STAKE_MULTS.M3[qstr];
-    if (mult !== undefined) out.push({ pattern: "M3", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
-  }
-  // M4 — SHORT: 1h trend down (q2) + z100 extreme rally (q4)
-  if (quintile(htf1hTrend, Q.htf1hTrend) === 2 && quintile(z100, Q.z100) === 4) {
-    const strength = Math.max(0, z100 - 1.29);
-    const qstr = quintile(strength, STRENGTH_BREAKS.M4);
-    const mult = HF_STAKE_MULTS.M4[qstr];
-    if (mult !== undefined) out.push({ pattern: "M4", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
-  }
-  // M5 — SHORT: strong 4h downtrend (q0) + z50 extreme rally (q4)
-  if (quintile(htf4hRet, Q.htf4hRet) === 0 && quintile(z50, Q.z50) === 4) {
-    const strength = Math.max(0, z50 - 1.28) + Math.max(0, -0.0235 - htf4hRet) * 10;
-    const qstr = quintile(strength, STRENGTH_BREAKS.M5);
-    const mult = HF_STAKE_MULTS.M5[qstr];
-    if (mult !== undefined) out.push({ pattern: "M5", side: "SHORT", entryPrice: refPrice, atrEntry: a, strength, qstr, stakeMult: mult });
-  }
+
+  if (quintile(htf1hTrend, Q.htf1hTrend) === 4 && quintile(z100, Q.z100) === 0)
+    emit("M1", "LONG", Math.max(0, -1.29 - z100) + Math.max(0, htf4hRet) * 10);
+  if (quintile(htf4hRet, Q.htf4hRet) === 0 && quintile(z100, Q.z100) === 2)
+    emit("M2", "SHORT", Math.max(0, -0.0235 - htf4hRet) * 10);
+  if (quintile(htf4hRet, Q.htf4hRet) === 1 && quintile(z100, Q.z100) === 3)
+    emit("M3", "SHORT", Math.max(0, z100 - 0.46) + Math.max(0, -0.0059 - htf4hRet) * 10);
+  if (quintile(htf1hTrend, Q.htf1hTrend) === 2 && quintile(z100, Q.z100) === 4)
+    emit("M4", "SHORT", Math.max(0, z100 - 1.29));
+  if (quintile(htf4hRet, Q.htf4hRet) === 0 && quintile(z50, Q.z50) === 4)
+    emit("M5", "SHORT", Math.max(0, z50 - 1.28) + Math.max(0, -0.0235 - htf4hRet) * 10);
+
   return out;
 }
 
@@ -537,6 +531,15 @@ export class BinanceEngine extends EventEmitter {
   // 84× while flat $2 stake busted on the first losing streak.
   private hfStakeMode: "fixed" | "percent" = "fixed";
   private hfStakePct = 0.02;
+  // M1..M5 strength filter — true = only fire signals where SCHEDULE multiplier
+  // is defined (current shipped). False = fire every M1..M5 signal at uniform
+  // stake (37mo sim: unfiltered+fixed-2:1 = 84× winner).
+  private hfUseStrengthFilter = true;
+  // Exit mode: "trail" = current (trail-arm at +1×ATR + 0.3 retrace + hard SL).
+  // "fixedRR" = fixed TP at +hfTpAtr×ATR + SL at −hfSlAtr×ATR, no trail.
+  private hfExitMode: "trail" | "fixedRR" = "trail";
+  private hfTpAtr = 2.0;
+  private hfSlAtr = 1.0;
   private hfLeverage = 30;
   private hfAllowMultiplePerKey = false;
   // M5 default OFF (extreme-fade rules invert at strength extremes — weakest contributor in 37-mo CV).
@@ -810,6 +813,10 @@ export class BinanceEngine extends EventEmitter {
       stake?: number;
       stakeMode?: "fixed" | "percent";
       stakePct?: number;
+      useStrengthFilter?: boolean;
+      exitMode?: "trail" | "fixedRR";
+      tpAtr?: number;
+      slAtr?: number;
       leverage?: number;
       allowMultiplePerKey?: boolean;
       perPatternEnabled?: Record<HfRuleId, boolean>;
@@ -840,6 +847,10 @@ export class BinanceEngine extends EventEmitter {
       if (opts.hf.stake !== undefined) this.hfStake = opts.hf.stake;
       if (opts.hf.stakeMode !== undefined) this.hfStakeMode = opts.hf.stakeMode;
       if (opts.hf.stakePct !== undefined) this.hfStakePct = opts.hf.stakePct;
+      if (opts.hf.useStrengthFilter !== undefined) this.hfUseStrengthFilter = opts.hf.useStrengthFilter;
+      if (opts.hf.exitMode !== undefined) this.hfExitMode = opts.hf.exitMode;
+      if (opts.hf.tpAtr !== undefined) this.hfTpAtr = opts.hf.tpAtr;
+      if (opts.hf.slAtr !== undefined) this.hfSlAtr = opts.hf.slAtr;
       if (opts.hf.leverage !== undefined) this.hfLeverage = opts.hf.leverage;
       if (opts.hf.allowMultiplePerKey !== undefined) this.hfAllowMultiplePerKey = opts.hf.allowMultiplePerKey;
       if (opts.hf.perPatternEnabled) this.hfPerPatternEnabled = opts.hf.perPatternEnabled;
@@ -1191,7 +1202,7 @@ export class BinanceEngine extends EventEmitter {
     const bars1h = this.bars.get(sym);
     if (!buf || buf.length < 105 || !bars1h || bars1h.length < 50) return 0;
     const i = buf.length - 1;
-    const sigs = detectMinedSignals(buf, bars1h, i);
+    const sigs = detectMinedSignals(buf, bars1h, i, this.hfUseStrengthFilter);
     if (sigs.length === 0) return 0;
     this.emit("info", `HF signals on ${sym}: ${sigs.map(s => `${s.pattern}/${s.side}(q${s.qstr ?? "?"}×${s.stakeMult?.toFixed(2) ?? "1.0"})`).join(", ")}`, {
       asset: sym, count: sigs.length, signals: sigs.map(s => ({ pattern: s.pattern, side: s.side, entryPrice: s.entryPrice, strength: s.strength, qstr: s.qstr, stakeMult: s.stakeMult })),
@@ -1309,13 +1320,33 @@ export class BinanceEngine extends EventEmitter {
       // distance is slPct / leverage. Example: stake $50, lev 30×, slPct 50
       // → price moves 50/30 = 1.67% before SL. UI displays max-$-loss as
       // stake × slPct/100 so the user knows exactly what they're risking.
+      //
+      // HF rules: prefer ATR-based SL/TP from hfSlAtr/hfTpAtr × atrEntry.
+      // When exitMode="fixedRR", set both slPrice AND tpPrice (positionTick
+      // closes at market when either is crossed). Trail mode still uses
+      // peak-ratchet TP, just adds the ATR-based SL floor.
       const fillPrice = Number(resp.avgPrice) || refPrice;
-      const slPctStake = isHfPattern(s.pattern) ? this.hfSlPct : this.smcSlPct;
+      const isHf = isHfPattern(s.pattern);
       let slPrice: number | undefined;
-      if (slPctStake > 0 && effectiveLeverage > 0) {
-        const priceMovePct = slPctStake / effectiveLeverage;
-        const slDist = fillPrice * (priceMovePct / 100);
+      let tpPrice: number | undefined;
+      const exitMode = isHf ? this.hfExitMode : "trail";
+      if (isHf && s.atrEntry > 0) {
+        // ATR-based SL (always for HF, regardless of exit mode)
+        const slDist = this.hfSlAtr * s.atrEntry;
         slPrice = s.side === "LONG" ? fillPrice - slDist : fillPrice + slDist;
+        // Fixed TP for fixedRR mode
+        if (exitMode === "fixedRR") {
+          const tpDist = this.hfTpAtr * s.atrEntry;
+          tpPrice = s.side === "LONG" ? fillPrice + tpDist : fillPrice - tpDist;
+        }
+      } else {
+        // SMC pattern (or HF with no ATR available): legacy slPct-of-stake path
+        const slPctStake = isHf ? this.hfSlPct : this.smcSlPct;
+        if (slPctStake > 0 && effectiveLeverage > 0) {
+          const priceMovePct = slPctStake / effectiveLeverage;
+          const slDist = fillPrice * (priceMovePct / 100);
+          slPrice = s.side === "LONG" ? fillPrice - slDist : fillPrice + slDist;
+        }
       }
       const trade: BinanceTrade = {
         id: tradeId,
@@ -1334,6 +1365,8 @@ export class BinanceEngine extends EventEmitter {
         tpOrderId: null,
         status: "OPEN",
         slPrice,
+        tpPrice,
+        exitMode: isHf ? exitMode : undefined,
       };
       (trade as any).clientOrderId = cid;
       this.open.push(trade);
@@ -1556,6 +1589,43 @@ export class BinanceEngine extends EventEmitter {
         }
         return;  // don't fall through to trail logic — trade is closed
       }
+    }
+    // Hard TP trigger (HF fixedRR mode only) — symmetric to SL. Closes
+    // at market when mark crosses the fixed TP price. For "trail" mode,
+    // tpPrice is undefined and this is a no-op (trail-arm handles winners).
+    if (t.tpPrice !== undefined && t.exitMode === "fixedRR") {
+      const tpHit = t.side === "LONG" ? markPrice >= t.tpPrice : markPrice <= t.tpPrice;
+      if (tpHit) {
+        const lockKey = `close:${t.id}`;
+        if (this.busy.has(lockKey)) return;
+        this.busy.add(lockKey);
+        try {
+          const f = this.filters[t.asset];
+          const closeSide = t.side === "LONG" ? "SELL" : "BUY";
+          const positionSide = this.hedgeMode ? t.side : "BOTH";
+          this.emit("info", `TP hit ${t.asset} ${t.pattern}/${t.side}: mark=${markPrice.toFixed(5)} tp=${t.tpPrice.toFixed(5)}`, {
+            asset: t.asset, pattern: t.pattern, side: t.side, markPrice, tpPrice: t.tpPrice, entryPrice: t.entryPrice,
+          });
+          if (!this.paperMode) {
+            await this.client.placeMarketOrder({
+              symbol: t.asset, side: closeSide as any,
+              quantity: Number(fmtQty(t.qty, f?.quantityPrecision ?? 3)),
+              positionSide: positionSide as any,
+              clientOrderId: `tp-${t.id.slice(0, 8)}-${Date.now()}`,
+            });
+          }
+          await this.closeTradeFromFill(t, markPrice);
+          if (stateChanged) this.emit("stateChanged");
+        } catch (e) {
+          this.emit("error", e as Error);
+        } finally {
+          this.busy.delete(lockKey);
+        }
+        return;
+      }
+      // In fixedRR mode, skip trail-arm logic entirely — only TP and SL drive exit.
+      if (stateChanged) this.emit("stateChanged");
+      return;
     }
     // Trail trigger: once armed, check if mark price has retraced to
     // peak − trailDist. Multi-Assets accounts reject STOP_MARKET via

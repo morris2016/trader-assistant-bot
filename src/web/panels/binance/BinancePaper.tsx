@@ -435,15 +435,18 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [martMult, setMartMult] = useState(String(config.martingale.multiplier));
   const [martCap, setMartCap] = useState(String(config.martingale.maxLevels));
 
-  // HF Paroli (anti-mart) — separate from SMC mart above
-  const hfMart = (config.hf as any).martingale ?? { mode: "off", multiplier: 2, maxLevels: 3 };
-  const [hfMartMode, setHfMartMode] = useState<"off" | "anti">(hfMart.mode);
-  const [hfMartMult, setHfMartMult] = useState(String(hfMart.multiplier));
-  const [hfMartCap, setHfMartCap] = useState(String(hfMart.maxLevels));
-
-  // Percentage SL — % of stake (so max-$-loss = stake × slPct/100)
+  // SMC % SL (kept — applies to 1h SMC stack only)
   const [smcSlPct, setSmcSlPct] = useState(String((config as any).slPctSmc ?? 0));
-  const [hfSlPct, setHfSlPct] = useState(String((config.hf as any).slPct ?? 0));
+
+  // HF new knobs (replace legacy Paroli + slPct + quality filter — those don't apply to mined rules M1..M5)
+  const [hfUseStrengthFilter, setHfUseStrengthFilter] = useState<boolean>(
+    (config.hf as any).useStrengthFilter ?? true
+  );
+  const [hfExitMode, setHfExitMode] = useState<"trail" | "fixedRR">(
+    ((config.hf as any).exitMode ?? "trail") as "trail" | "fixedRR"
+  );
+  const [hfTpAtr, setHfTpAtr] = useState(String((config.hf as any).tpAtr ?? 2.0));
+  const [hfSlAtr, setHfSlAtr] = useState(String((config.hf as any).slAtr ?? 1.0));
 
   // Risk rules — safety nets only (edge filters htfTrend/ER/volumeMult removed
   // 2026-05-25 after factor mining showed they hurt P&L).
@@ -453,13 +456,6 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
   const [maxPerBucket, setMaxPerBucket] = useState(String(rr.maxPositionsPerBucket ?? 1));
   const [monthlyLossPct, setMonthlyLossPct] = useState(String(((rr.monthlyLossCircuitBreakerPct ?? 0.06) * 100).toFixed(1)));
   const [perTradeRiskPct, setPerTradeRiskPct] = useState(String((((rr as any).perTradeRiskPctOfEquity ?? 0.02) * 100).toFixed(1)));
-
-  // HF quality filter — validated 2026-05-25 (199K trades, 27/27 months profitable filtered)
-  const qf = (config.hf as any).qualityFilter ?? { enabled: false };
-  const [qfEnabled, setQfEnabled] = useState(!!qf.enabled);
-  const [qfHours, setQfHours] = useState<string>((qf.hoursUtc ?? [12,13,14,15,16,17,18,19,20,21,22]).join(","));
-  const [qfBbPctile, setQfBbPctile] = useState(String(((qf.minBbWidthPercentile ?? 0.5) * 100).toFixed(0)));
-  const [qfVolPctile, setQfVolPctile] = useState(String(((qf.minVolumePercentile ?? 0.5) * 100).toFixed(0)));
 
   // Per-asset HF leverage — defaults to each symbol's Binance max
   const initialPerAssetLev: Record<string, number> = (config.hf as any).perAssetLeverage ?? {};
@@ -495,20 +491,15 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           stake: Number(hfStake) || 1,
           stakeMode: hfStakeMode,
           stakePct: (Number(hfStakePct) || 2.0) / 100,
+          useStrengthFilter: hfUseStrengthFilter,
+          exitMode: hfExitMode,
+          tpAtr: Number(hfTpAtr) || 2.0,
+          slAtr: Number(hfSlAtr) || 1.0,
           leverage: Number(hfLev) || 30,
           allowMultiplePerKey: config.hf.allowMultiplePerKey,
           perPatternEnabled: hfPatterns,
           perAssetEnabled: hfAssets,
-          martingale: { mode: hfMartMode, multiplier: Number(hfMartMult) || 2, maxLevels: Number(hfMartCap) || 3 },
-          slPct: Number(hfSlPct) || 0,
           perAssetLeverage: Object.fromEntries(Object.entries(perAssetLev).map(([k, v]) => [k, Number(v) || config.hf.leverage])),
-          qualityFilter: {
-            enabled: qfEnabled,
-            hoursUtc: qfHours.split(",").map(s => +s.trim()).filter(n => Number.isFinite(n) && n >= 0 && n <= 23),
-            minBbWidthPercentile: (Number(qfBbPctile) || 50) / 100,
-            minVolumePercentile: (Number(qfVolPctile) || 50) / 100,
-            rollingWindowBars: 200,
-          },
         },
         slPctSmc: Number(smcSlPct) || 0,
         riskRules: {
@@ -678,57 +669,63 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
               ))}
             </div>
           </div>
-          <div style={{ marginTop: 16 }}>
-            <div className="muted" style={{ marginBottom: 6 }}>HF anti-martingale (Paroli) — independent ladder from SMC</div>
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <label><input type="radio" checked={hfMartMode === "off"} onChange={() => setHfMartMode("off")} /> off</label>
-              <label><input type="radio" checked={hfMartMode === "anti"} onChange={() => setHfMartMode("anti")} /> anti (compound after wins)</label>
-              <span className="muted" style={{ marginLeft: 12 }}>×</span>
-              <input value={hfMartMult} onChange={(e) => setHfMartMult(e.target.value)} className="input" style={{ width: 60 }} />
-              <span className="muted">cap</span>
-              <input value={hfMartCap} onChange={(e) => setHfMartCap(e.target.value)} className="input" style={{ width: 60 }} />
-            </div>
-          </div>
-          <div style={{ marginTop: 16 }}>
-            <label>
-              <div className="muted" style={{ marginBottom: 4 }} title="Hard SL as % of STAKE for HF trades. Price move = slPct / hf.leverage. 0 = disabled.">
-                HF SL % of stake (max-$-loss = stake × this/100)
-              </div>
-              <input value={hfSlPct} onChange={(e) => setHfSlPct(e.target.value)} className="input" style={{ width: 120 }} />
-              <span className="muted" style={{ marginLeft: 12, fontSize: 12 }}>
-                → max loss ≈ ${(Number(hfStake) * Number(hfSlPct) / 100 || 0).toFixed(2)}{" "}
-                ({Number(hfSlPct) > 0 && Number(hfLev) > 0 ? `${(Number(hfSlPct) / Number(hfLev)).toFixed(3)}% price move` : "disabled"})
-              </span>
-            </label>
-          </div>
-
-          {/* HF quality filter (validated 2026-05-25 on 199K trades) */}
+          {/* HF rule knobs — replaces legacy Paroli, slPct, and quality filter
+              (those were for BB patterns; mined rules M1..M5 are self-filtering). */}
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #1e2842" }}>
-            <div style={{ marginBottom: 8 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input type="checkbox" checked={qfEnabled} onChange={(e) => setQfEnabled(e.target.checked)} />
-                <strong>HF quality filter</strong>
-                <span className="muted" style={{ fontSize: 12 }}>— validated +$1.43/trade vs +$0.32 baseline (29-month, 199K trades)</span>
-              </label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <strong>HF rule knobs (M1..M5)</strong>
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: "4px 10px", fontSize: 12 }}
+                title="Reset to: filter ON, exit=trail, tpAtr=2.0, slAtr=1.0"
+                onClick={() => {
+                  setHfUseStrengthFilter(true);
+                  setHfExitMode("trail");
+                  setHfTpAtr("2.0");
+                  setHfSlAtr("1.0");
+                }}
+              >
+                Reset to defaults
+              </button>
             </div>
-            <div className="grid grid-3" style={{ gap: 16 }}>
-              <label>
-                <div className="muted" style={{ marginBottom: 4 }} title="Comma-separated UTC hours when entries are allowed. Default [12-22] = NY morning + afternoon. Yesterday's worst hour was 6h UTC (Asian midday low-liquidity).">
-                  Allowed hours (UTC)
+            <div className="grid grid-2" style={{ gap: 16 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={hfUseStrengthFilter}
+                  onChange={(e) => setHfUseStrengthFilter(e.target.checked)}
+                />
+                <div>
+                  <div><strong>Use strength filter</strong></div>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    ON = only fire SCHEDULE-defined quintiles, sized 0.75-1.5×.<br/>
+                    OFF = fire every M1..M5 hit at uniform stake.
+                  </div>
                 </div>
-                <input value={qfHours} onChange={(e) => setQfHours(e.target.value)} className="input" disabled={!qfEnabled} />
               </label>
-              <label>
-                <div className="muted" style={{ marginBottom: 4 }} title="Require current bbWidth in top X% of last 200 15m bars. Higher = wider bands = better edge (BB-revert needs vol). Default 50.">
-                  bbWidth top % (rolling 200 bars)
+              <div>
+                <div className="muted" style={{ marginBottom: 4 }}>Exit mode</div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <label>
+                    <input type="radio" name="hfExitMode" checked={hfExitMode === "trail"} onChange={() => setHfExitMode("trail")} />
+                    {" "}Trail-arm (current)
+                  </label>
+                  <label>
+                    <input type="radio" name="hfExitMode" checked={hfExitMode === "fixedRR"} onChange={() => setHfExitMode("fixedRR")} />
+                    {" "}Fixed TP/SL
+                  </label>
                 </div>
-                <input value={qfBbPctile} onChange={(e) => setQfBbPctile(e.target.value)} className="input" disabled={!qfEnabled} />
+              </div>
+            </div>
+            <div className="grid grid-2" style={{ gap: 16, marginTop: 12 }}>
+              <label title="Take-profit distance in ATRs (fixedRR mode only). 2.0 = +2×ATR favorable target.">
+                <div className="muted" style={{ marginBottom: 4 }}>TP × ATR (fixedRR only)</div>
+                <input value={hfTpAtr} onChange={(e) => setHfTpAtr(e.target.value)} className="input" placeholder="2.0" />
               </label>
-              <label>
-                <div className="muted" style={{ marginBottom: 4 }} title="Require current bar's volume in top X% of last 200 bars. Activity proxy — quiet markets fade harder. Default 50.">
-                  volume top % (rolling 200 bars)
-                </div>
-                <input value={qfVolPctile} onChange={(e) => setQfVolPctile(e.target.value)} className="input" disabled={!qfEnabled} />
+              <label title="Stop-loss distance in ATRs. 1.0 = 1×ATR adverse from entry.">
+                <div className="muted" style={{ marginBottom: 4 }}>SL × ATR</div>
+                <input value={hfSlAtr} onChange={(e) => setHfSlAtr(e.target.value)} className="input" placeholder="1.0" />
               </label>
             </div>
           </div>
@@ -781,7 +778,7 @@ function PaperConfigSection({ config, paperWallet, refresh }: { config: BinanceC
           <div className="section-sub">
             Caps and circuit-breakers only — edge filters (HTF trend / Efficiency Ratio /
             volume × SMA) were removed 2026-05-25 after factor mining showed they
-            reduced P&L. The HF quality filter above replaces all three.
+            reduced P&L. Mined HF rules (M1..M5) are self-filtering.
             Default OFF; enable individual caps as protection against tail events.
           </div>
         </div>

@@ -487,6 +487,10 @@ export type BinanceHfConfig = {
   stake: number;
   stakeMode?: "fixed" | "percent";
   stakePct?: number;
+  useStrengthFilter?: boolean;
+  exitMode?: "trail" | "fixedRR";
+  tpAtr?: number;
+  slAtr?: number;
   leverage: number;
   allowMultiplePerKey: boolean;
   perPatternEnabled: { M1: boolean; M2: boolean; M3: boolean; M4: boolean; M5: boolean };

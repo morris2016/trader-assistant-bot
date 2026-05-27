@@ -87,6 +87,20 @@ export type BinanceConfig = {
      *  but applied independently to HF entries. Price move = slPct / hf.leverage.
      *  0 = disabled. */
     slPct?: number;
+    /** Skip M1..M5 strength filter — when false, every signal fires at base
+     *  stake regardless of strength quintile (37mo sim: unfiltered + fixed
+     *  2:1 was the long-run winner). When true (default), only signals with
+     *  defined SCHEDULE quintile fire, sized by 0.75-1.5× multiplier. */
+    useStrengthFilter?: boolean;
+    /** Exit mode for HF trades:
+     *    "trail" = current behavior (trail-arm at +1×ATR + 0.3×ATR retrace + hard SL)
+     *    "fixedRR" = fixed TP at +tpAtr×ATR + SL at −slAtr×ATR (no trail)
+     *  37mo real-Binance sim: fixedRR with 2:1 RR netted 84× vs trail-arm's 45×. */
+    exitMode?: "trail" | "fixedRR";
+    /** Take-profit distance in ATRs (used when exitMode="fixedRR"). */
+    tpAtr?: number;
+    /** Stop-loss distance in ATRs (used by both exitMode variants). */
+    slAtr?: number;
     /** Per-asset HF leverage override (each symbol's exchange-max). Falls
      *  back to `leverage` field when an asset isn't in the map. Validated
      *  2026-05-25: per-asset max beats uniform 75× by ~29% per-trade edge. */
@@ -96,6 +110,21 @@ export type BinanceConfig = {
      *  27/27 months profitable vs 27/29 unfiltered at per-asset max lev. */
     qualityFilter?: HfQualityFilterConfig;
   };
+};
+
+/** Recommended HF knob defaults — used by the UI's "Reset to defaults"
+ *  button. Sourced from 37-month real-Binance sim 2026-05-27.
+ *  - Filter ON: current shipped behavior (only quintile-bucketed signals)
+ *  - Exit "trail": current shipped behavior; switch to "fixedRR" for the
+ *    37mo 84× variant
+ *  - tpAtr 2.0 / slAtr 1.0 = 2:1 risk-reward */
+export const HF_KNOB_DEFAULTS = {
+  useStrengthFilter: true,
+  exitMode: "trail" as const,
+  tpAtr: 2.0,
+  slAtr: 1.0,
+  stakeMode: "fixed" as const,
+  stakePct: 0.02,
 };
 
 export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
@@ -122,6 +151,10 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
     perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, a !== "DOTUSDT" && a !== "UNIUSDT"])),
     martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
     slPct: 0,
+    useStrengthFilter: true,    // default ON (current shipped behavior)
+    exitMode: "trail",          // default trail (current shipped behavior; switch to "fixedRR" for 2:1 RR)
+    tpAtr: 2.0,                 // 2×ATR TP (used only when exitMode="fixedRR")
+    slAtr: 1.0,                 // 1×ATR SL (used in fixedRR; trail mode uses its own SL logic)
     perAssetLeverage: { ...PER_ASSET_MAX_LEV },
     qualityFilter: { ...DEFAULT_HF_QUALITY_FILTER },
   },
