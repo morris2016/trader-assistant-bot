@@ -138,17 +138,16 @@ export const DEFAULT_BINANCE_CONFIG: BinanceConfig = {
   martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
   riskRules: { ...DEFAULT_RISK_RULES },
   hf: {
-    enabled: false,
+    enabled: true,
     stake: 1,
     stakeMode: "fixed",
     stakePct: 0.02,           // 2% — recommended baseline when switched to "percent"
     leverage: 30,
     allowMultiplePerKey: false,
-    perPatternEnabled: { M1: true, M2: true, M3: true, M4: true, M5: false },
-    // Default HF asset list — DOT and UNI disabled per 2026-05-25 analysis:
-    // yesterday DOT 44% WR / −$36, UNI 68% WR / −$26 (both worst in window).
-    // Operator can re-enable in the HF config UI if regime changes.
-    perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, a !== "DOTUSDT" && a !== "UNIUSDT"])),
+    perPatternEnabled: { M1: true, M2: true, M3: true, M4: true, M5: true },
+    // Default HF asset list — all assets ON. Operator can disable individuals
+    // in the HF config UI per regime.
+    perAssetEnabled: Object.fromEntries(BINANCE_ASSETS.map((a) => [a, true])),
     martingale: { mode: "off", multiplier: 2.0, maxLevels: 3 },
     slPct: 0,
     useStrengthFilter: true,    // default ON (current shipped behavior)
