@@ -528,7 +528,19 @@ async function main() {
   const paperConfigFile = path.join(cfg.stateDir, "paper-binance-config.json");
   let paperConfig: BinanceConfig = (() => {
     try {
-      if (existsSync(paperConfigFile)) return JSON.parse(readFileSync(paperConfigFile, "utf8")) as BinanceConfig;
+      if (existsSync(paperConfigFile)) {
+        const parsed = JSON.parse(readFileSync(paperConfigFile, "utf8")) as BinanceConfig;
+        // Migrate legacy BB_* HF keys: paper used to track BB_UP_SHORT/BB_LOW_LONG
+        // alongside the mined M1..M5 rules. The detector no longer emits BB signals,
+        // so those keys are dead-weight. Strip them so the engine's
+        // hfPerPatternEnabled map is identical to live's (which already migrates).
+        if (parsed.hf?.perPatternEnabled) {
+          const pp = parsed.hf.perPatternEnabled as any;
+          delete pp.BB_UP_SHORT;
+          delete pp.BB_LOW_LONG;
+        }
+        return parsed;
+      }
     } catch {}
     // Seed from live config — PDF-derived risk rules default OFF so paper
     // mirrors live behavior exactly (V5 baseline). The gates exist and can
@@ -1752,15 +1764,10 @@ async function main() {
     },
   });
 
-  // Auto-resume paper engine if user left it enabled before a redeploy.
-  if (paperConfig.autoStart) {
-    log.info("paper autoStart=true — resuming engine");
-    paperEngine.start()
-      .then(() => { paperRunning = true; log.info("paper engine auto-resumed"); })
-      .catch((e) => log.error(`paper auto-resume failed: ${e.message}`));
-  }
-
-  // Auto-resume Binance engine if operator left it running before a redeploy.
+  // Auto-resume Binance engine FIRST so its bar buffers seed before paper
+  // attaches as a data consumer. If paper starts before live, paper's
+  // hfSignalTick races through 30s ticks finding live.bars15m empty and
+  // never seeds its own buffer.
   // Intent is persisted via `autoStart` in binance-config.json, toggled by
   // the Start / Stop buttons. Wrapped in catch so a broken cred or API hiccup
   // doesn't crash the bot — operator can re-Start from the UI.
@@ -1770,6 +1777,18 @@ async function main() {
       .then(() => binanceEngine.start())
       .then(() => { binanceRunning = true; log.info("binance engine auto-resumed"); })
       .catch((e) => log.error(`binance auto-resume failed: ${e.message}`));
+  }
+
+  // Auto-resume paper engine after live (paper reads live's bar buffers via
+  // dataSource). 5s delay gives live's warmup loop time to populate bars15m
+  // and bars(1h) before paper's first hfSignalTick fires.
+  if (paperConfig.autoStart) {
+    log.info("paper autoStart=true — resuming engine (delayed 5s for live warmup)");
+    setTimeout(() => {
+      paperEngine.start()
+        .then(() => { paperRunning = true; log.info("paper engine auto-resumed"); })
+        .catch((e) => log.error(`paper auto-resume failed: ${e.message}`));
+    }, 5000);
   }
 
   // Build the per-(sym, gr) engine detector config by merging every strategy

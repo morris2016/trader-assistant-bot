@@ -1427,6 +1427,14 @@ export class BinanceEngine extends EventEmitter {
    *  profit (`rp`), and commission (`n`) so the displayed PnL matches what
    *  actually hits the wallet, not the gross local estimate. */
   private onUserEvent(ev: any) {
+    // Binance fires this when the listenKey expires server-side. Recreate
+    // the key and reconnect the WS — otherwise the stream stays dead until
+    // the next 30-min keep-alive tick (and that tick will also fail with
+    // -1125 until we recreate, costing more API budget).
+    if (ev?.e === "listenKeyExpired") {
+      this.client.recreateUserDataStream().catch((e) => this.emit("error", e as Error));
+      return;
+    }
     if (ev?.e !== "ORDER_TRADE_UPDATE") return;
     const o = ev.o;
     if (!o) return;

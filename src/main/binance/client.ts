@@ -367,8 +367,33 @@ export class BinanceClient extends EventEmitter {
   private startKeepAlive() {
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
     this.keepAliveTimer = setInterval(async () => {
-      try { await this.signedRequest("PUT", "/fapi/v1/listenKey"); } catch (e) { this.emit("error", e as Error); }
+      // Skip while banned — next tick will retry once ban expires.
+      if (this.isBanned()) return;
+      try {
+        await this.signedRequest("PUT", "/fapi/v1/listenKey");
+      } catch (e) {
+        const msg = (e as Error)?.message ?? "";
+        // -1125 = listenKey expired/missing server-side, or 400 = key invalid.
+        // Recreate fresh and reconnect the WS instead of looping on the dead key.
+        if (/-1125|listenKey does not exist|HTTP 400/.test(msg)) {
+          try { await this.recreateUserDataStream(); }
+          catch (re) { this.emit("error", re as Error); }
+        } else {
+          this.emit("error", e as Error);
+        }
+      }
     }, 30 * 60 * 1000); // every 30 minutes (key expires after 60)
+  }
+
+  /** Tear down the WS, ask Binance for a new listenKey, then reconnect.
+   *  Called when the keep-alive PUT discovers the key is dead, or when the
+   *  user-data stream emits a `listenKeyExpired` event. */
+  async recreateUserDataStream() {
+    if (this.ws) { try { this.ws.close(); } catch {} this.ws = null; }
+    this.listenKey = null;
+    const r = await this.signedRequest("POST", "/fapi/v1/listenKey");
+    this.listenKey = (r as any).listenKey;
+    this.connectWS();
   }
 
   async stop() {
